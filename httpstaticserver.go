@@ -28,6 +28,8 @@ import (
 
 const YAMLCONF = ".ghs.yml"
 
+const contentSecurityPolicy = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; media-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'"
+
 type ApkInfo struct {
 	PackageName  string `json:"packageName"`
 	MainActivity string `json:"mainActivity"`
@@ -112,6 +114,8 @@ func NewHTTPStaticServer(root string, noIndex bool) *HTTPStaticServer {
 }
 
 func (s *HTTPStaticServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Defense-in-depth for uploaded content and README previews.
+	w.Header().Set("Content-Security-Policy", contentSecurityPolicy)
 	s.m.ServeHTTP(w, r)
 }
 

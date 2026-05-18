@@ -88,6 +88,8 @@ var vm = new Vue({
           method: 'GET',
           success: function (res) {
             var converter = new showdown.Converter({
+              // Disable raw HTML passthrough so uploaded README.md cannot inject scripts.
+              noHTML: true,
               tables: true,
               omitExtraWLInCodeBlocks: true,
               parseImgDimensions: true,
