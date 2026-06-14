@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	openid "github.com/codeskyblue/openid-go"
+	"github.com/gorilla/mux"
 	"github.com/gorilla/sessions"
 )
 
@@ -33,8 +34,8 @@ func init() {
 	gob.Register(&M{})
 }
 
-func handleOpenID(loginUrl string, secure bool) {
-	http.HandleFunc("/-/login", func(w http.ResponseWriter, r *http.Request) {
+func handleOpenID(router *mux.Router, loginUrl string, secure bool) {
+	router.HandleFunc("/-/login", func(w http.ResponseWriter, r *http.Request) {
 		nextUrl := r.FormValue("next")
 		referer := r.Referer()
 		if nextUrl == "" && strings.Contains(referer, "://"+r.Host) {
@@ -51,9 +52,9 @@ func handleOpenID(loginUrl string, secure bool) {
 		} else {
 			log.Println("Should not got error here:", err)
 		}
-	})
+	}).Methods("GET")
 
-	http.HandleFunc("/-/openidcallback", func(w http.ResponseWriter, r *http.Request) {
+	router.HandleFunc("/-/openidcallback", func(w http.ResponseWriter, r *http.Request) {
 		id, err := openid.Verify("http://"+r.Host+r.URL.String(), discoveryCache, nonceStore)
 		if err != nil {
 			io.WriteString(w, "Authentication check failed.")
@@ -80,9 +81,9 @@ func handleOpenID(loginUrl string, secure bool) {
 			nextUrl = "/"
 		}
 		http.Redirect(w, r, nextUrl, 302)
-	})
+	}).Methods("GET")
 
-	http.HandleFunc("/-/user", func(w http.ResponseWriter, r *http.Request) {
+	router.HandleFunc("/-/user", func(w http.ResponseWriter, r *http.Request) {
 		session, err := store.Get(r, defaultSessionName)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -92,9 +93,9 @@ func handleOpenID(loginUrl string, secure bool) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		data, _ := json.Marshal(val)
 		w.Write(data)
-	})
+	}).Methods("GET")
 
-	http.HandleFunc("/-/logout", func(w http.ResponseWriter, r *http.Request) {
+	router.HandleFunc("/-/logout", func(w http.ResponseWriter, r *http.Request) {
 		session, err := store.Get(r, defaultSessionName)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -108,5 +109,5 @@ func handleOpenID(loginUrl string, secure bool) {
 			nextUrl = r.Referer()
 		}
 		http.Redirect(w, r, nextUrl, 302)
-	})
+	}).Methods("GET")
 }

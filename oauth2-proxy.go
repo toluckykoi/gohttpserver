@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+
+	"github.com/gorilla/mux"
 )
 
-func handleOauth2() {
-	http.HandleFunc("/-/user", func(w http.ResponseWriter, r *http.Request) {
+func handleOauth2(router *mux.Router) {
+	router.HandleFunc("/-/user", func(w http.ResponseWriter, r *http.Request) {
 		fullNameMap, _ := url.ParseQuery(r.Header.Get("X-Auth-Request-Fullname"))
 		var fullName string
 		for k := range fullNameMap {
@@ -23,5 +25,5 @@ func handleOauth2() {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		data, _ := json.Marshal(user)
 		w.Write(data)
-	})
+	}).Methods("GET")
 }
