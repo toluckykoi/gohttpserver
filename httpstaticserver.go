@@ -28,7 +28,7 @@ import (
 
 const YAMLCONF = ".ghs.yml"
 
-const contentSecurityPolicy = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; media-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'"
+const contentSecurityPolicy = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://www.google-analytics.com https://www.googletagmanager.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://www.google-analytics.com https://www.googletagmanager.com; font-src 'self' data:; media-src 'self'; connect-src 'self' https://www.google-analytics.com https://www.googletagmanager.com; form-action 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'"
 
 type ApkInfo struct {
 	PackageName  string `json:"packageName"`
@@ -788,7 +788,7 @@ func init() {
 	funcMap = template.FuncMap{
 		"title": strings.Title,
 		"urlhash": func(path string) string {
-			httpFile, err := Assets.Open(path)
+			httpFile, err := Assets.Open("assets/" + path)
 			if err != nil {
 				return path + "#no-such-file"
 			}

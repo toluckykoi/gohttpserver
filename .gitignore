@@ -25,6 +25,7 @@ _testmain.go
 
 
 gohttpserver
+gohttpserver.exe~
 bindata_assetfs.go
 assets_vfsdata.go
 *.un~

@@ -100,7 +100,7 @@ func parseFlags() error {
 	gcfg.Theme = "black"
 	gcfg.PlistProxy = defaultPlistProxy
 	gcfg.Auth.OpenID = defaultOpenID
-	gcfg.GoogleTrackerID = "UA-81205425-2"
+	gcfg.GoogleTrackerID = ""
 	gcfg.Title = "Go HTTP File Server"
 	gcfg.DeepPathMaxDepth = 5
 	gcfg.NoIndex = false
@@ -231,18 +231,6 @@ func main() {
 
 	hdlr = accesslog.NewLoggingHandler(hdlr, logger)
 
-	// HTTP Basic Authentication
-	switch gcfg.Auth.Type {
-	case "http":
-		hdlr = multiBasicAuth(gcfg.Auth.HTTP)(hdlr)
-	case "openid":
-		handleOpenID(gcfg.Auth.OpenID, false) // FIXME(ssx): set secure default to false
-		// case "github":
-		// 	handleOAuth2ID(gcfg.Auth.Type, gcfg.Auth.ID, gcfg.Auth.Secret) // FIXME(ssx): set secure default to false
-	case "oauth2-proxy":
-		handleOauth2()
-	}
-
 	// CORS
 	hdlr = cors(hdlr)
 
@@ -258,6 +246,29 @@ func main() {
 		mainRouter.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, gcfg.Prefix, http.StatusTemporaryRedirect)
 		})
+	}
+
+	// HTTP Basic Authentication
+	var userHandlerRegistered bool
+	switch gcfg.Auth.Type {
+	case "http":
+		hdlr = multiBasicAuth(gcfg.Auth.HTTP)(hdlr)
+	case "openid":
+		handleOpenID(router, gcfg.Auth.OpenID, false) // FIXME(ssx): set secure default to false
+		userHandlerRegistered = true
+		// case "github":
+		// 	handleOAuth2ID(router, gcfg.Auth.Type, gcfg.Auth.ID, gcfg.Auth.Secret) // FIXME(ssx): set secure default to false
+	case "oauth2-proxy":
+		handleOauth2(router)
+		userHandlerRegistered = true
+	}
+
+	// 如果没有通过认证模块注册 /-/user 路由，则添加默认实现
+	if !userHandlerRegistered {
+		router.HandleFunc("/-/user", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Write([]byte("null"))
+		}).Methods("GET")
 	}
 
 	router.PathPrefix("/-/assets/").Handler(http.StripPrefix(gcfg.Prefix+"/-/", http.FileServer(Assets)))
