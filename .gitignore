@@ -33,3 +33,4 @@ assets_vfsdata.go
 
 dist/
 .DS_Store
+frontend/node_modules/
