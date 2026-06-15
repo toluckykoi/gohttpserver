@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"errors"
 	"io"
-	"io/ioutil"
 	"net/url"
 	"path/filepath"
 	"regexp"
@@ -38,7 +37,7 @@ func parseIpaIcon(path string) (data []byte, err error) {
 		return
 	}
 	defer plreader.Close()
-	return ioutil.ReadAll(plreader)
+	return io.ReadAll(plreader)
 }
 
 func parseIPA(path string) (plinfo *plistBundle, err error) {

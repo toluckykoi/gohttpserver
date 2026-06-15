@@ -84,7 +84,19 @@ func fileExists(path string) bool {
 
 // Convert path to normal paths
 func cleanPath(path string) string {
-	return filepath.ToSlash(filepath.Clean(path))
+	// 处理特殊情况：Windows 上 // 开头的路径
+	if strings.HasPrefix(path, "//") || strings.HasPrefix(path, "\\\\") {
+		// 对于 UNC 路径，先转换为单个 / 开头
+		path = "/" + strings.TrimLeft(path, "/\\")
+	}
+	cleaned := filepath.Clean(path)
+	// 如果在 Windows 上，确保使用 / 作为分隔符
+	cleaned = filepath.ToSlash(cleaned)
+	// 再次处理，确保多个 / 开头的路径被正确处理
+	if strings.HasPrefix(cleaned, "//") {
+		cleaned = "/" + strings.TrimLeft(cleaned, "/")
+	}
+	return cleaned
 }
 
 func isFile(path string) bool {

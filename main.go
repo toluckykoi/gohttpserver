@@ -6,7 +6,6 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -81,7 +80,7 @@ func versionMessage() string {
   Built:          {{.Built}}
   Site:           {{.Site}}`))
 	buf := bytes.NewBuffer(nil)
-	t.Execute(buf, map[string]interface{}{
+	t.Execute(buf, map[string]any{
 		"Version":   VERSION,
 		"GoVersion": runtime.Version(),
 		"OSArch":    runtime.GOOS + "/" + runtime.GOARCH,
@@ -134,7 +133,7 @@ func parseFlags() error {
 		defer func() {
 			kingpin.Parse() // command line priority high than conf
 		}()
-		ymlData, err := ioutil.ReadAll(gcfg.Conf)
+		ymlData, err := os.ReadFile(gcfg.Conf.Name())
 		if err != nil {
 			return err
 		}
@@ -273,7 +272,7 @@ func main() {
 
 	router.PathPrefix("/-/assets/").Handler(http.StripPrefix(gcfg.Prefix+"/-/", http.FileServer(Assets)))
 	router.HandleFunc("/-/sysinfo", func(w http.ResponseWriter, r *http.Request) {
-		data, _ := json.Marshal(map[string]interface{}{
+		data, _ := json.Marshal(map[string]any{
 			"version": VERSION,
 		})
 		w.Header().Set("Content-Type", "application/json")

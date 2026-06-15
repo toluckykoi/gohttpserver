@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"html/template"
 	"io"
-	"io/ioutil"
 	"log"
 	"mime"
 	"net/http"
@@ -83,7 +82,7 @@ func NewHTTPStaticServer(root string, noIndex bool) *HTTPStaticServer {
 		Theme: "black",
 		m:     m,
 		bufPool: sync.Pool{
-			New: func() interface{} { return make([]byte, 32*1024) },
+			New: func() any { return make([]byte, 32*1024) },
 		},
 		NoIndex: noIndex,
 	}
@@ -219,7 +218,7 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 
 	if file == nil { // only mkdir
 		w.Header().Set("Content-Type", "application/json;charset=utf-8")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		json.NewEncoder(w).Encode(map[string]any{
 			"success":     true,
 			"destination": dirpath,
 		})
@@ -287,26 +286,26 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 		if err != nil {
 			message = err.Error()
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		json.NewEncoder(w).Encode(map[string]any{
 			"success":     err == nil,
 			"description": message,
 		})
 		return
 	}
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	json.NewEncoder(w).Encode(map[string]any{
 		"success":     true,
 		"destination": dstPath,
 	})
 }
 
 type FileJSONInfo struct {
-	Name    string      `json:"name"`
-	Type    string      `json:"type"`
-	Size    int64       `json:"size"`
-	Path    string      `json:"path"`
-	ModTime int64       `json:"mtime"`
-	Extra   interface{} `json:"extra,omitempty"`
+	Name    string `json:"name"`
+	Type    string `json:"type"`
+	Size    int64  `json:"size"`
+	Path    string `json:"path"`
+	ModTime int64  `json:"mtime"`
+	Extra   any    `json:"extra,omitempty"`
 }
 
 // path should be absolute
@@ -323,8 +322,8 @@ func parseApkInfo(path string) (ai *ApkInfo) {
 	ai = &ApkInfo{}
 	ai.MainActivity, _ = apkf.MainActivity()
 	ai.PackageName = apkf.PackageName()
-	ai.Version.Code = apkf.Manifest().VersionCode
-	ai.Version.Name = apkf.Manifest().VersionName
+	ai.Version.Code = int(apkf.Manifest().VersionCode.MustInt32())
+	ai.Version.Name = apkf.Manifest().VersionName.MustString()
 	return
 }
 
@@ -456,14 +455,14 @@ func (s *HTTPStaticServer) genPlistLink(httpPlistLink string) (plistUrl string, 
 	}
 	defer resp.Body.Close()
 
-	data, _ := ioutil.ReadAll(resp.Body)
+	data, _ := io.ReadAll(resp.Body)
 	retData, err := http.Post(pp, "text/xml", bytes.NewBuffer(data))
 	if err != nil {
 		return
 	}
 	defer retData.Body.Close()
 
-	jsonData, _ := ioutil.ReadAll(retData.Body)
+	jsonData, _ := io.ReadAll(retData.Body)
 	var ret map[string]string
 	if err = json.Unmarshal(jsonData, &ret); err != nil {
 		return
@@ -597,13 +596,17 @@ func (s *HTTPStaticServer) hJSONList(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
-		infos, err := ioutil.ReadDir(realPath)
+		entries, err := os.ReadDir(realPath)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
-		for _, info := range infos {
-			fileInfoMap[filepath.Join(requestPath, info.Name())] = info
+		for _, entry := range entries {
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			fileInfoMap[filepath.Join(requestPath, entry.Name())] = info
 		}
 	}
 
@@ -638,7 +641,7 @@ func (s *HTTPStaticServer) hJSONList(w http.ResponseWriter, r *http.Request) {
 		lrs = append(lrs, lr)
 	}
 
-	data, _ := json.Marshal(map[string]interface{}{
+	data, _ := json.Marshal(map[string]any{
 		"files": lrs,
 		"auth":  auth,
 	})
@@ -696,7 +699,7 @@ func (s *HTTPStaticServer) findIndex(text string) []IndexFileItem {
 	for _, item := range s.indexes {
 		ok := true
 		// search algorithm, space for AND
-		for _, keyword := range strings.Fields(text) {
+		for keyword := range strings.FieldsSeq(text) {
 			needContains := true
 			if strings.HasPrefix(keyword, "-") {
 				needContains = false
@@ -737,7 +740,7 @@ func (s *HTTPStaticServer) readAccessConf(realPath string) (ac AccessConf) {
 		realPath = filepath.Dir(realPath)
 	}
 	cfgFile := filepath.Join(realPath, YAMLCONF)
-	data, err := ioutil.ReadFile(cfgFile)
+	data, err := os.ReadFile(cfgFile)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return
@@ -754,12 +757,12 @@ func (s *HTTPStaticServer) readAccessConf(realPath string) (ac AccessConf) {
 func deepPath(basedir, name string, maxDepth int) string {
 	// loop max 5, incase of for loop not finished
 	for depth := 0; depth <= maxDepth; depth += 1 {
-		finfos, err := ioutil.ReadDir(filepath.Join(basedir, name))
-		if err != nil || len(finfos) != 1 {
+		entries, err := os.ReadDir(filepath.Join(basedir, name))
+		if err != nil || len(entries) != 1 {
 			break
 		}
-		if finfos[0].IsDir() {
-			name = filepath.ToSlash(filepath.Join(name, finfos[0].Name()))
+		if entries[0].IsDir() {
+			name = filepath.ToSlash(filepath.Join(name, entries[0].Name()))
 		} else {
 			break
 		}
@@ -772,7 +775,7 @@ func assetsContent(name string) string {
 	if err != nil {
 		panic(err)
 	}
-	data, err := ioutil.ReadAll(fd)
+	data, err := io.ReadAll(fd)
 	if err != nil {
 		panic(err)
 	}
@@ -805,7 +808,7 @@ var (
 	_tmpls = make(map[string]*template.Template)
 )
 
-func renderHTML(w http.ResponseWriter, name string, v interface{}) {
+func renderHTML(w http.ResponseWriter, name string, v any) {
 	if t, ok := _tmpls[name]; ok {
 		t.Execute(w, v)
 		return
@@ -840,7 +843,7 @@ func (s *HTTPStaticServer) hVideoPlayer(w http.ResponseWriter, r *http.Request) 
 	}
 	videoURL := fmt.Sprintf("%s://%s/%s", scheme, r.Host, path)
 
-	renderHTML(w, "assets/video-player.html", map[string]interface{}{
+	renderHTML(w, "assets/video-player.html", map[string]any{
 		"FileName":  fileName,
 		"VideoURL":  videoURL,
 		"Extension": extension,
