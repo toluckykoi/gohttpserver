@@ -156,7 +156,17 @@ func (s *HTTPStaticServer) hIndex(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "HEAD" {
 			return
 		}
-		renderHTML(w, "assets/index.html", s)
+		// Serve the Vue 3 frontend for directory listings
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		f, err := FrontendAssets.Open("index.html")
+		if err != nil {
+			// Fallback to old frontend if new one is not available
+			renderHTML(w, "assets/index.html", s)
+			return
+		}
+		defer f.Close()
+		data, _ := io.ReadAll(f)
+		w.Write(data)
 	} else {
 		if filepath.Base(path) == YAMLCONF {
 			auth := s.readAccessConf(realPath)
