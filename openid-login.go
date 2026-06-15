@@ -27,7 +27,7 @@ type UserInfo struct {
 	NickName string `json:"nickName"`
 }
 
-type M map[string]interface{}
+type M map[string]any
 
 func init() {
 	gob.Register(&UserInfo{})

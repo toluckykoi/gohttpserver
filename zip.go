@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -44,14 +43,14 @@ func statFile(filename string) (info os.FileInfo, reader io.ReadCloser, err erro
 		if err != nil {
 			return
 		}
-		reader = ioutil.NopCloser(bytes.NewBuffer([]byte(target)))
+		reader = io.NopCloser(bytes.NewBuffer([]byte(target)))
 	} else if !info.IsDir() {
 		reader, err = os.Open(filename)
 		if err != nil {
 			return
 		}
 	} else {
-		reader = ioutil.NopCloser(bytes.NewBuffer(nil))
+		reader = io.NopCloser(bytes.NewBuffer(nil))
 	}
 	return
 }
@@ -106,7 +105,7 @@ func ExtractFromZip(zipFile, path string, w io.Writer) (err error) {
 	}
 	defer cf.Close()
 
-	rd := ioutil.NopCloser(bytes.NewBufferString(path))
+	rd := io.NopCloser(bytes.NewBufferString(path))
 	patterns, err := dkignore.ReadIgnore(rd)
 	if err != nil {
 		return
