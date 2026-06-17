@@ -1,5 +1,5 @@
 export function pathJoin(parts: string[]): string {
-  return parts
+  const result = parts
     .map((part, i) => {
       if (i === 0) {
         return part.replace(/\/+$/, '')
@@ -8,6 +8,7 @@ export function pathJoin(parts: string[]): string {
     })
     .filter(Boolean)
     .join('/')
+  return result.startsWith('/') ? result : '/' + result
 }
 
 export function getExtension(filename: string): string {

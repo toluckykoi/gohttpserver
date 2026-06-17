@@ -1,8 +1,8 @@
 import { ref } from 'vue'
 
 const themeKey = 'gohttpserver-theme'
-const defaultTheme = 'black'
-const availableThemes = ['black', 'green', 'cyan'] as const
+const defaultTheme = 'white'
+const availableThemes = ['white', 'black', 'green', 'cyan'] as const
 
 type Theme = typeof availableThemes[number]
 

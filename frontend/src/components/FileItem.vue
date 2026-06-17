@@ -25,8 +25,7 @@ const iconComponent = computed(() => getFileIcon(props.file.name, props.file.typ
 .file-name-cell {
   display: flex;
   align-items: center;
-  gap: 8px;
-  cursor: pointer;
+  gap: 10px;
 }
 
 .file-icon {
@@ -36,5 +35,15 @@ const iconComponent = computed(() => getFileIcon(props.file.name, props.file.typ
 
 .name {
   font-weight: 500;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--transition-base);
+}
+
+.name:hover {
+  color: var(--el-color-primary);
 }
 </style>

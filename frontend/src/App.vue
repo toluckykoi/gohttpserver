@@ -3,61 +3,60 @@
     <div class="app-container" :class="themeClass">
       <!-- Header -->
       <header class="app-header">
-        <div class="header-left">
-          <el-icon :size="24" class="header-icon">
-            <Files />
-          </el-icon>
-          <h1 class="header-title">GoHTTP File Server</h1>
-        </div>
-        <div class="header-right">
-          <el-button type="primary" link @click="handleShowMainQrCode">
-            <el-icon><Camera /></el-icon>
-            View in Phone
-          </el-button>
+        <div class="header-inner">
+          <div class="header-left">
+            <div class="header-brand" @click="goHome">
+              <img src="/favicon.png" class="header-logo" alt="logo" />
+              <h1 class="header-title">Go HTTP File Server</h1>
+            </div>
+          </div>
 
-          <template v-if="fileStore.user">
-            <el-button v-if="fileStore.user.email" type="info" link>
-              <el-icon><User /></el-icon>
-              {{ fileStore.user.name }}
+          <div class="header-right">
+            <el-button class="header-btn" @click="handleShowMainQrCode">
+              <el-icon :size="16"><Camera /></el-icon>
+              <span class="header-btn-label">View in Phone</span>
             </el-button>
-            <el-button v-else type="info" link>
-              <el-icon><User /></el-icon>
-              Guest
-            </el-button>
-          </template>
 
-          <el-input
-            v-model="searchValue"
-            class="header-search"
-            placeholder="Search files"
-            clearable
-            @keyup.enter="handleSearch"
-            @clear="handleClearSearch"
-          >
-            <template #prefix>
-              <el-icon><Search /></el-icon>
+            <template v-if="fileStore.user">
+              <div class="header-user">
+                <el-icon :size="16"><User /></el-icon>
+                <span>{{ fileStore.user.email ? fileStore.user.name : 'Guest' }}</span>
+              </div>
             </template>
-          </el-input>
 
-          <el-dropdown @command="handleThemeChange">
-            <el-button type="default" text>
-              <el-icon><MoonNight /></el-icon>
-              {{ currentTheme }}
-              <el-icon class="el-icon--right"><ArrowDown /></el-icon>
-            </el-button>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item
-                  v-for="theme in availableThemes"
-                  :key="theme"
-                  :command="theme"
-                  :class="{ active: theme === currentTheme }"
-                >
-                  {{ theme }}
-                </el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
+            <el-input
+              v-model="searchValue"
+              class="header-search"
+              placeholder="Search files"
+              clearable
+              @keyup.enter="handleSearch"
+              @clear="handleClearSearch"
+            >
+              <template #prefix>
+                <el-icon><Search /></el-icon>
+              </template>
+            </el-input>
+
+            <el-dropdown @command="handleThemeChange">
+              <el-button class="header-btn theme-toggle">
+                <el-icon :size="16"><MoonNight /></el-icon>
+                <span>{{ currentTheme }}</span>
+                <el-icon :size="12" class="chevron"><ArrowDown /></el-icon>
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item
+                    v-for="theme in availableThemes"
+                    :key="theme"
+                    :command="theme"
+                    :class="{ 'dropdown-active': theme === currentTheme }"
+                  >
+                    {{ theme }}
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </div>
         </div>
       </header>
 
@@ -68,13 +67,18 @@
           <FileList />
         </div>
         <footer class="app-footer">
-          <el-link href="https://github.com/codeskyblue/gohttpserver" target="_blank" type="info">
-            gohttpserver ({{ version }})
-          </el-link>
-          <span>, by </span>
-          <el-link href="https://github.com/codeskyblue" target="_blank" type="info">
-            codeskyblue
-          </el-link>
+          <a
+            href="https://github.com/codeskyblue/gohttpserver"
+            target="_blank"
+            class="footer-link"
+          >gohttpserver</a>
+          <span class="footer-sep">v{{ version }}</span>
+          <span class="footer-sep">by</span>
+          <a
+            href="https://github.com/codeskyblue"
+            target="_blank"
+            class="footer-link footer-link--dim"
+          >codeskyblue</a>
         </footer>
       </main>
 
@@ -97,7 +101,7 @@ import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
 import QRCodeModal from './components/QrCodeModal.vue'
 import type { FileItem } from './types'
 import {
-  Files, Camera, User, Search, MoonNight, ArrowDown
+  Camera, User, Search, MoonNight, ArrowDown
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 
@@ -112,6 +116,10 @@ const searchValue = ref('')
 const version = computed(() => fileStore.version)
 const currentPath = computed(() => window.location.pathname)
 const themeClass = computed(() => `theme-${currentTheme.value}`)
+
+function goHome() {
+  fileStore.loadFiles('/')
+}
 
 function handleShowMainQrCode() {
   currentQrFile.value = null
@@ -144,15 +152,10 @@ onMounted(async () => {
 </script>
 
 <style>
-/* Minimal reset — don't touch Element Plus internals */
-html, body {
+/* ── Reset ── */
+html, body, #app {
   margin: 0;
   padding: 0;
-  height: 100%;
-  width: 100%;
-}
-
-#app {
   height: 100%;
   width: 100%;
 }
@@ -161,48 +164,118 @@ html, body {
 .app-container {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  min-height: 100dvh;
   background-color: var(--el-bg-color-page);
+  transition: background-color var(--transition-base);
 }
 
 /* ── Header ── */
 .app-header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  flex-shrink: 0;
+  height: 56px;
+  background: color-mix(in srgb, var(--el-bg-color) 82%, transparent);
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  backdrop-filter: saturate(180%) blur(12px);
+  -webkit-backdrop-filter: saturate(180%) blur(12px);
+  transition: background-color var(--transition-base),
+    border-color var(--transition-base);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .app-header {
+    background: var(--el-bg-color);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+
+.header-inner {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 64px;
-  padding: 0 20px;
-  flex-shrink: 0;
-  background: var(--el-bg-color);
-  border-bottom: 1px solid var(--el-border-color);
+  height: 100%;
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 0 24px;
 }
 
 .header-left {
   display: flex;
   align-items: center;
-  gap: 12px;
 }
 
-.header-icon {
-  color: var(--el-color-primary);
+.header-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+  padding: 4px 8px;
+  margin: -4px -8px;
+  border-radius: var(--radius-md);
+  transition: background var(--transition-base);
+}
+
+.header-brand:hover {
+  background: var(--el-fill-color-light);
+}
+
+.header-brand:active {
+  scale: 0.985;
+}
+
+.header-logo {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
 }
 
 .header-title {
   margin: 0;
-  font-size: 20px;
+  font-size: 16px;
   font-weight: 600;
+  letter-spacing: -0.01em;
   color: var(--el-text-color-primary);
   white-space: nowrap;
+  transition: color var(--transition-base);
 }
 
 .header-right {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 8px;
+}
+
+.header-btn {
+  font-size: 13px;
+  color: var(--el-text-color-regular);
+  transition: color var(--transition-base);
+}
+
+.header-btn-label {
+  margin-left: 2px;
+}
+
+.header-user {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+  white-space: nowrap;
 }
 
 .header-search {
-  width: 240px;
+  width: 220px;
+}
+
+.theme-toggle .chevron {
+  margin-left: 2px;
+  opacity: 0.5;
 }
 
 /* ── Main ── */
@@ -210,8 +283,6 @@ html, body {
   flex: 1;
   display: flex;
   flex-direction: column;
-  padding: 20px;
-  /* ensure main fills width */
   width: 100%;
   box-sizing: border-box;
 }
@@ -219,28 +290,182 @@ html, body {
 .main-inner {
   flex: 1;
   width: 100%;
-  max-width: 1400px;
+  max-width: 1440px;
   margin: 0 auto;
+  padding: 0 24px;
+  box-sizing: border-box;
 }
 
 /* ── Footer ── */
 .app-footer {
-  max-width: 1400px;
+  max-width: 1440px;
   width: 100%;
   margin: 0 auto;
-  text-align: right;
-  padding: 20px 0 0;
-  color: var(--el-text-color-secondary);
+  padding: 24px 24px 16px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--el-text-color-placeholder);
 }
 
-/* ── Theme ── */
-.theme-black  { --theme-color: #1f2937; }
-.theme-green  { --theme-color: #10b981; }
-.theme-cyan   { --theme-color: #06b6d4; }
+.footer-link {
+  color: var(--el-text-color-secondary);
+  text-decoration: none;
+  transition: color var(--transition-base);
+}
+
+.footer-link:hover {
+  color: var(--el-color-primary);
+}
+
+.footer-link--dim {
+  color: var(--el-text-color-placeholder);
+}
+
+.footer-sep {
+  color: var(--el-border-color-darker);
+}
+
+/* ── Themes ── */
+/* Each theme shifts the page background, primary accent, and surface tints.
+   The changes are subtle — like room lighting, not paint colors. */
+
+.theme-black {
+  --el-color-primary: #4b5563;
+  --el-color-primary-light-3: #9ca3af;
+  --el-color-primary-light-5: #d1d5db;
+  --el-color-primary-light-7: #e5e7eb;
+  --el-color-primary-light-8: #f3f4f6;
+  --el-color-primary-light-9: #f9fafb;
+  --el-bg-color-page: #f5f6f8;
+  --el-fill-color-light: #f1f3f5;
+  --el-fill-color: #eef0f2;
+}
+
+/* White — Apple + Notion inspired warm minimalism.
+   Not pure-white: subtle warmth in surfaces, soft hairlines, deep ink. */
+.theme-white {
+  /* Accent: refined blue (Apple Action Blue) */
+  --el-color-primary: #0066cc;
+  --el-color-primary-light-3: #7ab8f5;
+  --el-color-primary-light-5: #b0d4f7;
+  --el-color-primary-light-7: #d4e8fb;
+  --el-color-primary-light-8: #e5f0fc;
+  --el-color-primary-light-9: #f0f6fd;
+  --el-color-primary-dark-2: #0055aa;
+  /* Ink: deep near-black with warmth (Apple #1d1d1f) */
+  --el-text-color-primary: #1d1d1f;
+  --el-text-color-regular: #3a3a3c;
+  --el-text-color-secondary: #6e6e73;
+  --el-text-color-placeholder: #8e8e93;
+  /* Surface: warm-tinted whites (Apple canvas-parchment + Notion surface) */
+  --el-bg-color: #ffffff;
+  --el-bg-color-page: #f5f5f7;
+  --el-bg-color-overlay: #ffffff;
+  --el-fill-color: #efeff1;
+  --el-fill-color-light: #f5f5f7;
+  --el-fill-color-lighter: #fafafa;
+  --el-fill-color-extra-light: #fafafc;
+  --el-fill-color-blank: #ffffff;
+  /* Borders: soft warm-gray hairlines (Notion hairline #e5e3df adapted) */
+  --el-border-color: #d2d2d7;
+  --el-border-color-light: #dfdfe3;
+  --el-border-color-lighter: #e8e8ed;
+  --el-border-color-extra-light: #f0f0f2;
+  --el-border-color-dark: #c4c4c9;
+  --el-border-color-darker: #aeaeb5;
+}
+
+.theme-green {
+  --el-color-primary: #059669;
+  --el-color-primary-light-3: #6ee7b7;
+  --el-color-primary-light-5: #a7f3d0;
+  --el-color-primary-light-7: #d1fae5;
+  --el-color-primary-light-8: #ecfdf5;
+  --el-color-primary-light-9: #f0fdf6;
+  --el-bg-color-page: #f4f7f5;
+  --el-fill-color-light: #eef5f0;
+  --el-fill-color: #eaf2ec;
+}
+
+.theme-cyan {
+  --el-color-primary: #0891b2;
+  --el-color-primary-light-3: #67e8f9;
+  --el-color-primary-light-5: #a5f3fc;
+  --el-color-primary-light-7: #cffafe;
+  --el-color-primary-light-8: #e6fcfe;
+  --el-color-primary-light-9: #f0fdff;
+  --el-bg-color-page: #f3f7f9;
+  --el-fill-color-light: #edf4f7;
+  --el-fill-color: #e9f1f5;
+}
 
 /* ── Dropdown active item ── */
 .dropdown-active {
   background-color: var(--el-color-primary-light-9);
   color: var(--el-color-primary);
+}
+
+/* ── Responsive: Tablet ── */
+@media (max-width: 768px) {
+  .header-inner {
+    padding: 0 16px;
+  }
+
+  .main-inner {
+    padding: 0 16px;
+  }
+
+  .header-title {
+    font-size: 14px;
+  }
+
+  .header-search {
+    width: 140px;
+  }
+
+  .header-btn-label,
+  .header-user span,
+  .theme-toggle span {
+    display: none;
+  }
+}
+
+/* ── Responsive: Phone ── */
+@media (max-width: 480px) {
+  .header-inner {
+    padding: 0 12px;
+  }
+
+  .main-inner {
+    padding: 0 12px;
+  }
+
+  .header-title {
+    font-size: 13px;
+  }
+
+  .header-brand {
+    gap: 6px;
+    padding: 4px 6px;
+    margin: -4px -6px;
+  }
+
+  .header-logo {
+    width: 20px;
+    height: 20px;
+  }
+
+  .header-search {
+    width: 100px;
+  }
+
+  .app-footer {
+    padding: 16px 12px 12px;
+    font-size: 11px;
+  }
 }
 </style>

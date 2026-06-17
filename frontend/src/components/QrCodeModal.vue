@@ -40,27 +40,31 @@ const visible = computed({
 })
 
 const url = computed(() => {
-  if (!props.file) return ''
-  const encodePath = getEncodePath(props.file.name, props.currentPath)
-  return window.location.origin + encodePath
+  if (props.file) {
+    const encodePath = getEncodePath(props.file.name, props.currentPath)
+    return window.location.origin + encodePath
+  }
+  // View in Phone: QR code for current page
+  return window.location.href
 })
 
 const title = computed(() => {
-  if (!props.file) return 'QR Code'
-  return props.file.name
+  if (props.file) return props.file.name
+  return 'View in Phone'
 })
 
 async function renderQrcode() {
-  if (!qrcodeRef.value || !props.file) return
-  
+  if (!qrcodeRef.value || !url.value) return
+
   await nextTick()
-  qrcodeRef.value.innerHTML = ''
-  
+
   try {
-    await QRCode.toCanvas(qrcodeRef.value, url.value, {
+    const svg = await QRCode.toString(url.value, {
+      type: 'svg',
       width: 256,
-      margin: 2
+      margin: 2,
     })
+    qrcodeRef.value.innerHTML = svg
   } catch (error) {
     console.error('Failed to render QR code:', error)
   }

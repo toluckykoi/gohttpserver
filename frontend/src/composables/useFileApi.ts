@@ -60,6 +60,51 @@ export function useFileApi() {
     return await response.json()
   }
 
+  function uploadFileWithProgress(
+    path: string,
+    file: File,
+    onProgress: (percent: number) => void,
+    options?: { filename?: string; unzip?: boolean }
+  ): Promise<{ success: boolean; destination?: string; description?: string }> {
+    const xhr = new XMLHttpRequest()
+    const formData = new FormData()
+    formData.append('file', file)
+    if (options?.filename) {
+      formData.append('filename', options.filename)
+    }
+    if (options?.unzip) {
+      formData.append('unzip', 'true')
+    }
+
+    // Attach progress listener BEFORE send() to avoid race condition
+    xhr.upload.addEventListener('progress', (e: ProgressEvent) => {
+      if (e.lengthComputable) {
+        onProgress(Math.round((e.loaded / e.total) * 100))
+      }
+    })
+
+    const promise = new Promise<{ success: boolean; destination?: string; description?: string }>((resolve, reject) => {
+      xhr.addEventListener('load', () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText))
+          } catch {
+            resolve({ success: true })
+          }
+        } else {
+          reject(new Error(`Upload failed: ${xhr.status} ${xhr.statusText}`))
+        }
+      })
+      xhr.addEventListener('error', () => reject(new Error('Upload failed: network error')))
+      xhr.addEventListener('abort', () => reject(new Error('Upload cancelled')))
+    })
+
+    xhr.open('POST', path)
+    xhr.send(formData)
+
+    return promise
+  }
+
   async function createDirectory(path: string, name: string): Promise<void> {
     const encodePath = getEncodePath(name, path)
     const response = await fetch(encodePath, {
@@ -122,6 +167,7 @@ export function useFileApi() {
     fetchFiles,
     fetchFileInfo,
     uploadFile,
+    uploadFileWithProgress,
     createDirectory,
     deleteFile,
     fetchUser,
