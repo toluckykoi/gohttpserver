@@ -1,0 +1,160 @@
+/* ── Design Tokens ── */
+:root {
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue',
+    Arial, 'Noto Sans', sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono',
+    Consolas, 'Liberation Mono', Menlo, monospace;
+  --transition-base: 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-smooth: 300ms cubic-bezier(0.16, 1, 0.3, 1);
+  /* Linear-inspired radius scale */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+}
+
+/* ── Base ── */
+html {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100dvh;
+  background:
+    linear-gradient(180deg, var(--el-bg-color) 0%, var(--el-bg-color-page) 30%);
+  color: var(--el-text-color-primary);
+  transition: background-color var(--transition-base),
+    color var(--transition-base);
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--el-color-primary-light-5);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--el-color-primary-light-3);
+}
+
+/* ── Selection ── */
+::selection {
+  background: var(--el-color-primary-light-5);
+  color: var(--el-text-color-primary);
+}
+
+/* ── Focus ring ── */
+:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* ── Reduced motion ── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ── Dialog animations ── */
+/* Panel: expand from center with fade. Overlay: subtle dark backdrop. */
+
+.dialog-fade-enter-active {
+  transition: opacity 350ms cubic-bezier(0.16, 1, 0.3, 1),
+              transform 350ms cubic-bezier(0.16, 1, 0.3, 1) !important;
+}
+.dialog-fade-leave-active {
+  transition: opacity 180ms ease-out,
+              transform 180ms ease-out !important;
+}
+.dialog-fade-enter-from {
+  opacity: 0 !important;
+  transform: scale(0.88) !important;
+}
+.dialog-fade-leave-to {
+  opacity: 0 !important;
+  transform: scale(0.92) !important;
+}
+
+/* Overlay: subtle dark backdrop with quick fade */
+.el-overlay {
+  background: rgba(0, 0, 0, 0.35) !important;
+}
+.el-fade-in-enter-active {
+  transition: opacity 200ms ease-out !important;
+}
+.el-fade-in-leave-active {
+  transition: opacity 150ms ease-out !important;
+}
+.el-fade-in-enter-from,
+.el-fade-in-leave-to {
+  opacity: 0 !important;
+}
+
+/* Message box: same center-expand */
+.el-message-box {
+  animation: dialog-pop 350ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes dialog-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.88);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Drawer */
+.el-drawer {
+  transition: transform var(--transition-smooth);
+}
+
+/* ── Responsive: dialog full-width on phone ── */
+@media (max-width: 640px) {
+  .el-dialog {
+    width: calc(100vw - 32px) !important;
+    max-width: none !important;
+    margin: 16px auto !important;
+    border-radius: var(--radius-lg) !important;
+  }
+
+  .el-message-box {
+    width: calc(100vw - 48px) !important;
+    max-width: none !important;
+  }
+}
+
+/* ── Touch-friendly tap targets ── */
+@media (pointer: coarse) {
+  .el-button--small {
+    min-height: 36px;
+    min-width: 36px;
+  }
+
+  .action-buttons .el-button {
+    min-height: 36px;
+    min-width: 36px;
+  }
+}

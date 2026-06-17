@@ -27,37 +27,51 @@
       </el-button>
     </div>
 
+    <!-- Empty state -->
+    <div v-if="!loading && sortedFiles.length === 0" class="empty-state">
+      <el-icon :size="48" class="empty-icon">
+        <FolderOpened />
+      </el-icon>
+      <p class="empty-title">This folder is empty</p>
+      <p class="empty-hint" v-if="auth.upload">
+        Drop files here or click <strong>Upload</strong> to get started
+      </p>
+    </div>
+
     <el-table
+      v-else
       :data="sortedFiles"
       v-loading="loading"
       style="width: 100%"
-      stripe
+      :default-sort="{ prop: 'mtime', order: 'descending' }"
+      @sort-change="handleSortChange"
       @row-click="handleRowClick"
     >
-      <el-table-column label="Name" min-width="300">
+      <el-table-column label="Name" min-width="300" prop="name" sortable="custom">
         <template #default="{ row }">
           <FileItem :file="row" />
         </template>
       </el-table-column>
 
-      <el-table-column label="Size" width="120" align="right">
+      <el-table-column label="Size" width="120" align="right" prop="size" sortable="custom">
         <template #default="{ row }">
-          <span v-if="row.type === 'dir'" class="size-text">~</span>
-          <span v-else class="size-text">{{ formatBytes(row.size) }}</span>
+          <span v-if="row.type === 'dir'" class="data-mono data-muted">-</span>
+          <span v-else class="data-mono">{{ formatBytes(row.size) }}</span>
         </template>
       </el-table-column>
 
-      <el-table-column label="Modified" width="200">
+      <el-table-column label="Modified" width="200" prop="mtime" sortable="custom" class-name="col-modified">
         <template #default="{ row }">
-          <el-link type="primary" :underline="false" @click.stop="toggleMtimeType">
+          <span class="data-mono mtime-col" @click.stop="toggleMtimeType">
             {{ formatMtime(row.mtime) }}
-          </el-link>
+          </span>
         </template>
       </el-table-column>
 
-      <el-table-column label="Actions" width="340">
+      <el-table-column label="Actions" width="340" class-name="col-actions">
         <template #default="{ row }">
-          <div class="action-buttons" @click.stop>
+          <!-- Desktop actions -->
+          <div class="action-buttons action-desktop" @click.stop>
             <!-- Directory actions -->
             <template v-if="row.type === 'dir'">
               <el-tooltip content="Download as ZIP" placement="top">
@@ -168,13 +182,36 @@
               </el-tooltip>
             </template>
           </div>
+          <!-- Mobile: dropdown menu -->
+          <div class="action-mobile" @click.stop>
+            <el-dropdown trigger="click" @command="(cmd: string) => handleMobileAction(cmd, row)">
+              <el-button :icon="MoreFilled" circle size="small" />
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <template v-if="row.type === 'dir'">
+                    <el-dropdown-item command="zip">Download as ZIP</el-dropdown-item>
+                    <el-dropdown-item command="info">Info</el-dropdown-item>
+                    <el-dropdown-item v-if="auth.delete" command="delete">Delete</el-dropdown-item>
+                  </template>
+                  <template v-else>
+                    <el-dropdown-item command="download">Download</el-dropdown-item>
+                    <el-dropdown-item command="copy">Copy Link</el-dropdown-item>
+                    <el-dropdown-item command="info">Info</el-dropdown-item>
+                    <el-dropdown-item v-if="hasQrCode(row)" command="qrcode">QR Code</el-dropdown-item>
+                    <el-dropdown-item v-if="isVideo(row)" command="video">Play Video</el-dropdown-item>
+                    <el-dropdown-item v-if="hasQrCode(row)" command="install">Install</el-dropdown-item>
+                    <el-dropdown-item v-if="auth.delete" command="delete">Delete</el-dropdown-item>
+                  </template>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </div>
         </template>
       </el-table-column>
     </el-table>
 
     <UploadModal
       v-model:visible="showUploadModal"
-      @upload="handleUpload"
     />
 
     <QrCodeModal
@@ -215,13 +252,15 @@ import {
   View,
   Upload,
   FolderAdd,
+  FolderOpened,
   Download,
   InfoFilled,
   Delete,
   DocumentCopy,
   Camera,
   VideoPlay,
-  Box
+  Box,
+  MoreFilled
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import dayjs from 'dayjs'
@@ -256,6 +295,10 @@ function goBack() {
 
 function toggleShowHidden() {
   fileStore.toggleShowHidden()
+}
+
+function handleSortChange({ prop, order }: { prop: string; order: string | null }) {
+  fileStore.setSort(prop || 'mtime', order as 'ascending' | 'descending' | null)
 }
 
 function toggleMtimeType() {
@@ -315,6 +358,19 @@ function handleInstall(file: FileItemType) {
   window.location.href = url
 }
 
+function handleMobileAction(cmd: string, file: FileItemType) {
+  switch (cmd) {
+    case 'download': handleDownload(file); break
+    case 'zip': handleDownloadArchive(file); break
+    case 'copy': handleCopyLink(file); break
+    case 'info': handleShowInfo(file); break
+    case 'qrcode': handleShowQrCode(file); break
+    case 'video': handleVideoPlay(file); break
+    case 'install': handleInstall(file); break
+    case 'delete': handleDeleteFile(file); break
+  }
+}
+
 async function handleCopyLink(file: FileItemType) {
   const encodePath = getEncodePath(file.name, currentPath.value)
   const url = window.location.origin + encodePath
@@ -343,10 +399,6 @@ async function handleDeleteFile(file: FileItemType) {
   }
 }
 
-async function handleUpload(file: File, options?: { filename?: string; unzip?: boolean }) {
-  await fileStore.uploadFile(file, options)
-}
-
 async function handleCreateDirectory() {
   try {
     const { value: name } = await ElMessageBox.prompt(
@@ -368,24 +420,235 @@ async function handleCreateDirectory() {
 
 <style scoped>
 .file-list-container {
-  padding: 20px 0;
+  padding: 8px 0 24px;
 }
 
+/* ── Toolbar ── */
 .toolbar {
   display: flex;
-  gap: 12px;
-  margin-bottom: 20px;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
   flex-wrap: wrap;
 }
 
+.toolbar :deep(.el-button) {
+  font-size: 13px;
+  font-weight: 500;
+  transition: all var(--transition-base);
+}
+
+.toolbar :deep(.el-button:active) {
+  scale: 0.97;
+}
+
+/* ── Table ── */
+.file-list-container :deep(.el-table) {
+  --el-table-border-color: transparent;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.file-list-container :deep(.el-table__header-wrapper) {
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+}
+
+.file-list-container :deep(.el-table__header th) {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--el-text-color-placeholder);
+  background: var(--el-fill-color);
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  padding: 8px 0;
+}
+
+.file-list-container :deep(.el-table__header th .cell) {
+  padding: 0 12px;
+}
+
+.file-list-container :deep(.el-table__body td) {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--el-border-color-extra-light);
+}
+
+.file-list-container :deep(.el-table__body td .cell) {
+  padding: 0 12px;
+}
+
+.file-list-container :deep(.el-table__body tr) {
+  cursor: pointer;
+  transition: background-color var(--transition-base);
+}
+
+.file-list-container :deep(.el-table__body tr:hover > td) {
+  background: var(--el-fill-color-light);
+}
+
+.file-list-container :deep(.el-table__body tr:last-child td) {
+  border-bottom: none;
+}
+
+/* Row click feedback */
+.file-list-container :deep(.el-table__body tr:active) {
+  background: var(--el-fill-color);
+}
+
+/* ── Data columns (mono) ── */
+.data-mono {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--el-text-color-regular);
+}
+
+.data-muted {
+  color: var(--el-text-color-placeholder);
+}
+
+.mtime-col {
+  color: var(--el-text-color-regular);
+  cursor: pointer;
+  transition: color var(--transition-base);
+}
+
+.mtime-col:hover {
+  color: var(--el-color-primary);
+}
+
+/* ── Action buttons ── */
 .action-buttons {
   display: flex;
   gap: 4px;
   flex-wrap: nowrap;
 }
 
-.size-text {
+.action-buttons :deep(.el-button) {
+  transition: all var(--transition-base);
+}
+
+.action-buttons :deep(.el-button:hover) {
+  transform: translateY(-1px);
+}
+
+.action-buttons :deep(.el-button:active) {
+  transform: translateY(0) scale(0.95);
+}
+
+/* ── Empty state ── */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 80px 24px;
+  text-align: center;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--radius-lg);
+  background: var(--el-bg-color);
+}
+
+.empty-icon {
+  color: var(--el-text-color-placeholder);
+  margin-bottom: 16px;
+  opacity: 0.6;
+}
+
+.empty-title {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 600;
   color: var(--el-text-color-secondary);
-  font-size: 13px;
+}
+
+.empty-hint {
+  margin: 0;
+  font-size: 14px;
+  color: var(--el-text-color-placeholder);
+  max-width: 320px;
+}
+
+/* ── Loading ── */
+.file-list-container :deep(.el-loading-mask) {
+  border-radius: var(--radius-lg);
+}
+
+/* ── Mobile dropdown ── */
+.action-mobile {
+  display: none;
+}
+
+/* ── Responsive: Phone / Small tablet ── */
+@media (max-width: 640px) {
+  .file-list-container {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .toolbar .el-button {
+    font-size: 12px;
+    padding: 6px 10px;
+  }
+
+  /* Hide desktop action buttons, show dropdown */
+  .action-desktop {
+    display: none;
+  }
+
+  .action-mobile {
+    display: flex;
+    justify-content: center;
+  }
+
+  /* Hide Modified column */
+  .file-list-container :deep(.col-modified) {
+    display: none !important;
+  }
+
+  /* Shrink table columns */
+  .file-list-container :deep(.el-table__header colgroup col:nth-child(1)),
+  .file-list-container :deep(.el-table__body colgroup col:nth-child(1)) {
+    width: auto !important;
+  }
+
+  /* Reduce actions column width */
+  .file-list-container :deep(.col-actions) {
+    width: 52px !important;
+    min-width: 52px !important;
+  }
+
+  /* Table cell padding reduction */
+  .file-list-container :deep(.el-table__header th .cell),
+  .file-list-container :deep(.el-table__body td .cell) {
+    padding: 0 8px;
+  }
+
+  .data-mono {
+    font-size: 12px;
+  }
+}
+
+/* ── Responsive: Tiny phone ── */
+@media (max-width: 400px) {
+  .toolbar {
+    gap: 4px;
+  }
+
+  .toolbar .el-button {
+    font-size: 11px;
+    padding: 4px 8px;
+  }
+
+  /* Hide toolbar button labels, icon-only */
+  .toolbar .el-button .el-icon + * {
+    display: none;
+  }
+
+  /* Shrink name column */
+  .file-list-container :deep(.el-table__body td .cell) {
+    padding: 0 6px;
+  }
 }
 </style>

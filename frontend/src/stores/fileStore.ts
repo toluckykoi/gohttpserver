@@ -18,21 +18,36 @@ export const useFileStore = defineStore('file', () => {
   const loading = ref(false)
   const showHidden = ref(false)
   const searchQuery = ref('')
+  const sortProp = ref('mtime')
+  const sortOrder = ref<'ascending' | 'descending'>('descending')
 
   // Computed
   const sortedFiles = computed(() => {
     let result = [...files.value]
-    
+
     if (!showHidden.value) {
       result = result.filter(f => !f.name.startsWith('.'))
     }
 
+    const prop = sortProp.value
+    const order = sortOrder.value
+
     result.sort((a, b) => {
-      const weightA = a.type === 'dir' ? 1000 : 1
-      const weightB = b.type === 'dir' ? 1000 : 1
-      const weightDiff = weightB - weightA
-      if (weightDiff !== 0) return weightDiff
-      return b.mtime - a.mtime
+      // Directories always first
+      const aIsDir = a.type === 'dir' ? 1 : 0
+      const bIsDir = b.type === 'dir' ? 1 : 0
+      if (aIsDir !== bIsDir) return bIsDir - aIsDir
+
+      // Then sort by selected column
+      let cmp = 0
+      if (prop === 'name') {
+        cmp = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+      } else if (prop === 'size') {
+        cmp = (a.size || 0) - (b.size || 0)
+      } else {
+        cmp = a.mtime - b.mtime
+      }
+      return order === 'ascending' ? cmp : -cmp
     })
 
     return result
@@ -115,6 +130,17 @@ export const useFileStore = defineStore('file', () => {
     showHidden.value = !showHidden.value
   }
 
+  function setSort(prop: string, order: 'ascending' | 'descending' | null) {
+    if (order) {
+      sortProp.value = prop
+      sortOrder.value = order
+    } else {
+      // Reset to default sort
+      sortProp.value = 'mtime'
+      sortOrder.value = 'descending'
+    }
+  }
+
   return {
     currentPath,
     files,
@@ -132,6 +158,9 @@ export const useFileStore = defineStore('file', () => {
     uploadFile,
     createDirectory,
     deleteFile,
-    toggleShowHidden
+    toggleShowHidden,
+    sortProp,
+    sortOrder,
+    setSort
   }
 })

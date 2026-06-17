@@ -315,6 +315,9 @@ server {
 
    ```bash
    go build
+
+   # test
+   ./gohttpserver.exe -r ./testdata --addr 127.0.0.1:8000 --upload --delete
    ```
 
 主题定义在 [assets/themes](assets/themes) 目录中。目前只有两个主题可用：黑色和绿色。
