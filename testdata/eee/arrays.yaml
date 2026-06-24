@@ -1,0 +1,22 @@
+numbers:
+- 1
+- 2
+- 3
+fruits:
+- apple
+- banana
+- cherry
+booleans:
+- true
+- false
+- true
+camera_matrix:
+- 1428.605712890625
+- 0.0
+- 481.5632019042969
+- 0.0
+- 1693.5518798828125
+- 329.9656677246094
+- 0.0
+- 0.0
+- 1.0

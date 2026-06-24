@@ -1,30 +1,57 @@
 <template>
   <div class="file-list-container">
     <div class="toolbar">
-      <el-button type="default" @click="goBack">
-        <el-icon><ArrowLeft /></el-icon>
-        Back
-      </el-button>
-      <el-button type="default" @click="toggleShowHidden">
-        <el-icon><View /></el-icon>
-        {{ showHidden ? 'Hide' : 'Show' }} Hidden
-      </el-button>
-      <el-button
-        v-if="auth.upload"
-        type="primary"
-        @click="showUploadModal = true"
-      >
-        <el-icon><Upload /></el-icon>
-        Upload
-      </el-button>
-      <el-button
-        v-if="auth.delete"
-        type="success"
-        @click="handleCreateDirectory"
-      >
-        <el-icon><FolderAdd /></el-icon>
-        New Folder
-      </el-button>
+      <div class="toolbar-group toolbar-group--nav">
+        <el-tooltip content="Back" placement="bottom">
+          <el-button class="toolbar-btn" type="default" @click="goBack">
+            <el-icon><ArrowLeft /></el-icon>
+            <span class="toolbar-label">Back</span>
+          </el-button>
+        </el-tooltip>
+        <el-tooltip content="Refresh (F5)" placement="bottom">
+          <el-button
+            class="toolbar-btn toolbar-refresh"
+            type="default"
+            :class="{ 'toolbar-refresh--spinning': refreshing }"
+            @click="handleRefresh"
+          >
+            <el-icon><Refresh /></el-icon>
+            <span class="toolbar-label">Refresh</span>
+          </el-button>
+        </el-tooltip>
+        <el-tooltip
+          :content="showHidden ? 'Hide hidden files' : 'Show hidden files'"
+          placement="bottom"
+        >
+          <el-button class="toolbar-btn" type="default" @click="toggleShowHidden">
+            <el-icon><View /></el-icon>
+            <span class="toolbar-label">{{ showHidden ? 'Hide' : 'Show' }} Hidden</span>
+          </el-button>
+        </el-tooltip>
+      </div>
+
+      <div v-if="auth.upload || auth.delete" class="toolbar-group toolbar-group--actions">
+        <el-tooltip v-if="auth.upload" content="Upload files" placement="bottom">
+          <el-button
+            class="toolbar-btn"
+            type="primary"
+            @click="showUploadModal = true"
+          >
+            <el-icon><Upload /></el-icon>
+            <span class="toolbar-label">Upload</span>
+          </el-button>
+        </el-tooltip>
+        <el-tooltip v-if="auth.delete" content="New folder" placement="bottom">
+          <el-button
+            class="toolbar-btn"
+            type="success"
+            @click="handleCreateDirectory"
+          >
+            <el-icon><FolderAdd /></el-icon>
+            <span class="toolbar-label">New Folder</span>
+          </el-button>
+        </el-tooltip>
+      </div>
     </div>
 
     <!-- Empty state -->
@@ -38,18 +65,27 @@
       </p>
     </div>
 
+    <template v-else>
+    <!-- Desktop / tablet: table layout -->
     <el-table
-      v-else
+      class="file-table"
       :data="sortedFiles"
       v-loading="loading"
       style="width: 100%"
       :default-sort="{ prop: 'mtime', order: 'descending' }"
+      :row-class-name="rowClassName"
+      :tooltip-effect="'dark'"
       @sort-change="handleSortChange"
       @row-click="handleRowClick"
     >
       <el-table-column label="Name" min-width="300" prop="name" sortable="custom">
         <template #default="{ row }">
-          <FileItem :file="row" />
+          <div
+            class="file-name-cell-wrap"
+            :title="clickActionLabel(getClickAction(row.name, row.type === 'dir'))"
+          >
+            <FileItem :file="row" />
+          </div>
         </template>
       </el-table-column>
 
@@ -92,6 +128,15 @@
                   @click="handleShowInfo(row)"
                 />
               </el-tooltip>
+              <el-tooltip content="QR Code" placement="top">
+                <el-button
+                  type="warning"
+                  :icon="Camera"
+                  circle
+                  size="small"
+                  @click="handleShowQrCode(row)"
+                />
+              </el-tooltip>
               <el-tooltip v-if="auth.delete" content="Delete" placement="top">
                 <el-button
                   type="danger"
@@ -123,6 +168,24 @@
                   @click="handleCopyLink(row)"
                 />
               </el-tooltip>
+              <el-tooltip content="QR Code" placement="top">
+                <el-button
+                  type="warning"
+                  :icon="Camera"
+                  circle
+                  size="small"
+                  @click="handleShowQrCode(row)"
+                />
+              </el-tooltip>
+              <el-tooltip v-if="canPreview(row)" content="Preview" placement="top">
+                <el-button
+                  type="primary"
+                  :icon="Reading"
+                  circle
+                  size="small"
+                  @click="handleShowPreview(row)"
+                />
+              </el-tooltip>
               <el-tooltip content="Info" placement="top">
                 <el-button
                   type="info"
@@ -130,19 +193,6 @@
                   circle
                   size="small"
                   @click="handleShowInfo(row)"
-                />
-              </el-tooltip>
-              <el-tooltip
-                v-if="hasQrCode(row)"
-                content="QR Code"
-                placement="top"
-              >
-                <el-button
-                  type="warning"
-                  :icon="Camera"
-                  circle
-                  size="small"
-                  @click="handleShowQrCode(row)"
                 />
               </el-tooltip>
               <el-tooltip
@@ -191,16 +241,22 @@
                   <template v-if="row.type === 'dir'">
                     <el-dropdown-item command="zip">Download as ZIP</el-dropdown-item>
                     <el-dropdown-item command="info">Info</el-dropdown-item>
-                    <el-dropdown-item v-if="auth.delete" command="delete">Delete</el-dropdown-item>
+                    <el-dropdown-item command="qrcode">QR Code</el-dropdown-item>
+                    <el-dropdown-item v-if="auth.delete" command="delete" divided>
+                      Delete
+                    </el-dropdown-item>
                   </template>
                   <template v-else>
                     <el-dropdown-item command="download">Download</el-dropdown-item>
                     <el-dropdown-item command="copy">Copy Link</el-dropdown-item>
-                    <el-dropdown-item command="info">Info</el-dropdown-item>
-                    <el-dropdown-item v-if="hasQrCode(row)" command="qrcode">QR Code</el-dropdown-item>
+                    <el-dropdown-item command="qrcode">QR Code</el-dropdown-item>
+                    <el-dropdown-item v-if="canPreview(row)" command="preview">Preview</el-dropdown-item>
                     <el-dropdown-item v-if="isVideo(row)" command="video">Play Video</el-dropdown-item>
                     <el-dropdown-item v-if="hasQrCode(row)" command="install">Install</el-dropdown-item>
-                    <el-dropdown-item v-if="auth.delete" command="delete">Delete</el-dropdown-item>
+                    <el-dropdown-item command="info">Info</el-dropdown-item>
+                    <el-dropdown-item v-if="auth.delete" command="delete" divided>
+                      Delete
+                    </el-dropdown-item>
                   </template>
                 </el-dropdown-menu>
               </template>
@@ -209,6 +265,65 @@
         </template>
       </el-table-column>
     </el-table>
+
+    <!-- Mobile: card list layout (no horizontal scroll) -->
+    <div class="mobile-file-list" :class="{ 'is-loading': loading }">
+      <div
+        v-for="row in sortedFiles"
+        :key="row.name"
+        class="mobile-file-card"
+        :class="{ 'mobile-file-card--dir': row.type === 'dir' }"
+        :title="clickActionLabel(getClickAction(row.name, row.type === 'dir'))"
+        @click="handleRowClick(row, $event)"
+      >
+        <div class="mobile-file-icon">
+          <el-icon :size="22">
+            <component :is="getFileIcon(row.name, row.type)" />
+          </el-icon>
+        </div>
+        <div class="mobile-file-info">
+          <div class="mobile-file-name">{{ row.name }}</div>
+          <div class="mobile-file-meta">
+            <span>{{ row.type === 'dir' ? 'Folder' : formatBytes(row.size) }}</span>
+            <span class="mobile-file-sep">·</span>
+            <span>{{ formatMtime(row.mtime) }}</span>
+          </div>
+        </div>
+        <div class="mobile-file-actions" @click.stop>
+          <el-dropdown
+            trigger="click"
+            @command="(cmd: string) => handleMobileAction(cmd, row)"
+          >
+            <el-button :icon="MoreFilled" circle size="small" />
+            <template #dropdown>
+              <el-dropdown-menu>
+                <template v-if="row.type === 'dir'">
+                  <el-dropdown-item command="zip">Download as ZIP</el-dropdown-item>
+                  <el-dropdown-item command="info">Info</el-dropdown-item>
+                  <el-dropdown-item command="qrcode">QR Code</el-dropdown-item>
+                  <el-dropdown-item v-if="auth.delete" command="delete" divided>
+                    Delete
+                  </el-dropdown-item>
+                </template>
+                <template v-else>
+                  <el-dropdown-item command="download">Download</el-dropdown-item>
+                  <el-dropdown-item command="copy">Copy Link</el-dropdown-item>
+                  <el-dropdown-item command="qrcode">QR Code</el-dropdown-item>
+                  <el-dropdown-item v-if="canPreview(row)" command="preview">Preview</el-dropdown-item>
+                  <el-dropdown-item v-if="isVideo(row)" command="video">Play Video</el-dropdown-item>
+                  <el-dropdown-item v-if="hasQrCode(row)" command="install">Install</el-dropdown-item>
+                  <el-dropdown-item command="info">Info</el-dropdown-item>
+                  <el-dropdown-item v-if="auth.delete" command="delete" divided>
+                    Delete
+                  </el-dropdown-item>
+                </template>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+        </div>
+      </div>
+    </div>
+    </template>
 
     <UploadModal
       v-model:visible="showUploadModal"
@@ -231,22 +346,40 @@
       :file="currentVideoFile"
       :current-path="currentPath"
     />
+
+    <TextPreviewModal
+      v-model:visible="showTextPreviewModal"
+      :file="currentPreviewFile"
+      :current-path="currentPath"
+    />
+
+    <ImagePreviewModal
+      v-model:visible="showImagePreviewModal"
+      :file="currentImageFile"
+      :current-path="currentPath"
+      :siblings="imageSiblings"
+      @navigate="handleNavigateImage"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useFileStore } from '@/stores/fileStore'
 import { useFileApi } from '@/composables/useFileApi'
 import type { FileItem as FileItemType } from '@/types'
 import { formatBytes } from '@/utils/formatBytes'
 import { getEncodePath, parentDirectory } from '@/utils/path'
-import { shouldHaveQrcode, isVideoFile } from '@/utils/fileIcon'
+import { shouldHaveQrcode, isVideoFile, isImageFile, getFileIcon } from '@/utils/fileIcon'
+import { isPreviewable, getClickAction, clickActionLabel } from '@/utils/previewable'
+import { copyText } from '@/utils/clipboard'
 import FileItem from './FileItem.vue'
 import UploadModal from './UploadModal.vue'
 import QrCodeModal from './QrCodeModal.vue'
 import FileInfoModal from './FileInfoModal.vue'
 import VideoPlayer from './VideoPlayer.vue'
+import TextPreviewModal from './TextPreviewModal.vue'
+import ImagePreviewModal from './ImagePreviewModal.vue'
 import {
   ArrowLeft,
   View,
@@ -260,7 +393,9 @@ import {
   Camera,
   VideoPlay,
   Box,
-  MoreFilled
+  MoreFilled,
+  Reading,
+  Refresh
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import dayjs from 'dayjs'
@@ -276,10 +411,15 @@ const showUploadModal = ref(false)
 const showQrCodeModal = ref(false)
 const showFileInfoModal = ref(false)
 const showVideoPlayerModal = ref(false)
+const showTextPreviewModal = ref(false)
+const showImagePreviewModal = ref(false)
 const currentQrFile = ref<FileItemType | null>(null)
 const currentInfoFile = ref<FileItemType | null>(null)
 const currentVideoFile = ref<FileItemType | null>(null)
+const currentPreviewFile = ref<FileItemType | null>(null)
+const currentImageFile = ref<FileItemType | null>(null)
 const mtimeTypeFromNow = ref(true)
+const refreshing = ref(false)
 
 // Computed
 const currentPath = computed(() => fileStore.currentPath)
@@ -288,10 +428,55 @@ const auth = computed(() => fileStore.auth)
 const loading = computed(() => fileStore.loading)
 const showHidden = computed(() => fileStore.showHidden)
 
+/** Image siblings for the prev/next carousel inside ImagePreviewModal. */
+const imageSiblings = computed(() =>
+  sortedFiles.value.filter((f) => f.type !== 'dir' && isImageFile(f.name))
+)
+
 function goBack() {
   const parentPath = parentDirectory(currentPath.value)
   fileStore.loadFiles(parentPath || '/')
 }
+
+async function handleRefresh() {
+  if (refreshing.value) return
+  refreshing.value = true
+  // The store's loading flag is already wired to el-table's v-loading and
+  // the empty-state condition, so we don't need a separate table spinner.
+  // Keep the icon spinning for at least 400ms so users get clear visual
+  // feedback even on a fast local server.
+  const startedAt = Date.now()
+  try {
+    await fileStore.loadFiles()
+  } finally {
+    const elapsed = Date.now() - startedAt
+    const minSpin = 400
+    if (elapsed < minSpin) {
+      setTimeout(() => {
+        refreshing.value = false
+      }, minSpin - elapsed)
+    } else {
+      refreshing.value = false
+    }
+  }
+}
+
+function onKeyDown(e: KeyboardEvent) {
+  // F5 — refresh current directory. We intercept the default browser
+  // refresh so a file manager F5 doesn't reload the whole page.
+  if (e.key === 'F5' && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey) {
+    e.preventDefault()
+    handleRefresh()
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', onKeyDown)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeyDown)
+})
 
 function toggleShowHidden() {
   fileStore.toggleShowHidden()
@@ -320,14 +505,62 @@ function isVideo(file: FileItemType): boolean {
   return isVideoFile(file.name)
 }
 
-function handleRowClick(row: FileItemType) {
-  if (row.type === 'dir') {
-    const newPath = getEncodePath(row.name, currentPath.value)
-    fileStore.loadFiles(newPath)
-  } else {
-    const encodePath = getEncodePath(row.name, currentPath.value)
-    window.location.href = encodePath
+function canPreview(file: FileItemType): boolean {
+  return file.type !== 'dir' && isPreviewable(file.name)
+}
+
+function handleRowClick(row: FileItemType, event?: MouseEvent) {
+  // Ctrl / Cmd + click always forces a download — works for every file type,
+  // including directories (which download as ZIP).
+  if (event && (event.ctrlKey || event.metaKey)) {
+    if (row.type === 'dir') {
+      handleDownloadArchive(row)
+    } else {
+      handleDownload(row)
+    }
+    return
   }
+
+  const action = getClickAction(row.name, row.type === 'dir')
+
+  switch (action.kind) {
+    case 'navigate': {
+      const newPath = getEncodePath(row.name, currentPath.value)
+      fileStore.loadFiles(newPath)
+      return
+    }
+    case 'preview-text': {
+      currentPreviewFile.value = row
+      showTextPreviewModal.value = true
+      return
+    }
+    case 'preview-image': {
+      currentImageFile.value = row
+      showImagePreviewModal.value = true
+      return
+    }
+    case 'play-video': {
+      handleVideoPlay(row)
+      return
+    }
+    case 'download': {
+      handleDownload(row)
+      return
+    }
+  }
+}
+
+function handleNavigateImage(target: FileItemType) {
+  currentImageFile.value = target
+}
+
+/**
+ * Element Plus row-class-name hook. Used to apply a CSS class per row
+ * so we can give the cursor/title a per-file hint about what click does.
+ */
+function rowClassName({ row }: { row: FileItemType }): string {
+  const action = getClickAction(row.name, row.type === 'dir')
+  return `row-action-${action.kind}`
 }
 
 function handleDownload(file: FileItemType) {
@@ -346,6 +579,11 @@ function handleShowInfo(file: FileItemType) {
 function handleShowQrCode(file: FileItemType) {
   currentQrFile.value = file
   showQrCodeModal.value = true
+}
+
+function handleShowPreview(file: FileItemType) {
+  currentPreviewFile.value = file
+  showTextPreviewModal.value = true
 }
 
 function handleVideoPlay(file: FileItemType) {
@@ -367,6 +605,7 @@ function handleMobileAction(cmd: string, file: FileItemType) {
     case 'qrcode': handleShowQrCode(file); break
     case 'video': handleVideoPlay(file); break
     case 'install': handleInstall(file); break
+    case 'preview': handleShowPreview(file); break
     case 'delete': handleDeleteFile(file); break
   }
 }
@@ -374,11 +613,11 @@ function handleMobileAction(cmd: string, file: FileItemType) {
 async function handleCopyLink(file: FileItemType) {
   const encodePath = getEncodePath(file.name, currentPath.value)
   const url = window.location.origin + encodePath
-  try {
-    await navigator.clipboard.writeText(url)
+  const ok = await copyText(url)
+  if (ok) {
     ElMessage.success('Link copied to clipboard')
-  } catch {
-    ElMessage.error('Failed to copy link')
+  } else {
+    ElMessage.error('Failed to copy link — please copy manually')
   }
 }
 
@@ -427,9 +666,23 @@ async function handleCreateDirectory() {
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   margin-bottom: 16px;
   flex-wrap: wrap;
+}
+
+.toolbar-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Vertical divider between the nav/view group and the action group.
+   Hidden on mobile where the toolbar wraps; the gap is enough. */
+.toolbar-group--actions {
+  padding-left: 10px;
+  margin-left: 4px;
+  border-left: 1px solid var(--el-border-color-lighter);
 }
 
 .toolbar :deep(.el-button) {
@@ -440,6 +693,89 @@ async function handleCreateDirectory() {
 
 .toolbar :deep(.el-button:active) {
   scale: 0.97;
+}
+
+/* Refresh button: icon spins while refreshing so the click feels
+   acknowledged even on a fast server. */
+.toolbar-refresh .el-icon {
+  transition: transform 0.2s ease-out;
+}
+
+.toolbar-refresh--spinning .el-icon {
+  animation: toolbar-refresh-spin 0.9s linear infinite;
+}
+
+.toolbar-refresh--spinning {
+  pointer-events: none;
+  opacity: 0.85;
+}
+
+@keyframes toolbar-refresh-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* ── Responsive: Tablet / phone ── */
+@media (max-width: 640px) {
+  .toolbar {
+    gap: 8px;
+  }
+
+  /* Hide the textual label on every toolbar button — they're
+     self-explanatory via the tooltip wrappers added above. */
+  .toolbar-label {
+    display: none;
+  }
+
+  /* Convert each button into a uniform square icon button.
+     40×40 meets both Apple HIG (44pt target — close) and
+     Material Design (48dp — also close) for touch ergonomics. */
+  .toolbar-btn {
+    width: 40px !important;
+    min-width: 40px;
+    height: 40px;
+    min-height: 40px;
+    padding: 0 !important;
+    margin: 0;
+  }
+
+  .toolbar-btn .el-icon {
+    margin: 0;
+    font-size: 18px;
+  }
+
+  /* The desktop divider doesn't make sense once buttons are
+     uniform-sized icons. Use a small gap instead. */
+  .toolbar-group--actions {
+    padding-left: 0;
+    margin-left: 0;
+    border-left: none;
+  }
+
+  /* Wrap toolbar groups onto their own line if the row is too
+     wide — but the action group should never be split. */
+  .toolbar-group {
+    flex-wrap: nowrap;
+  }
+}
+
+/* On tiny phones we shrink the touch target a touch to fit more
+   icons in a single row when possible. */
+@media (max-width: 400px) {
+  .toolbar {
+    gap: 6px;
+  }
+
+  .toolbar-btn {
+    width: 36px !important;
+    min-width: 36px;
+    height: 36px;
+    min-height: 36px;
+  }
+
+  .toolbar-btn .el-icon {
+    font-size: 16px;
+  }
 }
 
 /* ── Table ── */
@@ -525,6 +861,27 @@ async function handleCreateDirectory() {
   flex-wrap: nowrap;
 }
 
+/* ── Smart click row hints ── */
+.file-name-cell-wrap {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+}
+
+/* Per-action cursor cue. Tables are already cursor: pointer, but for
+   previewable files the cursor goes zoom-in to telegraph "this opens
+   a preview, not a download". */
+.file-list-container :deep(tr.row-action-preview-text) {
+  cursor: zoom-in;
+}
+.file-list-container :deep(tr.row-action-preview-image) {
+  cursor: zoom-in;
+}
+.file-list-container :deep(tr.row-action-play-video) {
+  cursor: pointer;
+}
+
 .action-buttons :deep(.el-button) {
   transition: all var(--transition-base);
 }
@@ -580,11 +937,16 @@ async function handleCreateDirectory() {
   display: none;
 }
 
+/* ── Mobile card list (hidden on desktop) ── */
+.mobile-file-list {
+  display: none;
+}
+
 /* ── Responsive: Phone / Small tablet ── */
 @media (max-width: 640px) {
   .file-list-container {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
+    /* No more horizontal scroll — full-width card list */
+    overflow-x: visible;
   }
 
   .toolbar .el-button {
@@ -592,37 +954,18 @@ async function handleCreateDirectory() {
     padding: 6px 10px;
   }
 
-  /* Hide desktop action buttons, show dropdown */
-  .action-desktop {
-    display: none;
-  }
-
-  .action-mobile {
-    display: flex;
-    justify-content: center;
-  }
-
-  /* Hide Modified column */
-  .file-list-container :deep(.col-modified) {
+  /* Hide the table, show the card list */
+  .file-list-container :deep(.file-table) {
     display: none !important;
   }
 
-  /* Shrink table columns */
-  .file-list-container :deep(.el-table__header colgroup col:nth-child(1)),
-  .file-list-container :deep(.el-table__body colgroup col:nth-child(1)) {
-    width: auto !important;
+  .mobile-file-list {
+    display: block;
   }
 
-  /* Reduce actions column width */
-  .file-list-container :deep(.col-actions) {
-    width: 52px !important;
-    min-width: 52px !important;
-  }
-
-  /* Table cell padding reduction */
-  .file-list-container :deep(.el-table__header th .cell),
-  .file-list-container :deep(.el-table__body td .cell) {
-    padding: 0 8px;
+  /* Hide Modified column (still applies if the table ever leaks through) */
+  .file-list-container :deep(.col-modified) {
+    display: none !important;
   }
 
   .data-mono {
@@ -630,25 +973,109 @@ async function handleCreateDirectory() {
   }
 }
 
+/* ── Mobile card styles ── */
+.mobile-file-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--radius-md);
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition:
+    background-color var(--transition-base),
+    border-color var(--transition-base),
+    transform var(--transition-base);
+}
+
+.mobile-file-card:last-child {
+  margin-bottom: 0;
+}
+
+.mobile-file-card:hover {
+  background: var(--el-fill-color-light);
+  border-color: var(--el-border-color);
+}
+
+.mobile-file-card:active {
+  transform: scale(0.99);
+  background: var(--el-fill-color);
+}
+
+.mobile-file-card--dir {
+  /* Subtle hint that folders are tappable cards, not links */
+}
+
+.mobile-file-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--el-color-primary) 10%, transparent);
+  color: var(--el-color-primary);
+}
+
+.mobile-file-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mobile-file-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--el-text-color-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  letter-spacing: -0.005em;
+}
+
+.mobile-file-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--el-text-color-secondary);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-file-sep {
+  color: var(--el-text-color-placeholder);
+}
+
+.mobile-file-actions {
+  flex-shrink: 0;
+}
+
 /* ── Responsive: Tiny phone ── */
 @media (max-width: 400px) {
-  .toolbar {
-    gap: 4px;
+  .mobile-file-card {
+    padding: 10px 12px;
+    gap: 10px;
   }
 
-  .toolbar .el-button {
+  .mobile-file-icon {
+    width: 36px;
+    height: 36px;
+  }
+
+  .mobile-file-name {
+    font-size: 13px;
+  }
+
+  .mobile-file-meta {
     font-size: 11px;
-    padding: 4px 8px;
-  }
-
-  /* Hide toolbar button labels, icon-only */
-  .toolbar .el-button .el-icon + * {
-    display: none;
-  }
-
-  /* Shrink name column */
-  .file-list-container :deep(.el-table__body td .cell) {
-    padding: 0 6px;
   }
 }
 </style>

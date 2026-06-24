@@ -79,8 +79,9 @@ watch(
   justify-content: center;
   align-items: center;
   background-color: #000;
-  border-radius: 4px;
+  border-radius: var(--radius-lg);
   min-height: 300px;
+  overflow: hidden;
 }
 
 .video-player {

@@ -36,11 +36,6 @@
           <pre>{{ JSON.stringify(fileInfo.extra, null, 2) }}</pre>
         </el-card>
       </template>
-
-      <template v-if="fileInfo?.type === 'markdown' && markdownContent">
-        <el-divider content-position="left">Preview</el-divider>
-        <div class="markdown-preview" v-html="renderedMarkdown"></div>
-      </template>
     </div>
   </el-dialog>
 </template>
@@ -50,9 +45,7 @@ import { ref, computed, watch } from 'vue'
 import type { FileItem, FileInfo as FileInfoType } from '@/types'
 import { useFileApi } from '@/composables/useFileApi'
 import { formatBytes } from '@/utils/formatBytes'
-import { getEncodePath } from '@/utils/path'
 import { Loading } from '@element-plus/icons-vue'
-import { marked } from 'marked'
 import dayjs from 'dayjs'
 
 interface Props {
@@ -70,7 +63,6 @@ const fileApi = useFileApi()
 
 const fileInfo = ref<FileInfoType | null>(null)
 const loading = ref(false)
-const markdownContent = ref('')
 
 const visible = computed({
   get: () => props.visible,
@@ -93,23 +85,12 @@ const formatMtime = computed(() => {
   return dayjs(fileInfo.value.mtime).format('YYYY-MM-DD HH:mm:ss')
 })
 
-const renderedMarkdown = computed(() => {
-  if (!markdownContent.value) return ''
-  return marked.parse(markdownContent.value) as string
-})
-
 async function loadFileInfo() {
   if (!props.file) return
 
   loading.value = true
   try {
     fileInfo.value = await fileApi.fetchFileInfo(props.currentPath, props.file.name)
-    
-    if (fileInfo.value.type === 'markdown') {
-      const encodePath = getEncodePath(props.file.name, props.currentPath)
-      const response = await fetch(encodePath)
-      markdownContent.value = await response.text()
-    }
   } catch (error) {
     console.error('Failed to load file info:', error)
   } finally {
@@ -124,7 +105,6 @@ watch(
       loadFileInfo()
     } else {
       fileInfo.value = null
-      markdownContent.value = ''
     }
   }
 )
@@ -149,12 +129,6 @@ watch(
   overflow-x: auto;
   background: var(--el-fill-color-lighter);
   padding: 12px;
-  border-radius: 4px;
-}
-
-.markdown-preview {
-  padding: 16px;
-  background: var(--el-bg-color-page);
-  border-radius: 4px;
+  border-radius: var(--radius-md);
 }
 </style>
