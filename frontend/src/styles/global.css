@@ -6,11 +6,12 @@
     Consolas, 'Liberation Mono', Menlo, monospace;
   --transition-base: 200ms cubic-bezier(0.4, 0, 0.2, 1);
   --transition-smooth: 300ms cubic-bezier(0.16, 1, 0.3, 1);
-  /* Linear-inspired radius scale */
-  --radius-sm: 4px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-xl: 16px;
+  /* Linear-inspired radius scale — bumped one step for a softer, more rounded feel */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-pill: 999px;
 }
 
 /* ── Base ── */
@@ -72,6 +73,109 @@ body {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+/* ── Global rounded-corner overrides ──
+   Element Plus components use the --el-border-radius-* CSS vars internally.
+   By remapping them all to our design tokens, every Button, Input, Dialog,
+   Dropdown, etc. inherits a softer, consistent rounded look without touching
+   each component instance. */
+
+:root {
+  --el-border-radius-base: var(--radius-md);
+  --el-border-radius-small: var(--radius-sm);
+  --el-border-radius-round: var(--radius-pill);
+  --el-border-radius-circle: 50%;
+
+  /* Element Plus components that take a dedicated radius var */
+  --el-button-border-radius: var(--radius-md);
+  --el-input-border-radius: var(--radius-md);
+  --el-textarea-border-radius: var(--radius-md);
+  --el-card-border-radius: var(--radius-lg);
+  --el-dialog-border-radius: var(--radius-xl);
+  --el-drawer-border-radius: 0;
+  --el-message-border-radius: var(--radius-md);
+  --el-message-box-border-radius: var(--radius-xl);
+  --el-notification-border-radius: var(--radius-lg);
+  --el-popper-border-radius: var(--radius-md);
+  --el-tag-border-radius: var(--radius-sm);
+  --el-checkbox-border-radius: var(--radius-sm);
+  --el-switch-border-radius: var(--radius-pill);
+  --el-progress-border-radius: var(--radius-pill);
+  --el-slider-button-border-radius: 50%;
+  --el-pagination-border-radius: var(--radius-md);
+  --el-table-border-radius: var(--radius-lg);
+  --el-tooltip-border-radius: var(--radius-sm);
+  --el-dropdown-menu-border-radius: var(--radius-md);
+  --el-select-border-radius: var(--radius-md);
+  --el-select-v2-border-radius: var(--radius-md);
+  --el-segmented-item-border-radius: var(--radius-md);
+  --el-date-editor-border-radius: var(--radius-md);
+  --el-cascader-border-radius: var(--radius-md);
+  --el-tree-node-content-hover-border-radius: var(--radius-sm);
+  --el-collapse-item-border-radius: var(--radius-md);
+  --el-image-border-radius: var(--radius-md);
+  --el-skeleton-item-radius: var(--radius-sm);
+}
+
+/* Descriptions: soften the cell separators */
+.el-descriptions__cell {
+  border-radius: 0 !important;
+}
+
+.el-descriptions__label,
+.el-descriptions__content {
+  border-radius: 0 !important;
+}
+
+.el-descriptions__label.is-bordered-label {
+  border-top-left-radius: var(--radius-sm) !important;
+  border-bottom-left-radius: var(--radius-sm) !important;
+}
+
+.el-descriptions__content.is-bordered-content {
+  border-top-right-radius: var(--radius-sm) !important;
+  border-bottom-right-radius: var(--radius-sm) !important;
+}
+
+/* Circle icon-only buttons: keep them as circles (overrides the
+   pill border-radius we just set on .el-button). */
+.el-button.is-circle {
+  border-radius: 50% !important;
+}
+
+.el-button.is-round {
+  border-radius: var(--radius-pill) !important;
+}
+
+/* Upload drag area: match the rest of the dialog */
+.el-upload-dragger {
+  border-radius: var(--radius-lg) !important;
+}
+
+/* Empty / loading masks on tables */
+.el-loading-mask {
+  border-radius: inherit !important;
+}
+
+/* Tooltips / popovers / dropdowns get a subtle pop */
+.el-popper,
+.el-tooltip__popper,
+.el-dropdown-menu,
+.el-select-dropdown {
+  border-radius: var(--radius-md) !important;
+}
+
+/* Notification top-left accent — also round */
+.el-notification {
+  border-radius: var(--radius-lg) !important;
+}
+
+/* Drawer on mobile: round the inner edge */
+@media (max-width: 768px) {
+  .el-drawer {
+    border-radius: var(--radius-xl) var(--radius-xl) 0 0 !important;
   }
 }
 

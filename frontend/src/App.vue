@@ -67,18 +67,31 @@
           <FileList />
         </div>
         <footer class="app-footer">
-          <a
-            href="https://github.com/codeskyblue/gohttpserver"
-            target="_blank"
-            class="footer-link"
-          >gohttpserver</a>
-          <span class="footer-sep">v{{ version }}</span>
-          <span class="footer-sep">by</span>
-          <a
-            href="https://github.com/codeskyblue"
-            target="_blank"
-            class="footer-link footer-link--dim"
-          >codeskyblue</a>
+          <div class="footer-card">
+            <a
+              href="https://github.com/codeskyblue/gohttpserver"
+              target="_blank"
+              rel="noopener"
+              class="footer-product"
+              title="View on GitHub"
+            >
+              gohttpserver
+            </a>
+            <span
+              v-if="version && version !== 'unknown'"
+              class="footer-version"
+            >v{{ version }}</span>
+            <span class="footer-divider" aria-hidden="true">·</span>
+            <span class="footer-byline">
+              built with <span class="footer-heart" aria-hidden="true">♥</span> by
+            </span>
+            <a
+              href="https://github.com/codeskyblue"
+              target="_blank"
+              rel="noopener"
+              class="footer-author"
+            >codeskyblue</a>
+          </div>
         </footer>
       </main>
 
@@ -306,27 +319,87 @@ html, body, #app {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--el-text-color-placeholder);
 }
 
-.footer-link {
+/* Pill card: the whole footer is one rounded container. Looks more
+   deliberate than a flat row of text and survives theming cleanly. */
+.footer-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  font-size: 12.5px;
+  line-height: 1.2;
+  background: color-mix(in srgb, var(--el-fill-color-blank) 60%, transparent);
+  border: 1px solid var(--el-border-color-extra-light);
+  border-radius: var(--radius-pill);
   color: var(--el-text-color-secondary);
+  transition:
+    border-color var(--transition-base),
+    background-color var(--transition-base);
+}
+
+.footer-card:hover {
+  border-color: var(--el-border-color-lighter);
+  background: var(--el-fill-color-blank);
+}
+
+.footer-product {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--el-text-color-primary);
+  text-decoration: none;
+  letter-spacing: -0.01em;
+  transition: color var(--transition-base);
+}
+
+.footer-product:hover {
+  color: var(--el-color-primary);
+}
+
+.footer-version {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  padding: 2px 7px;
+  color: var(--el-text-color-secondary);
+  background: var(--el-fill-color);
+  border-radius: var(--radius-pill);
+  line-height: 1.4;
+}
+
+.footer-divider {
+  color: var(--el-text-color-placeholder);
+  opacity: 0.5;
+  user-select: none;
+}
+
+.footer-byline {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
+.footer-heart {
+  color: #ef4444; /* stays red in all themes — universal "love" signal */
+  display: inline-block;
+  transform: translateY(-0.5px);
+  transition: transform var(--transition-base);
+}
+
+.footer-card:hover .footer-heart {
+  transform: translateY(-0.5px) scale(1.15);
+}
+
+.footer-author {
+  font-weight: 500;
+  color: var(--el-text-color-regular);
   text-decoration: none;
   transition: color var(--transition-base);
 }
 
-.footer-link:hover {
+.footer-author:hover {
   color: var(--el-color-primary);
-}
-
-.footer-link--dim {
-  color: var(--el-text-color-placeholder);
-}
-
-.footer-sep {
-  color: var(--el-border-color-darker);
 }
 
 /* ── Themes ── */
@@ -432,6 +505,12 @@ html, body, #app {
   .theme-toggle span {
     display: none;
   }
+
+  /* Center the footer pill card on tablet/phone. */
+  .app-footer {
+    justify-content: center;
+    padding: 20px 16px 12px;
+  }
 }
 
 /* ── Responsive: Phone ── */
@@ -466,6 +545,21 @@ html, body, #app {
   .app-footer {
     padding: 16px 12px 12px;
     font-size: 11px;
+  }
+
+  /* On tiny phones the pill may exceed the viewport. Allow it to wrap
+     to a second line so nothing overflows, and trim the inner padding. */
+  .footer-card {
+    flex-wrap: wrap;
+    justify-content: center;
+    row-gap: 6px;
+    column-gap: 6px;
+    padding: 6px 10px;
+    font-size: 11.5px;
+  }
+
+  .footer-product {
+    font-size: 12.5px;
   }
 }
 </style>

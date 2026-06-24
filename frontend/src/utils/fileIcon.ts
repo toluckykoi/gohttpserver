@@ -111,3 +111,22 @@ export function isVideoFile(filename: string): boolean {
   const videoExtensions = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv']
   return videoExtensions.includes(ext)
 }
+
+export function isImageFile(filename: string): boolean {
+  const ext = filename.split('.').pop()?.toLowerCase() || ''
+  return [
+    'jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg', 'webp',
+    'avif', 'ico', 'tif', 'tiff', 'heic', 'heif'
+  ].includes(ext)
+}
+
+export function isAudioFile(filename: string): boolean {
+  const ext = filename.split('.').pop()?.toLowerCase() || ''
+  return [
+    'mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a', 'opus', 'wma'
+  ].includes(ext)
+}
+
+export function isPdfFile(filename: string): boolean {
+  return filename.split('.').pop()?.toLowerCase() === 'pdf'
+}
