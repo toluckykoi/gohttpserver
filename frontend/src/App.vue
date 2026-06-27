@@ -12,7 +12,11 @@
           </div>
 
           <div class="header-right">
-            <el-button class="header-btn" @click="handleShowMainQrCode">
+            <!-- QR button: hidden on phone, see CSS. There's no point
+                 scanning the current page's QR from the same device
+                 that already rendered it. Drop it to give the title
+                 and the remaining controls the room they need. -->
+            <el-button class="header-btn header-btn--qr" @click="handleShowMainQrCode">
               <el-icon :size="16"><Camera /></el-icon>
               <span class="header-btn-label">View in Phone</span>
             </el-button>
@@ -38,10 +42,18 @@
             </el-input>
 
             <el-dropdown @command="handleThemeChange">
-              <el-button class="header-btn theme-toggle">
-                <el-icon :size="16"><MoonNight /></el-icon>
-                <span>{{ currentTheme }}</span>
-                <el-icon :size="12" class="chevron"><ArrowDown /></el-icon>
+              <el-button class="header-btn theme-toggle" :title="`Theme: ${currentTheme}`">
+                <!-- Theme-coloured swatch: the only theme indicator that
+                     makes sense across light AND dark themes. The old
+                     hardcoded MoonNight icon was misleading on light
+                     themes (and unreadable on a light header background)
+                     because it stayed the same regardless of which
+                     theme was actually active. The swatch mirrors the
+                     theme's accent colour, so the user can tell at a
+                     glance which theme they're on. -->
+                <span class="theme-swatch" :data-theme="currentTheme" aria-hidden="true"></span>
+                <span class="theme-name">{{ currentTheme }}</span>
+                <el-icon :size="10" class="chevron"><ArrowDown /></el-icon>
               </el-button>
               <template #dropdown>
                 <el-dropdown-menu>
@@ -114,7 +126,7 @@ import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
 import QRCodeModal from './components/QrCodeModal.vue'
 import type { FileItem } from './types'
 import {
-  Camera, User, Search, MoonNight, ArrowDown
+  Camera, User, Search, ArrowDown
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 
@@ -230,6 +242,11 @@ html, body, #app {
   margin: -4px -8px;
   border-radius: var(--radius-md);
   transition: background var(--transition-base);
+  /* min-width: 0 lets the flex item shrink below its content's
+     intrinsic width, which the title needs to be able to ellipsise
+     when the right-side controls (search, theme) push for space. */
+  min-width: 0;
+  flex-shrink: 1;
 }
 
 .header-brand:hover {
@@ -253,6 +270,13 @@ html, body, #app {
   letter-spacing: -0.01em;
   color: var(--el-text-color-primary);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* Same rationale as .header-brand: without min-width: 0 the flex
+     item refuses to shrink below its content width, so the right-side
+     controls end up overflowing the viewport on narrow phones and
+     covering the title. */
+  min-width: 0;
   transition: color var(--transition-base);
 }
 
@@ -284,6 +308,32 @@ html, body, #app {
 
 .header-search {
   width: 220px;
+}
+
+/* Theme switcher: a small coloured dot that mirrors the current theme's
+   accent. Fixed on screen and works on both light and dark headers,
+   unlike the previous MoonNight icon which was misleading on light
+   themes and visually identical across all four themes. */
+.theme-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid var(--el-border-color);
+  box-sizing: border-box;
+  flex-shrink: 0;
+  vertical-align: middle;
+  transition: background-color var(--transition-base),
+    border-color var(--transition-base);
+}
+
+.theme-swatch[data-theme="white"] { background: #f5f5f5; }
+.theme-swatch[data-theme="black"] { background: #1f1f1f; }
+.theme-swatch[data-theme="green"] { background: #3d6b4a; }
+.theme-swatch[data-theme="cyan"]  { background: #00b8d4; }
+
+.theme-name {
+  margin-left: 2px;
 }
 
 .theme-toggle .chevron {
@@ -496,13 +546,54 @@ html, body, #app {
     font-size: 14px;
   }
 
+  /* Shrink the right-side control buttons to square icon-only chips
+     so the brand area keeps its original logo size + title text.
+     Element Plus' default button padding eats ~30px each side; that
+     alone can push the title off-screen on a 360px phone. */
+  .header-btn {
+    padding-left: 8px;
+    padding-right: 8px;
+    min-height: 32px;
+  }
+
+  /* On phone there's no useful action for the "View in Phone" QR —
+     you're already viewing it on the only device that could scan it.
+     Hiding it frees ~40px of header width that the brand area needs. */
+  .header-btn--qr {
+    display: none;
+  }
+
+  .header-right {
+    /* Tighter gap so the remaining right-side items sit closer
+       together once the QR button is gone. */
+    gap: 6px;
+  }
+
   .header-search {
-    width: 140px;
+    /* On tablet/phone, drop the fixed width and grow into the space
+       the rest of the header leaves over. min-width keeps the input
+       usable (the prefix icon + clear button need ~80px on their
+       own) and max-width stops it from swallowing everything when
+       the title is short. */
+    width: auto;
+    flex: 1 1 0;
+    min-width: 100px;
+    max-width: 220px;
   }
 
   .header-btn-label,
   .header-user span,
-  .theme-toggle span {
+  .theme-toggle .theme-name {
+    /* Keep the swatch and chevron visible — they're how the user
+       sees the current theme and recognises the dropdown trigger. */
+    display: none;
+  }
+
+  .theme-toggle .chevron {
+    /* Drop the chevron on tablet/phone. The swatch alone doesn't
+       obviously telegraph "dropdown", but the button's tap target
+       + the immediate menu on tap is the established mobile pattern
+       for icon-only controls. Saves ~14px horizontally. */
     display: none;
   }
 
@@ -525,6 +616,12 @@ html, body, #app {
 
   .header-title {
     font-size: 13px;
+    /* Below 380px the title's natural width plus the right-side
+       controls exceed the viewport — even with ellipsis the title
+       becomes a single character with "...". Drop the title text
+       entirely on the smallest phones; the logo + URL bar still
+       convey the brand. */
+    max-width: 140px;
   }
 
   .header-brand {
@@ -533,13 +630,12 @@ html, body, #app {
     margin: -4px -6px;
   }
 
-  .header-logo {
-    width: 20px;
-    height: 20px;
-  }
-
   .header-search {
-    width: 100px;
+    /* Trim the search minimum on the smallest phones so the brand
+       area can keep showing its logo + at least a few characters of
+       title before hitting the ellipsis-or-hide boundary. */
+    min-width: 90px;
+    max-width: 160px;
   }
 
   .app-footer {
@@ -560,6 +656,17 @@ html, body, #app {
 
   .footer-product {
     font-size: 12.5px;
+  }
+}
+
+/* ── Tiny phones (iPhone SE, etc.) ──
+   Below 360px the title is one character + "..." and the right-side
+   controls still overlap it. Hide the title text outright — the
+   logo alone is enough brand, and the breadcrumb below the header
+   still tells the user where they are. */
+@media (max-width: 360px) {
+  .header-title {
+    display: none;
   }
 }
 </style>

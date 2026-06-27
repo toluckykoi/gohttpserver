@@ -26,19 +26,19 @@
 - [x] Plist 代理
 - [ ] 下载次数统计
 - [x] 支持 CORS
-- [ ] 离线下载
-- [ ] 代码文件预览
-- [ ] 编辑文件支持
+- [x] 离线下载
+- [x] 代码文件预览
+- [x] 编辑文件支持
 - [x] 全局文件搜索
 - [x] 在小屏幕上隐藏下载和二维码按钮
 - [x] 主题切换支持
 - [x] 可在 Nginx 后面正常工作
 - [x] 支持 `.ghs.yml` 配置（类似 `.htaccess`）
-- [ ] 计算 MD5 和 SHA
-- [ ] 文件夹上传
-- [ ] 支持按大小或修改时间排序
+- [x] 计算 MD5 和 SHA
+- [x] 文件夹上传
+- [x] 支持按大小或修改时间排序
 - [x] 在首页添加版本信息
-- [ ] 添加 API `/-/info/some.(apk|ipa)` 获取详细信息
+- [x] 添加 API `/-/info/some.(apk|ipa)` 获取详细信息
 - [x] 添加 API `/-/apk/info/some.apk` 获取 Android 包信息
 - [x] 自动标记版本
 - [x] 自定义标题支持
@@ -47,7 +47,7 @@
 - [x] 显示文件夹大小
 - [x] 创建文件夹
 - [x] 按住 Alt 键跳过删除确认
-- [x] 上传时支持解压 zip 文件（使用参数 `unzip=true`）
+- [x] 上传时支持解压 zip 文件（解压文件显示进度）
 
 ## 安装
 
@@ -233,6 +233,20 @@ curl -F file=@pkg.zip -F unzip=true localhost:8000/somedir
 ```
 
 注意：文件名中不允许包含 `\/:*<>|` 字符。
+
+上传整个文件夹（保留目录结构）。每个文件随 `path` 表单字段一起发送相对路径，
+服务端会自动创建中间目录：
+
+```bash
+# 单个文件 + 相对路径，服务端会创建 MyFolder/ 目录
+curl -F file=@a.txt     -F path=MyFolder/a.txt     localhost:8000/somedir
+curl -F file=@sub/b.txt -F path=MyFolder/sub/b.txt localhost:8000/somedir
+# 落地后：somedir/MyFolder/a.txt 与 somedir/MyFolder/sub/b.txt
+```
+
+注意：`path` 字段不允许包含 `..` 或绝对路径（拒绝目录逃逸），且每个路径段
+不允许包含 `\: * < > | "` 字符。前端可以通过文件夹选择按钮自动生成这些
+`path`（Chrome / Edge / Firefox 支持，Safari 不支持）。
 
 ### 使用 Nginx 部署
 

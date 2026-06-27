@@ -1,7 +1,12 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
+	"context"
+	"crypto/md5"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,10 +14,13 @@ import (
 	"io"
 	"log"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -106,8 +114,21 @@ func NewHTTPStaticServer(root string, noIndex bool) *HTTPStaticServer {
 	m.HandleFunc("/-/ipa/link/{path:.*}", s.hIpaLink)
 	m.HandleFunc("/-/video-player/{path:.*}", s.hVideoPlayer)
 
+	// Multi-select archive. Frontend posts a JSON body listing each
+	// selected path; we stream back a single zip preserving each entry's
+	// basename as the top-level name in the archive.
+	m.HandleFunc("/-/zip", s.hZipMulti).Methods("POST")
+
+	// Offline URL download. Frontend posts form fields `url` (the
+	// remote resource to fetch) and `to` (the basename to save as
+	// under the current directory). SSRF protection lives inside the
+	// handler — we block private/loopback IPs before opening the
+	// remote connection.
+	m.HandleFunc("/-/fetch", s.hFetch).Methods("POST")
+
 	m.HandleFunc("/{path:.*}", s.hIndex).Methods("GET", "HEAD")
 	m.HandleFunc("/{path:.*}", s.hUploadOrMkdir).Methods("POST")
+	m.HandleFunc("/{path:.*}", s.hEdit).Methods("PUT")
 	m.HandleFunc("/{path:.*}", s.hDelete).Methods("DELETE")
 	return s
 }
@@ -120,17 +141,24 @@ func (s *HTTPStaticServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // Return real path with Seperator(/)
 func (s *HTTPStaticServer) getRealPath(r *http.Request) string {
-	path := mux.Vars(r)["path"]
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
+	return s.resolvePath(mux.Vars(r)["path"])
+}
+
+// resolvePath turns a URL path (already URL-decoded by gorilla/mux) into an
+// absolute, slash-normalised filesystem path under s.Root. It is shared by
+// getRealPath (which feeds it from a route var) and by handlers like
+// hZipMulti that take paths from a JSON body. filepath.Clean collapses any
+// ".." segments so a caller cannot escape s.Root.
+func (s *HTTPStaticServer) resolvePath(urlPath string) string {
+	if !strings.HasPrefix(urlPath, "/") {
+		urlPath = "/" + urlPath
 	}
-	path = filepath.Clean(path) // prevent .. for safe issues
-	relativePath, err := filepath.Rel(s.Prefix, path)
+	cleanPath := filepath.Clean(urlPath) // prevent .. for safe issues
+	relativePath, err := filepath.Rel(s.Prefix, cleanPath)
 	if err != nil {
-		relativePath = path
+		relativePath = cleanPath
 	}
-	realPath := filepath.Join(s.Root, relativePath)
-	return filepath.ToSlash(realPath)
+	return filepath.ToSlash(filepath.Join(s.Root, relativePath))
 }
 
 func (s *HTTPStaticServer) hIndex(w http.ResponseWriter, r *http.Request) {
@@ -203,6 +231,8 @@ func (s *HTTPStaticServer) hDelete(w http.ResponseWriter, req *http.Request) {
 		}
 		return
 	}
+	// Drop cached sizes — files just disappeared from disk.
+	invalidateDirSizeCache()
 	w.Write([]byte("Success"))
 }
 
@@ -249,12 +279,49 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 	if filename == "" {
 		filename = header.Filename
 	}
-	if err := checkFilename(filename); err != nil {
-		http.Error(w, err.Error(), http.StatusForbidden)
-		return
-	}
 
-	dstPath := filepath.Join(dirpath, filename)
+	// `path` is the relative-path field used by folder uploads. When
+	// set, it overrides the flat `filename`/`header.Filename` semantics
+	// and lets the caller preserve directory structure. We normalise
+	// separators to "/" first so the segment check below works on both
+	// POSIX and Windows.
+	relPath := req.FormValue("path")
+	var dstPath string
+	if relPath != "" {
+		cleaned := path.Clean(strings.ReplaceAll(relPath, "\\", "/"))
+		// Reject absolute paths on either OS: path.IsAbs covers "/..."
+		// (POSIX and Windows-style), filepath.IsAbs additionally catches
+		// Windows drive letters like "C:/foo". Both together close the
+		// hole regardless of where the server runs.
+		if path.IsAbs(cleaned) || filepath.IsAbs(cleaned) {
+			http.Error(w, "Invalid path", http.StatusBadRequest)
+			return
+		}
+		for _, seg := range strings.Split(cleaned, "/") {
+			if err := checkPathSegment(seg); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		dstPath = filepath.Join(dirpath, filepath.FromSlash(cleaned))
+		// Create any intermediate directories the relative path implies.
+		// The existing os.MkdirAll(dirpath) above only guarantees the
+		// URL-route directory exists; for folder uploads we may need to
+		// create "MyFolder/" and "MyFolder/sub/" too.
+		if parent := filepath.Dir(dstPath); parent != dirpath {
+			if err := os.MkdirAll(parent, os.ModePerm); err != nil {
+				log.Println("Create parent directory:", err)
+				http.Error(w, "Directory create "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+	} else {
+		if err := checkFilename(filename); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		dstPath = filepath.Join(dirpath, filename)
+	}
 
 	// Large file (>32MB) will store in tmp directory
 	// The quickest operation is call os.Move instead of os.Copy
@@ -289,23 +356,378 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
 
+	// Drop cached directory sizes — a file just landed on disk and the
+	// next directory listing should reflect it without waiting for the
+	// 10-minute index rebuild.
+	invalidateDirSizeCache()
+
 	if req.FormValue("unzip") == "true" {
-		err = unzipFile(dstPath, dirpath)
-		os.Remove(dstPath)
+		// Streaming NDJSON progress: switch the response to chunked
+		// transfer and emit one JSON line per file as it is extracted.
+		// The terminal line carries the final success/description so the
+		// client can resolve its upload promise.
+		w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+		// Disable nginx response buffering so progress events reach the
+		// client in real time instead of being held until the handler
+		// returns. No-op for direct connections.
+		w.Header().Set("X-Accel-Buffering", "no")
+		flusher, _ := w.(http.Flusher)
+
+		writeLine := func(payload string) {
+			io.WriteString(w, payload)
+			io.WriteString(w, "\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+
+		err = unzipFile(req.Context(), dstPath, dirpath, func(idx, total int, name string) {
+			// Best-effort JSON-encode the file name; invalid UTF-8
+			// sequences are replaced rather than aborting extraction.
+			encoded, _ := json.Marshal(name)
+			writeLine(fmt.Sprintf(`{"phase":"unzip","current":%d,"total":%d,"file":%s}`, idx, total, string(encoded)))
+		})
+		// Only remove the original archive after a successful extraction.
+		// The previous behaviour of always-remove would silently destroy
+		// non-zip uploads that the client sent with unzip=true (e.g. a
+		// mixed batch where the user ticked "extract after upload" but
+		// also included regular files). On failure the file stays on
+		// disk so the user can retry or extract it manually.
+		if err == nil {
+			os.Remove(dstPath)
+		}
 		message := "success"
 		if err != nil {
 			message = err.Error()
 		}
-		json.NewEncoder(w).Encode(map[string]any{
-			"success":     err == nil,
-			"description": message,
-		})
+		writeLine(fmt.Sprintf(`{"phase":"done","success":%v,"description":%q}`, err == nil, message))
 		return
 	}
 
 	json.NewEncoder(w).Encode(map[string]any{
 		"success":     true,
 		"destination": dstPath,
+	})
+}
+
+// maxEditSize caps how large a PUT body we accept for in-browser file
+// edits. Browsers reasonably edit text files (markdown, JSON, code),
+// not multi-GB blobs — anything bigger should be downloaded and
+// re-uploaded as a whole file. 5 MiB matches Element Plus's textarea
+// ergonomics: a comfortable ceiling for source files, well under
+// memory pressure on the server.
+const maxEditSize int64 = 5 * 1024 * 1024
+
+// hEdit handles PUT requests against an existing file. The request
+// body becomes the new file contents. Use case: the frontend's
+// in-browser editor saves changes for small text files (code,
+// markdown, config). For multi-MB files, the upload pipeline is the
+// right path; PUT is intentionally size-capped.
+//
+// Auth: same as upload — the user must have upload permission on the
+// containing directory. We do not require delete permission; PUT
+// modifies, doesn't remove. The existing .ghs.yml `upload` flag is
+// the natural gate.
+func (s *HTTPStaticServer) hEdit(w http.ResponseWriter, req *http.Request) {
+	dstPath := s.getRealPath(req)
+
+	// Reject obvious path escapes early — the resolvePath call below
+	// already cleans the route var, but a PUT against "../../etc/foo"
+	// would resolve outside Root and we'd then be writing to a file
+	// the user can't browse to. Belt and braces.
+	if strings.Contains(req.URL.Path, "..") {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	// Reject writes to directories. PUT against a directory is a 400
+	// because mkdir is POST + no multipart, and reusing PUT for both
+	// would muddle the semantics of each handler.
+	fi, err := os.Stat(dstPath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if fi.IsDir() {
+		http.Error(w, "Cannot edit a directory", http.StatusBadRequest)
+		return
+	}
+
+	// Auth check: same gate as upload. We use the destination's parent
+// dir for the .ghs.yml lookup so an admin granting upload on a
+// directory implicitly grants edit on its files.
+//
+// canUpload uses r.FormValue("token") which calls r.ParseForm() and
+// drains the body when Content-Type is application/x-www-form-urlencoded
+// — that would leave nothing for the file write. PUT bodies here
+// ARE the file content, so we extract the token from the URL query
+// (or the X-Token header) and never touch the body.
+	ac := s.readAccessConf(filepath.Dir(dstPath))
+	token := req.URL.Query().Get("token")
+	if token == "" {
+		token = req.Header.Get("X-Token")
+	}
+	var allowed bool
+	if token != "" {
+		allowed = ac.canUploadByToken(token)
+	} else {
+		allowed = ac.canUploadSession(req)
+	}
+	if !allowed {
+		http.Error(w, "Edit forbidden", http.StatusForbidden)
+		return
+	}
+
+	// Size cap before we copy anything — reading the body unbounded
+	// would let a client exhaust server memory with a giant PUT.
+	if req.ContentLength > maxEditSize {
+		http.Error(w, fmt.Sprintf("File too large to edit (max %d bytes); re-upload instead", maxEditSize), http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	dst, err := os.Create(dstPath)
+	if err != nil {
+		http.Error(w, "File create "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer dst.Close()
+
+	buf := s.bufPool.Get().([]byte)
+	defer s.bufPool.Put(buf)
+	written, copyErr := io.CopyBuffer(dst, req.Body, buf)
+	if copyErr != nil {
+		// Roll back partial writes — the file is now shorter than it
+		// was on disk. Truncate to its previous size rather than
+		// leaving a half-written file in place.
+		if cerr := dst.Close(); cerr == nil {
+			os.Truncate(dstPath, fi.Size())
+		}
+		http.Error(w, copyErr.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Defence-in-depth: if Content-Length was missing or lied, refuse
+	// to commit a write that exceeds the cap. Truncate and 413.
+	if written > maxEditSize {
+		os.Truncate(dstPath, fi.Size())
+		http.Error(w, fmt.Sprintf("File too large to edit (max %d bytes)", maxEditSize), http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	// The file's modification time and parent dir's size-cache just
+	// changed — drop the cache so the next listing reflects reality.
+	invalidateDirSizeCache()
+
+	w.Header().Set("Content-Type", "application/json;charset=utf-8")
+	json.NewEncoder(w).Encode(map[string]any{
+		"success":     true,
+		"destination": dstPath,
+		"size":        written,
+	})
+}
+
+// maxFetchSize caps how large a remote resource we accept. Mirrors
+// the edit cap: anything bigger should be downloaded by the user's
+// own browser, not proxied through this server. 1 GiB is generous
+// for typical use (disk images, big PDFs) without letting a single
+// request hold a connection open for hours.
+const maxFetchSize int64 = 1 << 30 // 1 GiB
+
+// fetchTimeout is the upper bound on a remote HTTP request,
+// including DNS + connect + read time. Larger than typical because
+// some hosts throttle downloads; smaller than "indefinite" so a hung
+// connection doesn't pin a worker.
+const fetchTimeout = 5 * time.Minute
+
+// safeDialContext refuses to dial loopback, link-local, multicast, or
+// RFC1918 private addresses. Without this, a POST to /-/fetch with
+// url=http://127.0.0.1:6379/... would let the server attack itself
+// or other services on the host network. The check runs after DNS
+// resolution, so a hostname that resolves to a private IP (DNS
+// rebinding attempt) is also caught.
+//
+// "Why not just block the literal IP in the URL string?": DNS
+// rebinding means the URL can be http://attacker.com/... where
+// attacker.com's A record flips to 127.0.0.1 between the URL parse
+// and the connect. Resolving and validating in the DialContext
+// closes that window.
+func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return nil, err
+	}
+	for _, ip := range ips {
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+			ip.IsInterfaceLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() ||
+			isPrivateIPv4(ip) {
+			return nil, fmt.Errorf("refusing to connect to private/loopback address %s", ip)
+		}
+	}
+	d := net.Dialer{Timeout: 10 * time.Second}
+	return d.DialContext(ctx, network, net.JoinHostPort(host, port))
+}
+
+func isPrivateIPv4(ip net.IP) bool {
+	if ip4 := ip.To4(); ip4 != nil {
+		// 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+		switch {
+		case ip4[0] == 10:
+			return true
+		case ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31:
+			return true
+		case ip4[0] == 192 && ip4[1] == 168:
+			return true
+		case ip4[0] == 169 && ip4[1] == 254: // link-local
+			return true
+		case ip4[0] == 127: // loopback in IPv4-mapped form
+			return true
+		}
+	}
+	// Unique local addresses fc00::/7 (IPv6 private)
+	if len(ip) == net.IPv6len && (ip[0]&0xfe) == 0xfc {
+		return true
+	}
+	return false
+}
+
+// hFetch downloads a remote URL to a file under the current route.
+// Form fields:
+//   url  — the http(s) URL to fetch (required)
+//   to   — destination basename under the current directory (required;
+//          path separators and `..` rejected the same way as uploads)
+//
+// SSRF: the URL is parsed; only http/https are accepted; the dial
+// address is validated against the safe-dial rules above so an
+// attacker can't make the server talk to its own loopback.
+//
+// Auth: same gate as upload on the current directory.
+//
+// Stream: response body is copied straight to disk with a 32 KiB
+// scratch buffer (same pattern as uploads) so a 1 GB download
+// doesn't pin a gigabyte of server RAM.
+func (s *HTTPStaticServer) hFetch(w http.ResponseWriter, req *http.Request) {
+	dirpath := s.getRealPath(req)
+
+	// Auth — must have upload on the destination dir. Same
+// body-preserving dance as hEdit: token from URL query / X-Token
+// header, session fallback via canUploadSession.
+	ac := s.readAccessConf(dirpath)
+	token := req.URL.Query().Get("token")
+	if token == "" {
+		token = req.Header.Get("X-Token")
+	}
+	var allowed bool
+	if token != "" {
+		allowed = ac.canUploadByToken(token)
+	} else {
+		allowed = ac.canUploadSession(req)
+	}
+	if !allowed {
+		http.Error(w, "Fetch forbidden", http.StatusForbidden)
+		return
+	}
+
+	srcURL := req.FormValue("url")
+	if srcURL == "" {
+		http.Error(w, "Missing 'url' form field", http.StatusBadRequest)
+		return
+	}
+	parsed, perr := url.Parse(srcURL)
+	if perr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		http.Error(w, "Invalid URL — only http/https allowed", http.StatusBadRequest)
+		return
+	}
+	if parsed.Host == "" {
+		http.Error(w, "URL must have a host", http.StatusBadRequest)
+		return
+	}
+
+	// Destination filename: must be a flat basename, no path
+	// separators, must pass the existing filename character rules.
+	dstName := req.FormValue("to")
+	if dstName == "" {
+		http.Error(w, "Missing 'to' form field", http.StatusBadRequest)
+		return
+	}
+	if strings.ContainsAny(dstName, "/\\") {
+		http.Error(w, "'to' must be a basename, not a path", http.StatusBadRequest)
+		return
+	}
+	if err := checkFilename(dstName); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	dstPath := filepath.Join(dirpath, filepath.FromSlash(dstName))
+
+	// Make sure the parent dir exists (mirrors hUploadOrMkdir).
+	if _, err := os.Stat(dirpath); os.IsNotExist(err) {
+		if err := os.MkdirAll(dirpath, os.ModePerm); err != nil {
+			http.Error(w, "Directory create "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Build an HTTP client with the safe dialer. We deliberately
+	// don't follow redirects — a 30x to an internal address would
+	// otherwise bypass the URL parse check.
+	client := &http.Client{
+		Timeout: fetchTimeout,
+		// Disable redirects so the URL we validated is the URL
+		// we connect to. A 30x to an internal address would otherwise
+		// bypass the URL parse check; for /-/fetch we just fail loudly.
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+		Transport: &http.Transport{
+			DialContext: safeDialContext,
+		},
+	}
+	httpReq, _ := http.NewRequestWithContext(req.Context(), "GET", parsed.String(), nil)
+	httpResp, err := client.Do(httpReq)
+	if err != nil {
+		http.Error(w, "Fetch failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		http.Error(w, fmt.Sprintf("Remote returned %d %s", httpResp.StatusCode, httpResp.Status), http.StatusBadGateway)
+		return
+	}
+
+	dst, err := os.Create(dstPath)
+	if err != nil {
+		http.Error(w, "File create "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer dst.Close()
+
+	buf := s.bufPool.Get().([]byte)
+	defer s.bufPool.Put(buf)
+	written, copyErr := io.CopyBuffer(dst, httpResp.Body, buf)
+	if copyErr != nil {
+		// Roll back: drop the partial file. The user can re-trigger.
+		os.Remove(dstPath)
+		http.Error(w, "Fetch copy failed: "+copyErr.Error(), http.StatusBadGateway)
+		return
+	}
+	if written > maxFetchSize {
+		os.Remove(dstPath)
+		http.Error(w, fmt.Sprintf("Remote file too large (max %d bytes)", maxFetchSize), http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	invalidateDirSizeCache()
+
+	w.Header().Set("Content-Type", "application/json;charset=utf-8")
+	json.NewEncoder(w).Encode(map[string]any{
+		"success":     true,
+		"destination": dstPath,
+		"size":        written,
+		"source":      parsed.String(),
 	})
 }
 
@@ -316,6 +738,47 @@ type FileJSONInfo struct {
 	Path    string `json:"path"`
 	ModTime int64  `json:"mtime"`
 	Extra   any    `json:"extra,omitempty"`
+	// Md5 and Sha256 are hex-encoded digests. They are populated for
+	// files only, and only when the file is at most maxHashSize —
+	// hashing a multi-GB file over a slow disk is not worth the
+	// request-blocking latency. Empty for directories or oversized
+	// files.
+	Md5    string `json:"md5,omitempty"`
+	Sha256 string `json:"sha256,omitempty"`
+}
+
+// maxHashSize caps how big a file can be when computing MD5/SHA on
+// the fly inside hInfo. Bigger files just don't report hashes — the
+// caller can still see size/mtime.
+const maxHashSize int64 = 512 * 1024 * 1024 // 512 MiB
+
+// computeFileHash streams the file once, updating an MD5 and a SHA256
+// hasher in lock-step so we only walk the file a single time. Returns
+// hex-encoded digests. io.CopyBuffer is used with a 32 KiB scratch
+// buffer to match the rest of the server's stream-copy pattern.
+func computeFileHash(path string) (md5sum, sha256sum string, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", "", err
+	}
+	defer f.Close()
+	md5h := md5.New()
+	sha256h := sha256.New()
+	buf := make([]byte, 32*1024)
+	for {
+		n, e := f.Read(buf)
+		if n > 0 {
+			md5h.Write(buf[:n])
+			sha256h.Write(buf[:n])
+		}
+		if e == io.EOF {
+			break
+		}
+		if e != nil {
+			return "", "", e
+		}
+	}
+	return hex.EncodeToString(md5h.Sum(nil)), hex.EncodeToString(sha256h.Sum(nil)), nil
 }
 
 // path should be absolute
@@ -359,10 +822,32 @@ func (s *HTTPStaticServer) hInfo(w http.ResponseWriter, r *http.Request) {
 	case ".apk":
 		fji.Type = "apk"
 		fji.Extra = parseApkInfo(relPath)
+	case ".ipa":
+		// IPA metadata extraction was previously only wired into
+		// hPlist (which builds the iPhone-install manifest). hInfo
+		// returned a bare "text" record, so the file-info modal in
+		// the frontend showed nothing useful for .ipa. parseIPA
+		// returns nil + an error if the file isn't a valid IPA;
+		// we degrade to type:"text" rather than 500-ing.
+		fji.Type = "ipa"
+		if plinfo, perr := parseIPA(relPath); perr == nil && plinfo != nil {
+			fji.Extra = plinfo
+		} else {
+			fji.Extra = nil
+		}
 	case "":
 		fji.Type = "dir"
 	default:
 		fji.Type = "text"
+	}
+	// Hash only files (not directories) and only when the file is
+	// small enough that the request won't block for tens of seconds.
+	// Errors here are non-fatal — size/mtime/path are still useful.
+	if !fi.IsDir() && fi.Size() > 0 && fi.Size() <= maxHashSize {
+		if md5sum, sha, herr := computeFileHash(relPath); herr == nil {
+			fji.Md5 = md5sum
+			fji.Sha256 = sha
+		}
 	}
 	data, _ := json.Marshal(fji)
 	w.Header().Set("Content-Type", "application/json")
@@ -371,6 +856,89 @@ func (s *HTTPStaticServer) hInfo(w http.ResponseWriter, r *http.Request) {
 
 func (s *HTTPStaticServer) hZip(w http.ResponseWriter, r *http.Request) {
 	CompressToZip(w, s.getRealPath(r))
+}
+
+// zipMultiRequest is the body shape posted by the frontend's multi-select
+// download. Paths are URL-decoded URL paths (the same shape as the rest of
+// the API), and each one may be either a file or a directory.
+type zipMultiRequest struct {
+	Paths []string `json:"paths"`
+}
+
+// hZipMulti streams a single zip that packages every requested entry,
+// using each entry's basename as the top-level name in the archive so the
+// caller can unpack without knowing where each item came from. Missing or
+// unreadable entries are silently skipped — the goal is "best effort
+// download", not a strict transactional archive.
+func (s *HTTPStaticServer) hZipMulti(w http.ResponseWriter, r *http.Request) {
+	var req zipMultiRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(req.Paths) == 0 {
+		http.Error(w, "No paths provided", http.StatusBadRequest)
+		return
+	}
+
+	// Limit the request size to keep a single multi-download from pinning
+	// the server: 64 KiB easily holds a few thousand URL paths.
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="download.zip"`)
+	// Disable nginx response buffering so large archives start arriving
+	// immediately rather than being held by an intermediate proxy.
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	zw := &Zip{Writer: zip.NewWriter(w)}
+	defer zw.Close()
+
+	for _, p := range req.Paths {
+		realPath := s.resolvePath(p)
+		info, err := os.Stat(realPath)
+		if err != nil {
+			log.Printf("zip-multi skip %q: %v", realPath, err)
+			continue
+		}
+
+		entryName := filepath.Base(realPath)
+		if entryName == "" || entryName == "." || entryName == string(filepath.Separator) {
+			continue
+		}
+
+		if info.IsDir() {
+			dirName := entryName + "/"
+			walkErr := filepath.Walk(realPath, func(path string, fi os.FileInfo, err error) error {
+				if err != nil {
+					// Skip entries we can't read rather than aborting
+					// the whole archive.
+					log.Printf("zip-multi walk skip %q: %v", path, err)
+					return nil
+				}
+				if fi.Name() == YAMLCONF {
+					return nil
+				}
+				rel, relErr := filepath.Rel(realPath, path)
+				if relErr != nil {
+					return nil
+				}
+				zipPath := dirName + filepath.ToSlash(rel)
+				if fi.IsDir() {
+					return zw.Add(zipPath+"/", path)
+				}
+				return zw.Add(zipPath, path)
+			})
+			if walkErr != nil {
+				log.Printf("zip-multi walk %q: %v", realPath, walkErr)
+			}
+			continue
+		}
+
+		if err := zw.Add(entryName, realPath); err != nil {
+			log.Printf("zip-multi add %q: %v", realPath, err)
+		}
+	}
 }
 
 func (s *HTTPStaticServer) hUnzip(w http.ResponseWriter, r *http.Request) {
@@ -560,6 +1128,29 @@ func (c *AccessConf) canUploadByToken(token string) bool {
 	return c.Upload
 }
 
+// canUploadSession is the session-based half of canUpload, factored
+// out so PUT-style handlers (whose body IS the file content) can do
+// auth without draining the body via r.FormValue. Token auth is the
+// path callers should use; this is the fallback for browser session
+// login.
+func (c *AccessConf) canUploadSession(r *http.Request) bool {
+	session, err := store.Get(r, defaultSessionName)
+	if err != nil {
+		return c.Upload
+	}
+	val := session.Values["user"]
+	if val == nil {
+		return c.Upload
+	}
+	userInfo := val.(*UserInfo)
+	for _, rule := range c.Users {
+		if rule.Email == userInfo.Email {
+			return rule.Upload
+		}
+	}
+	return c.Upload
+}
+
 func (c *AccessConf) canUpload(r *http.Request) bool {
 	token := r.FormValue("token")
 	if token != "" {
@@ -651,6 +1242,20 @@ func (s *HTTPStaticServer) hJSONList(w http.ResponseWriter, r *http.Request) {
 		lrs = append(lrs, lr)
 	}
 
+	// Sort the output by name before marshalling. The upstream
+	// collection uses a Go map (fileInfoMap) whose iteration order
+	// is intentionally randomised to mitigate hash-flood attacks, so
+	// the raw JSON would otherwise come back in a different order
+	// on every refresh — and even though the frontend re-sorts by
+	// mtime, items that share a mtime (common for files uploaded in
+	// the same second, or files copied together) would inherit that
+	// random order via the JS stable-sort tiebreaker. Sorting here
+	// gives every consumer of this API a stable, predictable
+	// baseline order; the frontend sort then layers on top of it.
+	sort.Slice(lrs, func(i, j int) bool {
+		return lrs[i].Name < lrs[j].Name
+	})
+
 	data, _ := json.Marshal(map[string]any{
 		"files": lrs,
 		"auth":  auth,
@@ -679,10 +1284,22 @@ func (s *HTTPStaticServer) makeIndex() error {
 		return nil
 	})
 	s.indexes = indexes
+	// Drop the directory-size cache so the next read recomputes against
+	// the freshly-walked index. Without this every displayed directory
+	// size stays pinned to whatever the very first walk observed —
+	// uploads, deletes, and edits are invisible until the server
+	// restarts. Cheap to do: the cache rebuilds lazily on demand.
+	dirInfoSize.mutex.Lock()
+	dirInfoSize.size = make(map[string]int64)
+	dirInfoSize.mutex.Unlock()
 	return err
 }
 
 func (s *HTTPStaticServer) historyDirSize(dir string) int64 {
+	// Normalise to forward slashes so the cache key matches what the
+	// invalidation paths write (also ToSlash'd).
+	dir = filepath.ToSlash(filepath.Clean(dir))
+
 	dirInfoSize.mutex.RLock()
 	size, ok := dirInfoSize.size[dir]
 	dirInfoSize.mutex.RUnlock()
@@ -691,17 +1308,36 @@ func (s *HTTPStaticServer) historyDirSize(dir string) int64 {
 		return size
 	}
 
-	for _, fitem := range s.indexes {
-		if filepath.HasPrefix(fitem.Path, dir) {
-			size += fitem.Info.Size()
+	// Walk the actual filesystem rather than relying on s.indexes. The
+	// index is rebuilt by makeIndex every 10 minutes, so reading from
+	// it would leave a freshly-uploaded (or extracted) directory
+	// reporting a stale size until the next cycle. Walking the real
+	// tree is O(n) in the directory's file count, which is acceptable
+	// for a file manager and gives the user an immediately-correct
+	// number after upload/unzip/delete.
+	absDir := filepath.Join(s.Root, dir)
+	filepath.Walk(absDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
 		}
-	}
+		size += info.Size()
+		return nil
+	})
 
 	dirInfoSize.mutex.Lock()
 	dirInfoSize.size[dir] = size
 	dirInfoSize.mutex.Unlock()
 
 	return size
+}
+
+// invalidateDirSizeCache drops every cached size entry. Called after any
+// mutation (upload, unzip, delete) so the next read computes fresh
+// against the real filesystem. Cheap: the map rebuilds lazily on demand.
+func invalidateDirSizeCache() {
+	dirInfoSize.mutex.Lock()
+	dirInfoSize.size = make(map[string]int64)
+	dirInfoSize.mutex.Unlock()
 }
 
 func (s *HTTPStaticServer) findIndex(text string) []IndexFileItem {
@@ -831,6 +1467,22 @@ func renderHTML(w http.ResponseWriter, name string, v any) {
 func checkFilename(name string) error {
 	if strings.ContainsAny(name, "\\/:*<>|") {
 		return errors.New("Name should not contains \\/:*<>|")
+	}
+	return nil
+}
+
+// checkPathSegment is the per-segment variant of checkFilename used when
+// validating a relative path (e.g. "MyFolder/sub/foo.txt"). The caller
+// is expected to split on "/" first, so the path-separator rule is
+// dropped; the rest of the forbid-list stays. Empty, "." and ".."
+// segments are rejected so callers can't smuggle a parent-dir escape
+// past the split.
+func checkPathSegment(seg string) error {
+	if seg == "" || seg == "." || seg == ".." {
+		return errors.New("Invalid path segment")
+	}
+	if strings.ContainsAny(seg, "\\:*<>|\"\x00") {
+		return errors.New("Path segment should not contain \\:*<>|\"")
 	}
 	return nil
 }
