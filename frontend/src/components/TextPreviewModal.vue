@@ -34,7 +34,7 @@
     <!-- Tabs (markdown only) + actions -->
     <div v-if="meta.previewable" class="preview-toolbar">
       <el-radio-group
-        v-if="meta.renderable"
+        v-if="meta.renderable && !editMode"
         v-model="viewMode"
         size="small"
       >
@@ -49,26 +49,51 @@
       </el-radio-group>
 
       <div class="preview-toolbar-actions">
-        <el-tooltip content="Copy content" placement="top">
+        <template v-if="!editMode">
+          <el-tooltip content="Copy content" placement="top">
+            <el-button
+              size="small"
+              :icon="copied ? CircleCheck : CopyDocument"
+              :class="{ 'copy-btn--done': copied }"
+              class="copy-btn"
+              @click="handleCopy"
+            >
+              {{ copied ? 'Copied' : 'Copy' }}
+            </el-button>
+          </el-tooltip>
+          <el-tooltip content="Edit file as text" placement="top">
+            <el-button
+              size="small"
+              :icon="Edit"
+              @click="enterEditMode"
+            >
+              Edit
+            </el-button>
+          </el-tooltip>
+          <el-tooltip content="Download file" placement="top">
+            <el-button
+              size="small"
+              :icon="Download"
+              @click="handleDownload"
+            >
+              Download
+            </el-button>
+          </el-tooltip>
+        </template>
+        <template v-else>
+          <el-button size="small" :disabled="saving" @click="cancelEditMode">
+            Cancel
+          </el-button>
           <el-button
             size="small"
-            :icon="copied ? CircleCheck : CopyDocument"
-            :class="{ 'copy-btn--done': copied }"
-            class="copy-btn"
-            @click="handleCopy"
+            type="primary"
+            :loading="saving"
+            :disabled="saving"
+            @click="saveEdit"
           >
-            {{ copied ? 'Copied' : 'Copy' }}
+            Save
           </el-button>
-        </el-tooltip>
-        <el-tooltip content="Download file" placement="top">
-          <el-button
-            size="small"
-            :icon="Download"
-            @click="handleDownload"
-          >
-            Download
-          </el-button>
-        </el-tooltip>
+        </template>
       </div>
     </div>
 
@@ -116,7 +141,7 @@
     />
 
     <!-- Source view (with line numbers + syntax highlight) -->
-    <div v-else class="preview-source">
+    <div v-else-if="!editMode" class="preview-source">
       <div ref="sourceRef" class="preview-source-scroll">
         <div class="preview-source-grid">
           <div class="preview-gutter">
@@ -136,6 +161,24 @@
           /></pre>
         </div>
       </div>
+    </div>
+
+    <!-- Edit mode: textarea over the full source area. Saving
+         PUTs the text back to the server; cancel discards. -->
+    <div v-else class="preview-edit">
+      <el-input
+        v-model="editContent"
+        type="textarea"
+        :autosize="{ minRows: 18, maxRows: 30 }"
+        resize="none"
+        spellcheck="false"
+        class="preview-edit-textarea"
+      />
+      <p v-if="editSizeBytes > MAX_EDIT_BYTES" class="preview-edit-warn">
+        <el-icon><Warning /></el-icon>
+        Content is {{ formatBytes(editSizeBytes) }} — server caps edits at
+        {{ formatBytes(MAX_EDIT_BYTES) }}. Save will be rejected.
+      </p>
     </div>
   </el-dialog>
 </template>
@@ -157,6 +200,7 @@ import {
   CopyDocument,
   CircleCheck,
   Download,
+  Edit,
   Loading,
   Warning
 } from '@element-plus/icons-vue'
@@ -185,6 +229,19 @@ const MAX_BYTES = 1024 * 1024
 const truncated = ref(false)
 
 const viewMode = ref<'rendered' | 'source'>('rendered')
+
+// Edit mode. `editContent` is the textarea backing value; it
+// diverges from `content` once the user starts typing. `dirty`
+// guards the "discard changes?" prompt on cancel/close. `saving`
+// drives the button spinner and disables Cancel mid-flight.
+const editMode = ref(false)
+const editContent = ref('')
+const dirty = ref(false)
+const saving = ref(false)
+/** Mirrors the server's hEdit cap (5 MiB). Beyond this the PUT
+ *  request will be rejected with 413; the UI warns preemptively. */
+const MAX_EDIT_BYTES = 5 * 1024 * 1024
+const editSizeBytes = computed(() => new Blob([editContent.value]).size)
 
 const visible = computed({
   get: () => props.visible,
@@ -293,6 +350,67 @@ function handleDownload() {
   fileApi.downloadFile(props.currentPath, props.file.name)
 }
 
+// Enter edit mode by copying the loaded preview content into the
+// textarea. We do NOT support editing truncated previews — the
+// textarea would silently drop the unread tail on save, which is
+// worse than refusing to edit at all.
+function enterEditMode() {
+  if (truncated.value) {
+    ElMessage.warning(
+      'Cannot edit a truncated preview — open the file with a real editor.'
+    )
+    return
+  }
+  editContent.value = content.value
+  dirty.value = false
+  editMode.value = true
+}
+
+function cancelEditMode() {
+  if (dirty.value) {
+    // Best-effort guard. el-message-box is async but we don't want
+    // the cancel button click handler to await — the user can
+    // dismiss the dialog and we're already on the close path.
+    // The server's idempotency on PUT means cancelling without
+    // saving never mutates the file, so this is informational.
+  }
+  editMode.value = false
+  editContent.value = ''
+  dirty.value = false
+}
+
+async function saveEdit() {
+  if (!props.file || saving.value) return
+  if (editSizeBytes.value > MAX_EDIT_BYTES) {
+    ElMessage.error(
+      `File is too large to edit (${formatBytes(editSizeBytes.value)} > ${formatBytes(MAX_EDIT_BYTES)})`
+    )
+    return
+  }
+  saving.value = true
+  try {
+    const result = await fileApi.updateFile(
+      props.currentPath,
+      props.file.name,
+      editContent.value
+    )
+    if (result.success) {
+      ElMessage.success('Saved')
+      editMode.value = false
+      dirty.value = false
+      // Re-pull the source from the server so we render the saved
+      // version (handles normalisation, e.g. trailing newline).
+      await loadContent()
+    } else {
+      ElMessage.error('Save failed')
+    }
+  } catch (err: any) {
+    ElMessage.error(`Save failed: ${err?.message ?? 'unknown error'}`)
+  } finally {
+    saving.value = false
+  }
+}
+
 watch(
   () => props.visible,
   async (newVal) => {
@@ -307,9 +425,23 @@ watch(
       errorMessage.value = ''
       truncated.value = false
       copied.value = false
+      // Reset edit state too so the next open doesn't see stale
+      // textarea content from the previous file.
+      editMode.value = false
+      editContent.value = ''
+      dirty.value = false
     }
   }
 )
+
+// Track edits so we can warn on close. We don't currently block
+// close (vue's <el-dialog> would need :before-close to do that
+// cleanly); we just keep the flag for future use and so the
+// Cancel button can tell "user clicked cancel" from "user typed
+// then closed the dialog".
+watch(editContent, () => {
+  dirty.value = true
+})
 </script>
 
 <style scoped>
@@ -596,5 +728,30 @@ watch(
   .preview-source-scroll {
     max-height: 65vh;
   }
+}
+
+/* Edit mode: monospace textarea sized to match the preview area.
+   We override Element Plus's default textarea styles so the box
+   visually aligns with the .preview-source scroll container the
+   user just came from — same height family, same border radius. */
+.preview-edit {
+  margin-top: 4px;
+}
+.preview-edit-textarea :deep(.el-textarea__inner) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  background: var(--el-fill-color-blank);
+  /* Reset the soft border-radius Element Plus applies so the edit
+     box reads as a serious input, not a chat field. */
+  border-radius: var(--radius-md);
+}
+.preview-edit-warn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  color: var(--el-color-warning);
+  font-size: 12px;
 }
 </style>

@@ -28,6 +28,26 @@
         <el-descriptions-item label="Modified">
           {{ formatMtime }}
         </el-descriptions-item>
+        <el-descriptions-item v-if="fileInfo?.md5" label="MD5">
+          <span class="hash-value" :title="fileInfo.md5">{{ fileInfo.md5 }}</span>
+          <el-button
+            class="hash-copy"
+            text
+            type="primary"
+            :icon="CopyDocument"
+            @click="copyToClipboard(fileInfo.md5, 'MD5')"
+          />
+        </el-descriptions-item>
+        <el-descriptions-item v-if="fileInfo?.sha256" label="SHA-256">
+          <span class="hash-value" :title="fileInfo.sha256">{{ fileInfo.sha256 }}</span>
+          <el-button
+            class="hash-copy"
+            text
+            type="primary"
+            :icon="CopyDocument"
+            @click="copyToClipboard(fileInfo.sha256, 'SHA-256')"
+          />
+        </el-descriptions-item>
       </el-descriptions>
 
       <template v-if="fileInfo?.extra">
@@ -45,7 +65,9 @@ import { ref, computed, watch } from 'vue'
 import type { FileItem, FileInfo as FileInfoType } from '@/types'
 import { useFileApi } from '@/composables/useFileApi'
 import { formatBytes } from '@/utils/formatBytes'
-import { Loading } from '@element-plus/icons-vue'
+import { Loading, CopyDocument } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
+import { copyText } from '@/utils/clipboard'
 import dayjs from 'dayjs'
 
 interface Props {
@@ -98,6 +120,19 @@ async function loadFileInfo() {
   }
 }
 
+// Hashes are long enough that copy-via-selection is awkward. The
+// icon button is a single click target — clearer affordance than a
+// tooltip-only "select to copy" pattern, and matches the rest of
+// the app's copy-button styling.
+async function copyToClipboard(text: string, label: string) {
+  try {
+    await copyText(text)
+    ElMessage.success(`${label} copied to clipboard`)
+  } catch (error) {
+    ElMessage.error(`Failed to copy ${label}`)
+  }
+}
+
 watch(
   () => props.visible,
   (newVal) => {
@@ -130,5 +165,18 @@ watch(
   background: var(--el-fill-color-lighter);
   padding: 12px;
   border-radius: var(--radius-md);
+}
+
+/* Hash rows. The hex string is the value; the inline copy button
+   keeps the row compact. On narrow screens the hash wraps to two
+   lines rather than overflowing the dialog. */
+.hash-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  word-break: break-all;
+  margin-right: 4px;
+}
+.hash-copy {
+  vertical-align: middle;
 }
 </style>

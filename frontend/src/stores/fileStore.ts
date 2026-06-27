@@ -20,6 +20,12 @@ export const useFileStore = defineStore('file', () => {
   const searchQuery = ref('')
   const sortProp = ref('mtime')
   const sortOrder = ref<'ascending' | 'descending'>('descending')
+  // Multi-select state. Keyed by FileItem.path (URL-encoded).
+  // Selection is cleared automatically on navigation (see loadFiles).
+  const selectedFiles = ref<Set<string>>(new Set())
+  // Mobile-only: when true, every card shows its checkbox and tapping a
+  // card toggles selection instead of navigating. Desktop ignores this.
+  const selectionMode = ref(false)
 
   // Computed
   const sortedFiles = computed(() => {
@@ -47,20 +53,46 @@ export const useFileStore = defineStore('file', () => {
       } else {
         cmp = a.mtime - b.mtime
       }
+      // Name tiebreaker. JS Array.sort is stable, so two items with
+      // the same primary key would otherwise keep whatever order the
+      // backend sent — which is "no particular order" because Go map
+      // iteration is intentionally randomised. Without this, rows
+      // sharing an mtime (files uploaded in the same second, files
+      // copied together and never touched) visibly shuffle on every
+      // refresh. Name is unique within a directory, so this gives a
+      // fully deterministic order regardless of backend behaviour.
+      if (cmp === 0) {
+        cmp = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+      }
       return order === 'ascending' ? cmp : -cmp
     })
 
     return result
   })
 
+  const selectedCount = computed(() => selectedFiles.value.size)
+  // "All selected" only makes sense when there's at least one row to select
+  // and every visible row is in the selection set.
+  const isAllSelected = computed(
+    () => selectedCount.value > 0 && selectedCount.value === sortedFiles.value.length
+  )
+
   // Actions
-  async function loadFiles(path?: string, search?: string) {
-    loading.value = true
+  async function loadFiles(path?: string, search?: string, options: { silent?: boolean } = {}) {
+    if (!options.silent) {
+      loading.value = true
+    }
     try {
       const targetPath = path || currentPath.value || '/'
       const response = await fileApi.fetchFiles(targetPath, search)
       files.value = response.files
       auth.value = response.auth
+      // Clear selection when navigating to a different directory.
+      // Same-path search re-runs preserve selection.
+      if (path !== undefined && path !== currentPath.value) {
+        clearSelection()
+        selectionMode.value = false
+      }
       if (path) {
         currentPath.value = path
       }
@@ -71,7 +103,9 @@ export const useFileStore = defineStore('file', () => {
       ElMessage.error(`Failed to load files: ${error}`)
       console.error(error)
     } finally {
-      loading.value = false
+      if (!options.silent) {
+        loading.value = false
+      }
     }
   }
 
@@ -116,11 +150,39 @@ export const useFileStore = defineStore('file', () => {
   }
 
   async function deleteFile(filename: string) {
+    const target = files.value.find(f => f.name === filename)
+
+    // Optimistic local removal. The previous flow waited on a full
+    // directory GET before updating the list, which — especially for
+    // large files in directories with many siblings — left the row
+    // visible behind the loading spinner for long enough to feel
+    // like the click was lost. Drop the row immediately on confirm,
+    // then reconcile with the server.
+    if (target) {
+      files.value = files.value.filter(f => f.name !== filename)
+      if (selectedFiles.value.size > 0) {
+        const next = new Set(selectedFiles.value)
+        next.delete(target.path)
+        selectedFiles.value = next
+      }
+    }
+
     try {
       await fileApi.deleteFile(currentPath.value, filename)
       ElMessage.success('File deleted successfully')
-      await loadFiles()
+      // Silent background sync. Picks up anything that changed
+      // concurrently (another client uploading, etc.) without
+      // re-triggering the loading spinner over the list the user is
+      // already looking at. Errors are swallowed: the optimistic
+      // state already matches the server's confirmation.
+      loadFiles(undefined, undefined, { silent: true }).catch(err =>
+        console.error('Background refresh after delete failed:', err)
+      )
     } catch (error) {
+      // Server rejected the delete — pull the real list back so the
+      // UI reflects ground truth. Silent for the same reason as the
+      // success path: no spinner flash over the user's current view.
+      loadFiles(undefined, undefined, { silent: true }).catch(() => {})
       ElMessage.error(`Failed to delete file: ${error}`)
       throw error
     }
@@ -141,6 +203,31 @@ export const useFileStore = defineStore('file', () => {
     }
   }
 
+  // Multi-select actions. The Set is replaced wholesale on every change so
+  // Vue's reactivity reliably picks up the new contents.
+  function toggleSelect(path: string) {
+    const next = new Set(selectedFiles.value)
+    if (next.has(path)) {
+      next.delete(path)
+    } else {
+      next.add(path)
+    }
+    selectedFiles.value = next
+  }
+
+  function setSelection(paths: string[]) {
+    selectedFiles.value = new Set(paths)
+  }
+
+  function selectAll(paths: string[]) {
+    selectedFiles.value = new Set(paths)
+  }
+
+  function clearSelection() {
+    if (selectedFiles.value.size === 0) return
+    selectedFiles.value = new Set()
+  }
+
   return {
     currentPath,
     files,
@@ -151,6 +238,10 @@ export const useFileStore = defineStore('file', () => {
     loading,
     showHidden,
     searchQuery,
+    selectedFiles,
+    selectedCount,
+    isAllSelected,
+    selectionMode,
     currentTheme,
     loadFiles,
     loadUser,
@@ -161,6 +252,10 @@ export const useFileStore = defineStore('file', () => {
     toggleShowHidden,
     sortProp,
     sortOrder,
-    setSort
+    setSort,
+    toggleSelect,
+    setSelection,
+    selectAll,
+    clearSelection
   }
 })
