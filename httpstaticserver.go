@@ -126,6 +126,12 @@ func NewHTTPStaticServer(root string, noIndex bool) *HTTPStaticServer {
 	// remote connection.
 	m.HandleFunc("/-/fetch", s.hFetch).Methods("POST")
 
+	// File info API: returns metadata, hashes, and for .apk/.ipa files
+	// also extracts package-level information.
+	m.HandleFunc("/-/info/{path:.*}", s.hInfo).Methods("GET")
+	// Android-package-specific info endpoint (mirrors /-/info/ for .apk).
+	m.HandleFunc("/-/apk/info/{path:.*}", s.hInfo).Methods("GET")
+
 	m.HandleFunc("/{path:.*}", s.hIndex).Methods("GET", "HEAD")
 	m.HandleFunc("/{path:.*}", s.hUploadOrMkdir).Methods("POST")
 	m.HandleFunc("/{path:.*}", s.hEdit).Methods("PUT")
@@ -188,8 +194,7 @@ func (s *HTTPStaticServer) hIndex(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		f, err := FrontendAssets.Open("index.html")
 		if err != nil {
-			// Fallback to old frontend if new one is not available
-			renderHTML(w, "assets/index.html", s)
+			http.Error(w, "Frontend not built", http.StatusNotFound)
 			return
 		}
 		defer f.Close()
@@ -1015,7 +1020,7 @@ func (s *HTTPStaticServer) hIpaLink(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html")
 	log.Println("PlistURL:", plistUrl)
-	renderHTML(w, "assets/ipa-install.html", map[string]string{
+	renderHTML(w, "ipa-install", ipaInstallHTML, map[string]string{
 		"Name":      filepath.Base(path),
 		"PlistLink": plistUrl,
 	})
@@ -1416,50 +1421,92 @@ func deepPath(basedir, name string, maxDepth int) string {
 	return name
 }
 
-func assetsContent(name string) string {
-	fd, err := Assets.Open(name)
-	if err != nil {
-		panic(err)
-	}
-	data, err := io.ReadAll(fd)
-	if err != nil {
-		panic(err)
-	}
-	return string(data)
+const ipaInstallHTML = `<!DOCTYPE html>
+<html>
+<head>
+  <title>[[.Name]] install</title>
+  <meta http-equiv="Content-Type" content="text/HTML; charset=utf-8">
+  <meta content="target-densitydpi=device-dpi,width=640" name="viewport" id="viewport">
+  <script>
+    function showById(name) {
+      document.getElementById(name).style.display = 'block';
+    }
+    function checkBrowerAndDownload() {
+      var ua = navigator.userAgent.toLowerCase();
+      var isIOS = /iphone|ipad|ipod/.test(ua);
+      var isAndroid = /android/.test(ua);
+      var isWechat = /micromessenger/.test(ua);
+      var plistLink = "[[.PlistLink]]";
+      var ipaInstallLink = 'itms-services://?action=download-manifest&url=' + plistLink;
+      document.getElementById('itms-link').href = ipaInstallLink;
+      if (isWechat) {
+        showById('safari');
+        location.href = ipaInstallLink;
+      } else if (isAndroid) {
+        showById('android');
+      } else if (isIOS) {
+        showById('safari');
+        location.href = ipaInstallLink;
+      } else {
+        showById('browser');
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="browser" style="display:none">
+    This is IPA install page, open this link with your iPhone.
+  </div>
+  <div id="safari" style="display:none">
+    If install not started soon, click <a id="itms-link" href="#">here</a>
+  </div>
+  <div id="android" style="display:none">
+    This is IPA install page, not for android.
+  </div>
+  <script>checkBrowerAndDownload();</script>
+</body>
+</html>`
+
+const videoPlayerHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Player - [[.FileName]]</title>
+    <style>
+        body, html { margin:0; padding:0; height:100%; width:100%; overflow:hidden; background-color:#000; }
+        .video-container { display:flex; flex-direction:column; justify-content:center; align-items:center; height:100%; }
+        video { max-width:100%; max-height:100%; }
+        h1 { color:#fff; font-size:24px; margin-bottom:20px; }
+    </style>
+</head>
+<body>
+    <div class="video-container">
+        <video id="videoPlayer" controls autoplay>
+            <source src="[[.VideoURL]]" type="video/[[.Extension]]">
+            Your browser does not support the video tag.
+        </video>
+    </div>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            document.getElementById('videoPlayer').focus();
+        });
+    </script>
+</body>
+</html>`
+
+var funcMap = template.FuncMap{
+	"title": strings.Title,
 }
 
-// TODO: I need to read more abouthtml/template
-var (
-	funcMap template.FuncMap
-)
+var _tmpls = make(map[string]*template.Template)
 
-func init() {
-	funcMap = template.FuncMap{
-		"title": strings.Title,
-		"urlhash": func(path string) string {
-			httpFile, err := Assets.Open("assets/" + path)
-			if err != nil {
-				return path + "#no-such-file"
-			}
-			info, err := httpFile.Stat()
-			if err != nil {
-				return path + "#stat-error"
-			}
-			return fmt.Sprintf("%s?t=%d", path, info.ModTime().Unix())
-		},
-	}
-}
-
-var (
-	_tmpls = make(map[string]*template.Template)
-)
-
-func renderHTML(w http.ResponseWriter, name string, v any) {
+func renderHTML(w http.ResponseWriter, name, content string, v any) {
 	if t, ok := _tmpls[name]; ok {
 		t.Execute(w, v)
 		return
 	}
-	t := template.Must(template.New(name).Funcs(funcMap).Delims("[[", "]]").Parse(assetsContent(name)))
+	t := template.Must(template.New(name).Funcs(funcMap).Delims("[[", "]]").Parse(content))
 	_tmpls[name] = t
 	t.Execute(w, v)
 }
@@ -1505,7 +1552,7 @@ func (s *HTTPStaticServer) hVideoPlayer(w http.ResponseWriter, r *http.Request) 
 	}
 	videoURL := fmt.Sprintf("%s://%s/%s", scheme, r.Host, path)
 
-	renderHTML(w, "assets/video-player.html", map[string]any{
+	renderHTML(w, "video-player", videoPlayerHTML, map[string]any{
 		"FileName":  fileName,
 		"VideoURL":  videoURL,
 		"Extension": extension,

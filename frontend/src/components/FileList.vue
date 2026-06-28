@@ -81,12 +81,18 @@
 
     <!-- Empty state -->
     <div v-if="!loading && sortedFiles.length === 0" class="empty-state">
-      <el-icon :size="48" class="empty-icon">
-        <FolderOpened />
-      </el-icon>
+      <span class="empty-icon" aria-hidden="true">
+        <svg viewBox="0 0 64 64" width="40" height="40" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M8 18v28a4 4 0 0 0 4 4h40a4 4 0 0 0 4-4V24a4 4 0 0 0-4-4H32l-4-4H12a4 4 0 0 0-4 4z"/>
+          <path d="M8 26h48" stroke-dasharray="3 4" opacity="0.5"/>
+        </svg>
+      </span>
       <p class="empty-title">This folder is empty</p>
       <p class="empty-hint" v-if="auth.upload">
         Drop files here or click <strong>Upload</strong> to get started
+      </p>
+      <p class="empty-hint" v-else>
+        Files uploaded to this directory will appear here
       </p>
     </div>
 
@@ -427,6 +433,10 @@
     </div>
     </template>
 
+    <NewFolderDialog
+      v-model:visible="showNewFolderDialog"
+    />
+
     <UploadModal
       v-model:visible="showUploadModal"
     />
@@ -472,7 +482,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, defineAsyncComponent } from 'vue'
 import { useFileStore } from '@/stores/fileStore'
 import { useFileApi } from '@/composables/useFileApi'
 import type { FileItem as FileItemType } from '@/types'
@@ -482,20 +492,25 @@ import { shouldHaveQrcode, isVideoFile, isImageFile, getFileIcon } from '@/utils
 import { isPreviewable, getClickAction, clickActionLabel } from '@/utils/previewable'
 import { copyText } from '@/utils/clipboard'
 import FileItem from './FileItem.vue'
-import UploadModal from './UploadModal.vue'
-import UrlDownloadModal from './UrlDownloadModal.vue'
-import QrCodeModal from './QrCodeModal.vue'
-import FileInfoModal from './FileInfoModal.vue'
-import VideoPlayer from './VideoPlayer.vue'
-import TextPreviewModal from './TextPreviewModal.vue'
-import ImagePreviewModal from './ImagePreviewModal.vue'
+
+// Modals are lazily loaded: each one pulls in its own chunk of
+// Element Plus components, the qrcode lib, marked, etc. Users that
+// never open "Preview" or "QR Code" never pay for those bundles.
+// Suspense isn't needed because each modal has its own v-if guard.
+const UploadModal = defineAsyncComponent(() => import('./UploadModal.vue'))
+const UrlDownloadModal = defineAsyncComponent(() => import('./UrlDownloadModal.vue'))
+const QrCodeModal = defineAsyncComponent(() => import('./QrCodeModal.vue'))
+const FileInfoModal = defineAsyncComponent(() => import('./FileInfoModal.vue'))
+const VideoPlayer = defineAsyncComponent(() => import('./VideoPlayer.vue'))
+const NewFolderDialog = defineAsyncComponent(() => import('./NewFolderDialog.vue'))
+const TextPreviewModal = defineAsyncComponent(() => import('./TextPreviewModal.vue'))
+const ImagePreviewModal = defineAsyncComponent(() => import('./ImagePreviewModal.vue'))
 import {
   ArrowLeft,
   View,
   Upload,
   Link,
   FolderAdd,
-  FolderOpened,
   Download,
   InfoFilled,
   Delete,
@@ -509,6 +524,7 @@ import {
   Check,
   Close
 } from '@element-plus/icons-vue'
+
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { TableInstance } from 'element-plus'
 import dayjs from 'dayjs'
@@ -520,6 +536,7 @@ const fileStore = useFileStore()
 const fileApi = useFileApi()
 
 // State
+const showNewFolderDialog = ref(false)
 const showUploadModal = ref(false)
 const showUrlDownloadModal = ref(false)
 const showQrCodeModal = ref(false)
@@ -828,22 +845,8 @@ async function handleDeleteFile(file: FileItemType) {
   }
 }
 
-async function handleCreateDirectory() {
-  try {
-    const { value: name } = await ElMessageBox.prompt(
-      'Enter directory name',
-      'New Folder',
-      {
-        confirmButtonText: 'Create',
-        cancelButtonText: 'Cancel'
-      }
-    )
-    if (name) {
-      await fileStore.createDirectory(name)
-    }
-  } catch {
-    // User cancelled
-  }
+function handleCreateDirectory() {
+  showNewFolderDialog.value = true
 }
 
 // After a successful URL fetch, the listing has changed (a new file
@@ -911,30 +914,44 @@ function handleToggleSelectionMode() {
 
 <style scoped>
 .file-list-container {
-  padding: 8px 0 24px;
+  padding: 2px 0 24px;
 }
 
-/* ── Toolbar ── */
+/* ── Toolbar ──
+   Modern segmented bar: nav/view group sits in a pill, action group
+   gets its own row with the primary CTA popping in accent color. */
 .toolbar {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 10px;
   margin-bottom: 16px;
+  padding: 8px;
+  background: color-mix(in srgb, var(--el-bg-color) 75%, transparent);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-xs);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   flex-wrap: wrap;
 }
 
 .toolbar-group {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 2px;
+  padding: 3px;
+  background: color-mix(in srgb, var(--el-fill-color) 50%, transparent);
+  border-radius: var(--radius-md);
 }
 
-/* Vertical divider between the nav/view group and the action group.
-   Hidden on mobile where the toolbar wraps; the gap is enough. */
+/* Action group: no chrome, primary CTA pops with accent. */
 .toolbar-group--actions {
-  padding-left: 10px;
-  margin-left: 4px;
-  border-left: 1px solid var(--el-border-color-lighter);
+  padding: 0;
+  background: transparent;
+  gap: 6px;
+  border-left: none;
+  margin-left: 0;
 }
 
 .toolbar :deep(.el-button) {
@@ -945,6 +962,48 @@ function handleToggleSelectionMode() {
 
 .toolbar :deep(.el-button:active) {
   scale: 0.97;
+}
+
+/* Segmented buttons: subtle hover/active inside the nav pill */
+.toolbar-group :deep(.el-button:not(.is-circle)) {
+  padding: 6px 12px;
+}
+
+.toolbar-group :deep(.el-button:hover) {
+  background: var(--el-bg-color);
+}
+
+.toolbar-group--actions :deep(.el-button--success:hover) {
+  background: color-mix(in srgb, var(--el-color-success) 88%, white);
+  color: #fff;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px color-mix(in srgb, var(--el-color-success) 30%, transparent),
+              0 6px 20px color-mix(in srgb, var(--el-color-success) 25%, transparent);
+}
+
+/* Primary CTA — Upload. Pops against the rest. */
+.toolbar-group--actions :deep(.el-button--primary) {
+  background: var(--el-color-primary);
+  color: #fff;
+  font-weight: 600;
+  padding: 8px 14px;
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--el-color-primary) 30%, transparent),
+              0 2px 8px color-mix(in srgb, var(--el-color-primary) 15%, transparent);
+  transition: background var(--transition-base),
+              transform var(--transition-fast),
+              box-shadow var(--transition-base);
+}
+
+.toolbar-group--actions :deep(.el-button--primary:hover) {
+  background: color-mix(in srgb, var(--el-color-primary) 88%, white);
+  color: #fff;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px color-mix(in srgb, var(--el-color-primary) 30%, transparent),
+              0 6px 20px color-mix(in srgb, var(--el-color-primary) 25%, transparent);
+}
+
+.toolbar-group--actions :deep(.el-button--primary:active) {
+  transform: translateY(0) scale(0.97);
 }
 
 /* Refresh button: icon spins while refreshing so the click feels
@@ -976,14 +1035,36 @@ function handleToggleSelectionMode() {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 12px;
-  padding: 8px 14px;
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--el-color-primary) 8%, var(--el-bg-color));
-  border: 1px solid color-mix(in srgb, var(--el-color-primary) 18%, transparent);
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--el-color-primary) 10%, var(--el-bg-color));
+  border: 1px solid color-mix(in srgb, var(--el-color-primary) 22%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--el-color-primary) 6%, transparent);
+  animation: fade-up 240ms var(--ease-out) both;
   transition:
     background-color var(--transition-base),
     border-color var(--transition-base);
+}
+
+.selection-bar-count {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+  font-variant-numeric: tabular-nums;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.selection-bar-count::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--el-color-primary);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--el-color-primary) 18%, transparent);
 }
 
 .selection-bar-left {
@@ -993,17 +1074,10 @@ function handleToggleSelectionMode() {
   min-width: 0;
 }
 
-.selection-bar-count {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--el-text-color-regular);
-  font-variant-numeric: tabular-nums;
-}
-
 .selection-bar-right {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
 }
 
 .selection-bar-btn {
@@ -1096,9 +1170,17 @@ function handleToggleSelectionMode() {
   }
 }
 
-/* ── Table ── */
+/* ── Table ──
+   Glass card surface, hairline borders, generous row padding,
+   tighter typography for a refined, modern feel. */
 .file-list-container :deep(.el-table) {
   --el-table-border-color: transparent;
+  --el-table-border: none;
+  --el-table-row-hover-bg-color: color-mix(
+    in srgb,
+    var(--el-color-primary) 4%,
+    transparent
+  );
   /* Theme-aware selection row tint: stronger than Element Plus' default
      so the highlight is visible against the row hover state too. */
   --el-table-selected-row-bg-color: color-mix(
@@ -1106,9 +1188,14 @@ function handleToggleSelectionMode() {
     var(--el-color-primary) 12%,
     transparent
   );
+  --el-table-header-bg-color: color-mix(in srgb, var(--el-fill-color) 50%, transparent);
+  background: color-mix(in srgb, var(--el-bg-color) 80%, transparent);
   border: 1px solid var(--el-border-color-lighter);
   border-radius: var(--radius-lg);
   overflow: hidden;
+  box-shadow: var(--shadow-sm);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 }
 
 .file-list-container :deep(.el-table__header-wrapper) {
@@ -1116,27 +1203,30 @@ function handleToggleSelectionMode() {
 }
 
 .file-list-container :deep(.el-table__header th) {
+  font-family: var(--font-sans);
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
   color: var(--el-text-color-placeholder);
-  background: var(--el-fill-color);
+  background: transparent;
   border-bottom: 1px solid var(--el-border-color-lighter);
-  padding: 8px 0;
+  padding: 12px 0;
 }
 
 .file-list-container :deep(.el-table__header th .cell) {
-  padding: 0 12px;
+  padding: 0 16px;
 }
 
 .file-list-container :deep(.el-table__body td) {
-  padding: 8px 0;
-  border-bottom: 1px solid var(--el-border-color-extra-light);
+  padding: 10px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--el-border-color-lighter) 60%, transparent);
+  background: transparent;
+  transition: background-color var(--transition-base);
 }
 
 .file-list-container :deep(.el-table__body td .cell) {
-  padding: 0 12px;
+  padding: 0 16px;
 }
 
 /* Tighten the gap between the leading selection checkbox and the
@@ -1242,37 +1332,64 @@ function handleToggleSelectionMode() {
   transform: translateY(0) scale(0.95);
 }
 
-/* ── Empty state ── */
+/* ── Empty state ──
+   Big, friendly, illustrated card. SVG folder icon, soft gradient
+   halo, gentle prompt — makes "this folder is empty" feel like a
+   feature, not an error. */
 .empty-state {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 80px 24px;
+  padding: 64px 24px 56px;
   text-align: center;
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: var(--radius-lg);
-  background: var(--el-bg-color);
+  border: 1px dashed var(--el-border-color);
+  border-radius: var(--radius-xl);
+  background:
+    radial-gradient(600px 200px at 50% 0%,
+      color-mix(in srgb, var(--el-color-primary) 4%, transparent) 0%,
+      transparent 70%),
+    color-mix(in srgb, var(--el-bg-color) 60%, transparent);
+  animation: fade-up 480ms var(--ease-out) both;
 }
 
 .empty-icon {
-  color: var(--el-text-color-placeholder);
-  margin-bottom: 16px;
-  opacity: 0.6;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 80px;
+  height: 80px;
+  margin-bottom: 20px;
+  border-radius: var(--radius-2xl);
+  background: color-mix(in srgb, var(--el-color-primary) 10%, transparent);
+  color: var(--el-color-primary);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--el-color-primary) 12%, transparent);
 }
 
 .empty-title {
   margin: 0 0 8px;
-  font-size: 16px;
+  font-size: 18px;
   font-weight: 600;
-  color: var(--el-text-color-secondary);
+  color: var(--el-text-color-primary);
+  letter-spacing: -0.015em;
 }
 
 .empty-hint {
   margin: 0;
-  font-size: 14px;
-  color: var(--el-text-color-placeholder);
-  max-width: 320px;
+  font-size: 13.5px;
+  color: var(--el-text-color-secondary);
+  max-width: 360px;
+  line-height: 1.55;
+}
+
+.empty-hint strong {
+  color: var(--el-color-primary);
+  font-weight: 600;
+}
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 /* ── Loading ── */
@@ -1321,21 +1438,24 @@ function handleToggleSelectionMode() {
   }
 }
 
-/* ── Mobile card styles ── */
+/* ── Mobile card styles ──
+   Layered, hoverable cards with a generous icon tile. */
 .mobile-file-card {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px 14px;
-  background: var(--el-bg-color);
+  gap: 14px;
+  padding: 14px 16px;
+  background: color-mix(in srgb, var(--el-bg-color) 80%, transparent);
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   margin-bottom: 8px;
   cursor: pointer;
+  box-shadow: var(--shadow-xs);
   transition:
     background-color var(--transition-base),
     border-color var(--transition-base),
-    transform var(--transition-base);
+    transform var(--transition-base),
+    box-shadow var(--transition-base);
 }
 
 .mobile-file-card:last-child {
@@ -1343,13 +1463,13 @@ function handleToggleSelectionMode() {
 }
 
 .mobile-file-card:hover {
-  background: var(--el-fill-color-light);
+  background: var(--el-bg-color);
   border-color: var(--el-border-color);
+  box-shadow: var(--shadow-md);
 }
 
 .mobile-file-card:active {
   transform: scale(0.99);
-  background: var(--el-fill-color);
 }
 
 /* Selected state: same primary tint as the desktop table selection
@@ -1357,13 +1477,15 @@ function handleToggleSelectionMode() {
    visual feedback. The border becomes the primary color too so the
    selection reads at a glance even on small screens. */
 .mobile-file-card--selected {
-  background: color-mix(in srgb, var(--el-color-primary) 10%, var(--el-bg-color));
-  border-color: color-mix(in srgb, var(--el-color-primary) 40%, transparent);
+  background: color-mix(in srgb, var(--el-color-primary) 12%, var(--el-bg-color));
+  border-color: color-mix(in srgb, var(--el-color-primary) 45%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--el-color-primary) 20%, transparent),
+              var(--shadow-sm);
 }
 
 .mobile-file-card--selected:hover {
-  background: color-mix(in srgb, var(--el-color-primary) 14%, var(--el-bg-color));
-  border-color: color-mix(in srgb, var(--el-color-primary) 55%, transparent);
+  background: color-mix(in srgb, var(--el-color-primary) 16%, var(--el-bg-color));
+  border-color: color-mix(in srgb, var(--el-color-primary) 60%, transparent);
 }
 
 /* Leading checkbox in a mobile card. Sized to a 36px target with
@@ -1371,7 +1493,7 @@ function handleToggleSelectionMode() {
    triggering the card's row click. */
 .mobile-file-checkbox {
   flex-shrink: 0;
-  margin-right: 4px;
+  margin-right: 2px;
 }
 
 .mobile-file-checkbox :deep(.el-checkbox__inner) {
@@ -1379,20 +1501,23 @@ function handleToggleSelectionMode() {
   height: 20px;
 }
 
-.mobile-file-card--dir {
-  /* Subtle hint that folders are tappable cards, not links */
-}
-
 .mobile-file-icon {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--el-color-primary) 10%, transparent);
+  background: color-mix(in srgb, var(--el-color-primary) 12%, transparent);
   color: var(--el-color-primary);
+  transition: background var(--transition-base),
+              transform var(--transition-base);
+}
+
+.mobile-file-card:hover .mobile-file-icon {
+  background: color-mix(in srgb, var(--el-color-primary) 18%, transparent);
+  transform: scale(1.04);
 }
 
 .mobile-file-info {
@@ -1400,7 +1525,7 @@ function handleToggleSelectionMode() {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
 }
 
 .mobile-file-name {
@@ -1410,7 +1535,7 @@ function handleToggleSelectionMode() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  letter-spacing: -0.005em;
+  letter-spacing: -0.01em;
 }
 
 .mobile-file-meta {
@@ -1427,6 +1552,7 @@ function handleToggleSelectionMode() {
 
 .mobile-file-sep {
   color: var(--el-text-color-placeholder);
+  opacity: 0.6;
 }
 
 .mobile-file-actions {
@@ -1436,13 +1562,13 @@ function handleToggleSelectionMode() {
 /* ── Responsive: Tiny phone ── */
 @media (max-width: 400px) {
   .mobile-file-card {
-    padding: 10px 12px;
+    padding: 12px 14px;
     gap: 10px;
   }
 
   .mobile-file-icon {
-    width: 36px;
-    height: 36px;
+    width: 38px;
+    height: 38px;
   }
 
   .mobile-file-name {

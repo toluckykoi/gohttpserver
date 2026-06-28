@@ -271,7 +271,6 @@ func main() {
 	}
 
 	router.PathPrefix("/-/frontend/").Handler(http.StripPrefix(gcfg.Prefix+"/-/frontend/", http.FileServer(FrontendAssets)))
-		router.PathPrefix("/-/assets/").Handler(http.StripPrefix(gcfg.Prefix+"/-/", http.FileServer(Assets)))
 	router.HandleFunc("/-/sysinfo", func(w http.ResponseWriter, r *http.Request) {
 		data, _ := json.Marshal(map[string]any{
 			"version": VERSION,

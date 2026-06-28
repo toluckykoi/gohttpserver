@@ -1,13 +1,9 @@
 # gohttpserver
 
-
-
 ## Documentation
 
 - **Goal**: Build the most user-friendly HTTP file server.
 - **Features**: Human-friendly UI, file upload support, automatic QR code generation for Apple and Android installers.
-
-
 
 ## Features
 
@@ -24,9 +20,8 @@
 - [x] Directory archive download
 - [x] Apple IPA auto-generates plist file, scannable by iPhone (requires HTTPS)
 - [x] Plist proxy
-- [ ] Download counter
 - [x] CORS support
-- [x] Offline download (fetch URL to local disk)
+- [x] Offline download
 - [x] Code file preview
 - [x] File editing support
 - [x] Global file search
@@ -41,7 +36,6 @@
 - [x] `/-/info/some.(apk|ipa)` API for detailed info
 - [x] `/-/apk/info/some.apk` API for Android package info
 - [x] Auto version tagging
-- [x] Custom title support
 - [x] Configuration file support
 - [x] Quick copy download link
 - [x] Display folder size
@@ -302,7 +296,7 @@ server {
 
 ## FAQ
 
-- [How to generate a self-signed certificate with openssl](http://stackoverflow.com/questions/10175812/how-to-create-a-self-signed-certificate)
+- [How to generate a self-signed certificate with openssl](http://stackoverflow.com/questions/10175812/how-to-create-a-self-signed-certificate-with-openssl)
 
 ### Search query format
 

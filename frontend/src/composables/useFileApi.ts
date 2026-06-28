@@ -26,7 +26,7 @@ export function useFileApi() {
 
   async function fetchFileInfo(path: string, filename: string): Promise<FileInfo> {
     const encodePath = getEncodePath(filename, path)
-    const url = `${encodePath}?op=info`
+    const url = `/-/info${encodePath}`
     const response = await fetch(url)
     if (!response.ok) {
       throw new Error(`Failed to fetch file info: ${response.statusText}`)

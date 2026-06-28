@@ -1,13 +1,9 @@
 # gohttpserver
 
-
-
 ## 文档
 
 - **目标**: 打造最好用的 HTTP 文件服务器
 - **特性**: 人性化 UI 界面、支持文件上传、直接为 Apple 和 Android 安装包生成二维码
-
-
 
 ## 功能特性
 
@@ -24,7 +20,6 @@
 - [x] 目录压缩下载
 - [x] Apple IPA 自动生成 plist 文件，二维码可被 iPhone 识别（需要 HTTPS）
 - [x] Plist 代理
-- [ ] 下载次数统计
 - [x] 支持 CORS
 - [x] 离线下载
 - [x] 代码文件预览
@@ -41,7 +36,6 @@
 - [x] 添加 API `/-/info/some.(apk|ipa)` 获取详细信息
 - [x] 添加 API `/-/apk/info/some.apk` 获取 Android 包信息
 - [x] 自动标记版本
-- [x] 自定义标题支持
 - [x] 支持通过配置文件设置
 - [x] 快速复制下载链接
 - [x] 显示文件夹大小
