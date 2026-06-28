@@ -9,6 +9,7 @@ export interface FileItem {
 export interface AuthInfo {
     upload: boolean
     delete: boolean
+    edit: boolean
     users?: UserControl[]
 }
 
@@ -16,6 +17,7 @@ export interface UserControl {
     email: string
     upload: boolean
     delete: boolean
+    edit: boolean
     token: string
 }
 

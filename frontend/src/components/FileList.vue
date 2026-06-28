@@ -469,6 +469,7 @@
       v-model:visible="showTextPreviewModal"
       :file="currentPreviewFile"
       :current-path="currentPath"
+      :can-edit="auth.edit"
     />
 
     <ImagePreviewModal

@@ -61,7 +61,7 @@
               {{ copied ? 'Copied' : 'Copy' }}
             </el-button>
           </el-tooltip>
-          <el-tooltip content="Edit file as text" placement="top">
+          <el-tooltip v-if="canEdit" content="Edit file as text" placement="top">
             <el-button
               size="small"
               :icon="Edit"
@@ -209,6 +209,7 @@ interface Props {
   visible: boolean
   file: FileItem | null
   currentPath: string
+  canEdit?: boolean
 }
 
 const props = defineProps<Props>()

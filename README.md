@@ -1,7 +1,5 @@
 # gohttpserver
 
-## Documentation
-
 - **Goal**: Build the most user-friendly HTTP file server.
 - **Features**: Human-friendly UI, file upload support, automatic QR code generation for Apple and Android installers.
 
@@ -45,17 +43,7 @@
 
 ## Installation
 
-```bash
-go install github.com/codeskyblue/gohttpserver@latest
-```
-
-Or download a pre-built binary from [GitHub Releases](https://github.com/codeskyblue/gohttpserver/releases).
-
-If you are on macOS, you can install directly:
-
-```bash
-brew install codeskyblue/tap/gohttpserver
-```
+Download a pre-built binary from [GitHub Releases](https://github.com/toluckykoi/gohttpserver/releases) or [Gitee Releases](https://gitee.com/toluckykoi/gohttpserver/releases).
 
 ## Usage
 
@@ -65,38 +53,21 @@ Listen on port 8000 on all interfaces with upload enabled:
 gohttpserver -r ./ --port 8000 --upload
 ```
 
+Enable file editing:
+
+```bash
+gohttpserver -r ./ --port 8000 --edit
+```
+
+Enable upload, delete, and edit all at once:
+
+```bash
+gohttpserver -r ./ --port 8000 --upload --delete --edit
+```
+
 Run `gohttpserver --help` to see more options.
 
-## Docker
-
-Share the current directory:
-
-```bash
-docker run -it --rm -p 8000:8000 -v $PWD:/app/public --name gohttpserver codeskyblue/gohttpserver
-```
-
-Share the current directory with HTTP basic authentication:
-
-```bash
-docker run -it --rm -p 8000:8000 -v $PWD:/app/public --name gohttpserver \
-  codeskyblue/gohttpserver \
-  --auth-type http --auth-http username1:password1 --auth-http username2:password2
-```
-
-Share the current directory with OpenID authentication (only valid inside NetEase):
-
-```bash
-docker run -it --rm -p 8000:8000 -v $PWD:/app/public --name gohttpserver \
-  codeskyblue/gohttpserver \
-  --auth-type openid
-```
-
-To build the image yourself, switch to the project root:
-
-```bash
-cd gohttpserver/
-docker build -t codeskyblue/gohttpserver -f docker/Dockerfile .
-```
+## Docker (under development)
 
 ## Authentication
 
@@ -140,6 +111,12 @@ docker build -t codeskyblue/gohttpserver -f docker/Dockerfile .
   gohttpserver --delete
   ```
 
+- Enable file editing:
+
+  ```bash
+  gohttpserver --edit
+  ```
+
 ## Advanced Usage
 
 Add access rules per sub-directory via `.ghs.yml`. Example:
@@ -148,16 +125,18 @@ Add access rules per sub-directory via `.ghs.yml`. Example:
 ---
 upload: false
 delete: false
+edit: false
 users:
 - email: "codeskyblue@codeskyblue.com"
   delete: true
   upload: true
+  edit: true
   token: 4567gf8asydhf293r23r
 ```
 
-In this setup, with OpenID authentication enabled, the user "codeskyblue@codeskyblue.com" can delete / upload inside any directory that contains a `.ghs.yml` file.
+In this setup, with OpenID authentication enabled, the user "codeskyblue@codeskyblue.com" can delete / upload / edit inside any directory that contains a `.ghs.yml` file.
 
-`token` is used for upload. See [Upload via curl](#upload-via-curl).
+`token` is used for upload and edit. See [Upload via curl](#upload-via-curl).
 
 For example, in the following directory structure, the user can delete / upload in `foo` but not in `bar`:
 
@@ -231,10 +210,19 @@ Note: filenames may not contain the characters `\/:*<>|`.
 Upload an entire folder (preserves directory structure). Each file is sent with a `path` form field carrying its relative path; the server creates intermediate directories automatically:
 
 ```bash
-# Each file is paired with a relative path; the server creates MyFolder/ on the fly
+# Upload a single file with a relative path, the server will create the MyFolder/ directory
 curl -F file=@a.txt     -F path=MyFolder/a.txt     localhost:8000/somedir
 curl -F file=@sub/b.txt -F path=MyFolder/sub/b.txt localhost:8000/somedir
 # After upload: somedir/MyFolder/a.txt and somedir/MyFolder/sub/b.txt
+```
+
+### Edit files via curl
+
+Edit a file's content (PUT request, requires `--edit` flag):
+
+```bash
+curl -X PUT -H "X-Token: 12312jlkjafs" -d "new file content" localhost:8000/somedir/foo.txt
+{"destination":"somedir/foo.txt","success":true,"size":15}
 ```
 
 Note: the `path` field may not contain `..` or absolute paths (directory traversal is rejected), and each path segment may not contain `\: * < > | "`. The frontend can generate these `path` values automatically via the folder-picker button (supported in Chrome / Edge / Firefox; Safari does not support it).
@@ -309,46 +297,34 @@ Search follows Google-like universal format. Keywords are space-separated, and a
 
 Dependencies are managed via [govendor](https://github.com/kardianos/govendor).
 
-1. Build a development binary. The **assets** directory must exist:
+1. First compile the frontend:
 
-   ```bash
+   ```shell
+   cd frontend
+   npm run build
+   ```
+
+2. Build a development binary. The **frontend/dist** directory must exist:
+
+   ```shell
    go build
    ./gohttpserver
    ```
 
-2. Build a single-binary release:
+3. Build a single-binary release:
 
-   ```bash
+   ```shell
+   # Build the project
    go build
 
-   # test
-   ./gohttpserver.exe -r ./testdata --addr 127.0.0.1:8000 --upload --delete
+   # Run
+   ./gohttpserver.exe -r ./testdata --addr 127.0.0.1:8000 --upload --delete --edit
    ```
 
-Theme definitions live in [assets/themes](assets/themes). Two themes are available: black and green.
+## Support
 
-## References
-
-- Core library Vue <https://vuejs.org.cn/>
-- Icons from <http://www.easyicon.net/558394-file_explorer_icon.html>
-- Code highlighting <https://craig.is/making/rainbows>
-- Markdown parser <https://github.com/showdownjs/showdown>
-- Markdown CSS <https://github.com/sindresorhus/github-markdown-css>
-- Upload support <http://www.dropzonejs.com/>
-- Scroll-to-top <https://markgoodyear.com/2013/01/scrollup-jquery-plugin/>
-- Clipboard <https://clipboardjs.com/>
-- Underscore <http://underscorejs.org/>
-
-**Go libraries**
-
-- [vfsgen](https://github.com/shurcooL/vfsgen) - currently unused
-- [go-bindata-assetfs](https://github.com/elazarl/go-bindata-assetfs) - currently unused
-- <http://www.gorillatoolkit.org/pkg/handlers>
-
-## History
-
-The old version lives at <https://github.com/codeskyblue/gohttp>
+This project is forked from **[codeskyblue/gohttpserver](https://github.com/codeskyblue/gohttpserver)** (the original project is no longer maintained). Thanks to codeskyblue/gohttpserver for the open source support.
 
 ## License
 
-This project is licensed under the [MIT](LICENSE) license.
+This project is licensed under the [Apache-2.0](LICENSE) license.
