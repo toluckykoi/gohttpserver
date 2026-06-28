@@ -1,7 +1,5 @@
 # gohttpserver
 
-## 文档
-
 - **目标**: 打造最好用的 HTTP 文件服务器
 - **特性**: 人性化 UI 界面、支持文件上传、直接为 Apple 和 Android 安装包生成二维码
 
@@ -45,17 +43,7 @@
 
 ## 安装
 
-```bash
-go install github.com/codeskyblue/gohttpserver@latest
-```
-
-或者从 [GitHub Releases](https://github.com/codeskyblue/gohttpserver/releases) 下载二进制文件。
-
-如果你使用 Mac，可以直接运行：
-
-```bash
-brew install codeskyblue/tap/gohttpserver
-```
+从 [GitHub Releases](https://github.com/toluckykoi/gohttpserver/releases) 或者 [Gitee Releases](https://gitee.com/toluckykoi/gohttpserver/releases) 下载二进制文件。
 
 ## 使用方法
 
@@ -65,38 +53,19 @@ brew install codeskyblue/tap/gohttpserver
 gohttpserver -r ./ --port 8000 --upload
 ```
 
+启用文件编辑功能：
+```bash
+gohttpserver -r ./ --port 8000 --edit
+```
+
+同时启用上传、删除和编辑：
+```bash
+gohttpserver -r ./ --port 8000 --upload --delete --edit
+```
+
 使用 `gohttpserver --help` 查看更多使用选项。
 
-## Docker 使用方法
-
-共享当前目录：
-
-```bash
-docker run -it --rm -p 8000:8000 -v $PWD:/app/public --name gohttpserver codeskyblue/gohttpserver
-```
-
-使用 HTTP 基础认证共享当前目录：
-
-```bash
-docker run -it --rm -p 8000:8000 -v $PWD:/app/public --name gohttpserver \
-  codeskyblue/gohttpserver \
-  --auth-type http --auth-http username1:password1 --auth-http username2:password2
-```
-
-使用 OpenID 认证共享当前目录（仅在网易公司内部有效）：
-
-```bash
-docker run -it --rm -p 8000:8000 -v $PWD:/app/public --name gohttpserver \
-  codeskyblue/gohttpserver \
-  --auth-type openid
-```
-
-要自己构建镜像，请将当前目录切换到项目根目录：
-
-```bash
-cd gohttpserver/
-docker build -t codeskyblue/gohttpserver -f docker/Dockerfile .
-```
+## Docker 使用方法（开发中）
 
 ## 认证选项
 
@@ -140,6 +109,12 @@ docker build -t codeskyblue/gohttpserver -f docker/Dockerfile .
   gohttpserver --delete
   ```
 
+- 启用文件编辑功能：
+
+  ```bash
+  gohttpserver --edit
+  ```
+
 ## 高级用法
 
 通过在子目录下创建 `.ghs.yml` 文件来添加访问规则。示例：
@@ -148,16 +123,18 @@ docker build -t codeskyblue/gohttpserver -f docker/Dockerfile .
 ---
 upload: false
 delete: false
+edit: false
 users:
 - email: "codeskyblue@codeskyblue.com"
   delete: true
   upload: true
+  edit: true
   token: 4567gf8asydhf293r23r
 ```
 
-在这种情况下，如果启用了 OpenID 认证且用户 "codeskyblue@codeskyblue.com" 已登录，他/她可以在存在 `.ghs.yml` 文件的目录下删除/上传文件。
+在这种情况下，如果启用了 OpenID 认证且用户 "codeskyblue@codeskyblue.com" 已登录，他/她可以在存在 `.ghs.yml` 文件的目录下删除/上传/编辑文件。
 
-`token` 用于上传。请参考 [使用 curl 上传](#使用-curl-上传)。
+`token` 用于上传和编辑。请参考 [使用 curl 上传](#使用-curl-上传)。
 
 例如，在以下目录结构中，用户可以在 `foo` 目录下删除/上传文件，但不能在 `bar` 目录下执行这些操作：
 
@@ -238,6 +215,15 @@ curl -F file=@sub/b.txt -F path=MyFolder/sub/b.txt localhost:8000/somedir
 # 落地后：somedir/MyFolder/a.txt 与 somedir/MyFolder/sub/b.txt
 ```
 
+### 使用 CURL 编辑文件
+
+编辑文件内容（PUT 请求，需要 `--edit` 参数）：
+
+```bash
+curl -X PUT -H "X-Token: 12312jlkjafs" -d "新文件内容" localhost:8000/somedir/foo.txt
+{"destination":"somedir/foo.txt","success":true,"size":15}
+```
+
 注意：`path` 字段不允许包含 `..` 或绝对路径（拒绝目录逃逸），且每个路径段
 不允许包含 `\: * < > | "` 字符。前端可以通过文件夹选择按钮自动生成这些
 `path`（Chrome / Edge / Firefox 支持，Safari 不支持）。
@@ -312,46 +298,35 @@ server {
 
 依赖通过 [govendor](https://github.com/kardianos/govendor) 管理
 
-1. 构建开发版本。**assets** 目录必须存在：
+1. 先编译前端
 
-   ```bash
+   ```shell
+   cd frontend
+   npm run build
+   ```
+
+2. 构建开发版本。**frontend/dist** 目录必须存在：
+
+   ```shell
    go build
    ./gohttpserver
    ```
 
-2. 构建单二进制文件发布版：
+3. 构建单二进制文件发布版：
 
-   ```bash
+   ```shell
+   # 编译项目
    go build
-
-   # test
-   ./gohttpserver.exe -r ./testdata --addr 127.0.0.1:8000 --upload --delete
+   
+   # 运行
+   ./gohttpserver.exe -r ./testdata --addr 127.0.0.1:8000 --upload --delete --edit
    ```
 
-主题定义在 [assets/themes](assets/themes) 目录中。目前只有两个主题可用：黑色和绿色。
+## 支持
 
-## 参考网站
-
-- 核心库 Vue <https://vuejs.org.cn/>
-- 图标来自 <http://www.easyicon.net/558394-file_explorer_icon.html>
-- 代码高亮 <https://craig.is/making/rainbows>
-- Markdown 解析 <https://github.com/showdownjs/showdown>
-- Markdown CSS <https://github.com/sindresorhus/github-markdown-css>
-- 上传支持 <http://www.dropzonejs.com/>
-- 滚动到顶部 <https://markgoodyear.com/2013/01/scrollup-jquery-plugin/>
-- 剪贴板 <https://clipboardjs.com/>
-- Underscore <http://underscorejs.org/>
-
-**Go 库**
-
-- [vfsgen](https://github.com/shurcooL/vfsgen) - 当前未使用
-- [go-bindata-assetfs](https://github.com/elazarl/go-bindata-assetfs) - 当前未使用
-- <http://www.gorillatoolkit.org/pkg/handlers>
-
-## 历史
-
-旧版本托管在 <https://github.com/codeskyblue/gohttp>
+该项目是从 **[codeskyblue/gohttpserver](https://github.com/codeskyblue/gohttpserver)** 修改而来 (因为原项目不更新了)，感谢 codeskyblue/gohttpserver 开源支持。
 
 ## 许可证
 
-本项目使用 [MIT](LICENSE) 许可证。
+本项目使用 [Apache-2.0](LICENSE) 许可证。
+

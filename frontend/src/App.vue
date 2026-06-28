@@ -109,7 +109,7 @@
         <footer class="app-footer">
           <div class="footer-card">
             <a
-              href="https://github.com/codeskyblue/gohttpserver"
+              href="https://github.com/toluckykoi/gohttpserver"
               target="_blank"
               rel="noopener"
               class="footer-product"
@@ -126,11 +126,34 @@
               built with <span class="footer-heart" aria-hidden="true">♥</span> by
             </span>
             <a
-              href="https://github.com/codeskyblue"
+              href="https://github.com/toluckykoi"
               target="_blank"
               rel="noopener"
               class="footer-author"
             >codeskyblue</a>
+            <span class="footer-divider" aria-hidden="true">·</span>
+            <a
+              href="https://github.com/toluckykoi/gohttpserver"
+              target="_blank"
+              rel="noopener"
+              class="footer-icon-link"
+              title="GitHub"
+            >
+              <svg class="footer-icon footer-icon--github" viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8"/>
+              </svg>
+            </a>
+            <a
+              href="https://gitee.com/toluckykoi/gohttpserver"
+              target="_blank"
+              rel="noopener"
+              class="footer-icon-link"
+              title="Gitee"
+            >
+              <svg class="footer-icon footer-icon--gitee" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M11.984 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0zm6.09 5.333c.328 0 .593.266.592.593v1.482a.594.594 0 0 1-.593.592H9.777c-.982 0-1.778.796-1.778 1.778v5.63c0 .327.266.592.593.592h5.63a.594.594 0 0 0 .592-.592v-1.482a.594.594 0 0 1 .593-.592h2.963a.594.594 0 0 1 .593.592v1.482c0 .983-.797 1.778-1.778 1.778h-5.63A5.345 5.345 0 0 1 5.63 16.148V7.407A5.345 5.345 0 0 1 10.97 2.074h7.111z"/>
+              </svg>
+            </a>
           </div>
         </footer>
       </main>
@@ -678,6 +701,42 @@ onBeforeUnmount(() => {
 
 .footer-author:hover {
   color: var(--el-color-primary);
+}
+
+.footer-icon-link {
+  display: inline-flex;
+  align-items: center;
+  color: var(--el-text-color-secondary);
+  transition: color var(--transition-base);
+  line-height: 0;
+}
+
+.footer-icon-link:hover {
+  color: var(--el-color-primary);
+}
+
+.footer-icon {
+  width: 15px;
+  height: 15px;
+  fill: currentColor;
+  transition: opacity var(--transition-base);
+}
+
+.footer-icon--github {
+  fill: #24292f;
+}
+
+.footer-icon--gitee {
+  fill: #c71d23;
+}
+
+.theme-black .footer-icon--github,
+.theme-green .footer-icon--github {
+  fill: #e6edf3;
+}
+
+.footer-icon-link:hover .footer-icon {
+  opacity: 0.75;
 }
 
 /* ════════════════════════════════════════════════════════════════

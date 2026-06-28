@@ -61,6 +61,7 @@ type HTTPStaticServer struct {
 	Prefix           string
 	Upload           bool
 	Delete           bool
+	Edit             bool
 	Title            string
 	Theme            string
 	PlistProxy       string
@@ -429,11 +430,14 @@ const maxEditSize int64 = 5 * 1024 * 1024
 // markdown, config). For multi-MB files, the upload pipeline is the
 // right path; PUT is intentionally size-capped.
 //
-// Auth: same as upload — the user must have upload permission on the
-// containing directory. We do not require delete permission; PUT
-// modifies, doesn't remove. The existing .ghs.yml `upload` flag is
-// the natural gate.
+// Auth: requires the global --edit flag AND edit permission on the
+// containing directory (via .ghs.yml).
 func (s *HTTPStaticServer) hEdit(w http.ResponseWriter, req *http.Request) {
+	if !s.Edit {
+		http.Error(w, "Edit disabled (enable with --edit)", http.StatusForbidden)
+		return
+	}
+
 	dstPath := s.getRealPath(req)
 
 	// Reject obvious path escapes early — the resolvePath call below
@@ -458,15 +462,15 @@ func (s *HTTPStaticServer) hEdit(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Auth check: same gate as upload. We use the destination's parent
-// dir for the .ghs.yml lookup so an admin granting upload on a
-// directory implicitly grants edit on its files.
-//
-// canUpload uses r.FormValue("token") which calls r.ParseForm() and
-// drains the body when Content-Type is application/x-www-form-urlencoded
-// — that would leave nothing for the file write. PUT bodies here
-// ARE the file content, so we extract the token from the URL query
-// (or the X-Token header) and never touch the body.
+	// Auth check: we use the destination's parent dir for the .ghs.yml
+	// lookup so an admin granting edit on a directory implicitly
+	// grants edit on its files.
+	//
+	// canEdit uses r.FormValue("token") which calls r.ParseForm() and
+	// drains the body when Content-Type is application/x-www-form-urlencoded
+	// — that would leave nothing for the file write. PUT bodies here
+	// ARE the file content, so we extract the token from the URL query
+	// (or the X-Token header) and never touch the body.
 	ac := s.readAccessConf(filepath.Dir(dstPath))
 	token := req.URL.Query().Get("token")
 	if token == "" {
@@ -474,9 +478,9 @@ func (s *HTTPStaticServer) hEdit(w http.ResponseWriter, req *http.Request) {
 	}
 	var allowed bool
 	if token != "" {
-		allowed = ac.canUploadByToken(token)
+		allowed = ac.canEditByToken(token)
 	} else {
-		allowed = ac.canUploadSession(req)
+		allowed = ac.canEditSession(req)
 	}
 	if !allowed {
 		http.Error(w, "Edit forbidden", http.StatusForbidden)
@@ -1076,12 +1080,14 @@ type UserControl struct {
 	// Access bool
 	Upload bool
 	Delete bool
+	Edit   bool
 	Token  string
 }
 
 type AccessConf struct {
 	Upload       bool          `yaml:"upload" json:"upload"`
 	Delete       bool          `yaml:"delete" json:"delete"`
+	Edit         bool          `yaml:"edit" json:"edit"`
 	Users        []UserControl `yaml:"users" json:"users"`
 	AccessTables []AccessTable `yaml:"accessTables"`
 }
@@ -1138,6 +1144,33 @@ func (c *AccessConf) canUploadByToken(token string) bool {
 // auth without draining the body via r.FormValue. Token auth is the
 // path callers should use; this is the fallback for browser session
 // login.
+func (c *AccessConf) canEditByToken(token string) bool {
+	for _, rule := range c.Users {
+		if rule.Token == token {
+			return rule.Edit
+		}
+	}
+	return c.Edit
+}
+
+func (c *AccessConf) canEditSession(r *http.Request) bool {
+	session, err := store.Get(r, defaultSessionName)
+	if err != nil {
+		return c.Edit
+	}
+	val := session.Values["user"]
+	if val == nil {
+		return c.Edit
+	}
+	userInfo := val.(*UserInfo)
+	for _, rule := range c.Users {
+		if rule.Email == userInfo.Email {
+			return rule.Edit
+		}
+	}
+	return c.Edit
+}
+
 func (c *AccessConf) canUploadSession(r *http.Request) bool {
 	session, err := store.Get(r, defaultSessionName)
 	if err != nil {
@@ -1154,6 +1187,29 @@ func (c *AccessConf) canUploadSession(r *http.Request) bool {
 		}
 	}
 	return c.Upload
+}
+
+func (c *AccessConf) canEdit(r *http.Request) bool {
+	token := r.FormValue("token")
+	if token != "" {
+		return c.canEditByToken(token)
+	}
+	session, err := store.Get(r, defaultSessionName)
+	if err != nil {
+		return c.Edit
+	}
+	val := session.Values["user"]
+	if val == nil {
+		return c.Edit
+	}
+	userInfo := val.(*UserInfo)
+
+	for _, rule := range c.Users {
+		if rule.Email == userInfo.Email {
+			return rule.Edit
+		}
+	}
+	return c.Edit
 }
 
 func (c *AccessConf) canUpload(r *http.Request) bool {
@@ -1186,6 +1242,7 @@ func (s *HTTPStaticServer) hJSONList(w http.ResponseWriter, r *http.Request) {
 	auth := s.readAccessConf(realPath)
 	auth.Upload = auth.canUpload(r)
 	auth.Delete = auth.canDelete(r)
+	auth.Edit = auth.canEdit(r)
 	maxDepth := s.DeepPathMaxDepth
 
 	// path string -> info os.FileInfo
@@ -1375,6 +1432,7 @@ func (s *HTTPStaticServer) defaultAccessConf() AccessConf {
 	return AccessConf{
 		Upload: s.Upload,
 		Delete: s.Delete,
+		Edit:   s.Edit,
 	}
 }
 

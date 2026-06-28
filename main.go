@@ -38,6 +38,7 @@ type Configure struct {
 	XHeaders        bool     `yaml:"xheaders"`
 	Upload          bool     `yaml:"upload"`
 	Delete          bool     `yaml:"delete"`
+	Edit            bool     `yaml:"edit"`
 	PlistProxy      string   `yaml:"plistproxy"`
 	Title           string   `yaml:"title"`
 	Debug           bool     `yaml:"debug"`
@@ -119,6 +120,7 @@ func parseFlags() error {
 	kingpin.Flag("theme", "web theme, one of <black|green>").StringVar(&gcfg.Theme)
 	kingpin.Flag("upload", "enable upload support").BoolVar(&gcfg.Upload)
 	kingpin.Flag("delete", "enable delete support").BoolVar(&gcfg.Delete)
+	kingpin.Flag("edit", "enable file edit support").BoolVar(&gcfg.Edit)
 	kingpin.Flag("xheaders", "used when behide nginx").BoolVar(&gcfg.XHeaders)
 	kingpin.Flag("debug", "enable debug mode").BoolVar(&gcfg.Debug)
 	kingpin.Flag("plistproxy", "plist proxy when server is not https").Short('p').StringVar(&gcfg.PlistProxy)
@@ -211,6 +213,7 @@ func main() {
 	ss.GoogleTrackerID = gcfg.GoogleTrackerID
 	ss.Upload = gcfg.Upload
 	ss.Delete = gcfg.Delete
+	ss.Edit = gcfg.Edit
 	ss.AuthType = gcfg.Auth.Type
 	ss.DeepPathMaxDepth = gcfg.DeepPathMaxDepth
 

@@ -12,7 +12,7 @@ export const useFileStore = defineStore('file', () => {
   // State
   const currentPath = ref('')
   const files = ref<FileItem[]>([])
-  const auth = ref<AuthInfo>({ upload: false, delete: false })
+  const auth = ref<AuthInfo>({ upload: false, delete: false, edit: false })
   const user = ref<UserInfo | null>(null)
   const version = ref('')
   const loading = ref(false)
