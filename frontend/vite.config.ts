@@ -86,6 +86,15 @@ export default defineConfig({
     // cacheable on its own — a tweak to our app code won't bust the
     // (much larger) vendor cache for repeat visitors.
     rollupOptions: {
+      onwarn(warning, warn) {
+        if (
+          warning.code === 'INVALID_ANNOTATION' &&
+          /@vueuse\/core/.test(warning.message ?? '')
+        ) {
+          return
+        }
+        warn(warning)
+      },
       output: {
         manualChunks: (id) => {
           if (!id.includes('node_modules')) return undefined
