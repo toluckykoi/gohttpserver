@@ -2,7 +2,7 @@
 
 set -eu
 
-VERSION=$(git describe --abbrev=0 --tags)
+VERSION=$(git describe --abbrev=0 --tags 2>/dev/null || cat VERSION 2>/dev/null || echo "v0.0.0")
 REVCNT=$(git rev-list --count HEAD)
 DEVCNT=$(git rev-list --count $VERSION)
 if test $REVCNT != $DEVCNT

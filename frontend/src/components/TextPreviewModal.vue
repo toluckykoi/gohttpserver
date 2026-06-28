@@ -135,7 +135,7 @@
 
     <!-- Rendered markdown -->
     <div
-      v-else-if="meta.renderable && viewMode === 'rendered'"
+      v-else-if="meta.renderable && viewMode === 'rendered' && !editMode"
       class="preview-rendered"
       v-html="renderedMarkdown"
     />
@@ -169,7 +169,7 @@
       <el-input
         v-model="editContent"
         type="textarea"
-        :autosize="{ minRows: 18, maxRows: 30 }"
+        :autosize="{ minRows: 28, maxRows: 45 }"
         resize="none"
         spellcheck="false"
         class="preview-edit-textarea"

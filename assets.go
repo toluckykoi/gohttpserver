@@ -6,12 +6,6 @@ import (
 	"net/http"
 )
 
-//go:embed assets
-var assetsFS embed.FS
-
-// Assets contains legacy project assets (templates, static files for video-player, ipa-install).
-var Assets = http.FS(assetsFS)
-
 //go:embed frontend/dist
 var frontendDistFS embed.FS
 
