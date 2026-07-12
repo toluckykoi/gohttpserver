@@ -160,53 +160,77 @@ func unzipFile(ctx context.Context, filename, dest string, onProgress func(idx, 
 		default:
 		}
 
-		rc, err := f.Open()
-		if err != nil {
-			return err
-		}
-		// Note: defer inside a loop intentionally defers Close until the
-		// surrounding function returns. This matches the pre-existing
-		// pattern in this codebase; the per-file close leak is bounded by
-		// the total number of zip entries.
-		defer rc.Close()
-
-		// ignore .ghs.yml
-		filename := sanitizedName(f.Name)
-		if filepath.Base(filename) == ".ghs.yml" {
-			continue
-		}
-		fpath := filepath.Join(dest, filename)
-
-		// filename maybe GBK or UTF-8
-		// Ref: https://studygolang.com/articles/3114
-		if f.Flags&(1<<11) == 0 { // GBK
-			tr := simplifiedchinese.GB18030.NewDecoder()
-			fpathUtf8, err := tr.String(fpath)
-			if err == nil {
-				fpath = fpathUtf8
-			}
-		}
-
-		if onProgress != nil {
-			onProgress(i+1, total, filename)
-		}
-
-		if f.FileInfo().IsDir() {
-			os.MkdirAll(fpath, os.ModePerm)
-			continue
-		}
-
-		os.MkdirAll(filepath.Dir(fpath), os.ModePerm)
-		outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
-		if err != nil {
-			return err
-		}
-		_, err = io.Copy(outFile, rc)
-		outFile.Close()
-
-		if err != nil {
+		if err := extractZipEntry(f, dest, i+1, total, onProgress); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// extractZipEntry writes a single zip entry to dest. Extracted into its
+// own function so `defer rc.Close()` runs at the end of each entry
+// rather than accumulating until unzipFile returns — the previous
+// in-loop defer could exhaust file descriptors on archives with many
+// entries.
+func extractZipEntry(f *zip.File, dest string, idx, total int, onProgress func(idx, total int, name string)) error {
+	rc, err := f.Open()
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+
+	// ignore .ghs.yml
+	filename := sanitizedName(f.Name)
+	if filepath.Base(filename) == ".ghs.yml" {
+		return nil
+	}
+	fpath := filepath.Join(dest, filename)
+
+	// filename maybe GBK or UTF-8
+	// Ref: https://studygolang.com/articles/3114
+	// Apply GBK→UTF-8 transcode BEFORE the Zip Slip check below so
+	// the escape validation runs against the final fpath that will
+	// be written to disk. GBK's mapping doesn't turn "/" into other
+	// bytes, so in practice the check is equivalent either way, but
+	// ordering transcode-then-validate is the safer invariant.
+	if f.Flags&(1<<11) == 0 { // GBK
+		tr := simplifiedchinese.GB18030.NewDecoder()
+		fpathUtf8, err := tr.String(fpath)
+		if err == nil {
+			fpath = fpathUtf8
+		}
+	}
+
+	// Zip Slip defence: reject entries whose normalised path escapes
+	// the destination directory. sanitizedName already runs
+	// filepath.Clean, but Clean does not collapse a leading ".." —
+	// so an entry named "../../etc/passwd" would still resolve
+	// outside dest. The prefix check (with a trailing separator on
+	// both sides) is the standard mitigation per CVE-2018-1002200.
+	cleanDest := filepath.Clean(dest)
+	cleanFpath := filepath.Clean(fpath)
+	if cleanFpath != cleanDest &&
+		!strings.HasPrefix(cleanFpath+string(filepath.Separator),
+			cleanDest+string(filepath.Separator)) {
+		return fmt.Errorf("zip entry escapes destination: %q", f.Name)
+	}
+
+	if onProgress != nil {
+		onProgress(idx, total, filename)
+	}
+
+	if f.FileInfo().IsDir() {
+		os.MkdirAll(fpath, os.ModePerm)
+		return nil
+	}
+
+	os.MkdirAll(filepath.Dir(fpath), os.ModePerm)
+	outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(outFile, rc)
+	outFile.Close()
+
+	return err
 }

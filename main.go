@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/alecthomas/kingpin"
 	accesslog "github.com/codeskyblue/go-accesslog"
@@ -52,6 +53,8 @@ type Configure struct {
 	} `yaml:"auth"`
 	DeepPathMaxDepth int  `yaml:"deep-path-max-depth"`
 	NoIndex          bool `yaml:"no-index"`
+	CORSOrigins      []string `yaml:"cors-origins"`
+	AllowPublicOauth2 bool   `yaml:"allow-public-oauth2"`
 }
 
 type httpLogger struct{}
@@ -128,6 +131,8 @@ func parseFlags() error {
 	kingpin.Flag("google-tracker-id", "set to empty to disable it").StringVar(&gcfg.GoogleTrackerID)
 	kingpin.Flag("deep-path-max-depth", "set to -1 to not combine dirs").IntVar(&gcfg.DeepPathMaxDepth)
 	kingpin.Flag("no-index", "disable indexing").BoolVar(&gcfg.NoIndex)
+	kingpin.Flag("cors-origins", "allowed CORS origins (repeatable; empty = no CORS, '*' = allow all [insecure])").StringsVar(&gcfg.CORSOrigins)
+	kingpin.Flag("allow-public-oauth2", "allow oauth2-proxy mode on a non-loopback bind (insecure: only use behind a proxy that strips X-Auth-Request-*)").BoolVar(&gcfg.AllowPublicOauth2)
 
 	kingpin.Parse() // first parse conf
 
@@ -155,17 +160,54 @@ func fixPrefix(prefix string) string {
 	return prefix
 }
 
-func cors(next http.Handler) http.Handler {
-	// access control and CORS middleware
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "*")
-		if r.Method == "OPTIONS" {
-			return
+// cors returns a middleware that applies the configured CORS policy.
+// Previously this unconditionally sent Access-Control-Allow-Origin: *,
+// which let any website issue cross-origin requests with a stolen token
+// (Allow-Headers: * let X-Token through). Now the policy is opt-in:
+//   - --cors-origins not set → no CORS headers (same-origin only)
+//   - --cors-origins '*'     → allow all (the old behaviour; insecure,
+//                              only useful for public read-only servers)
+//   - --cors-origins https://a.com --cors-origins https://b.com
+//                            → allow only those origins
+//
+// Only the matching origin is echoed back; credentials are not allowed
+// when the origin is "*". Preflight OPTIONS is answered without calling
+// the auth chain.
+func cors(allowedOrigins []string) func(http.Handler) http.Handler {
+	// Normalise once for O(1) lookup.
+	allowAll := false
+	allowSet := make(map[string]bool, len(allowedOrigins))
+	for _, o := range allowedOrigins {
+		if o == "*" {
+			allowAll = true
 		}
-		next.ServeHTTP(w, r)
-	})
+		allowSet[o] = true
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := r.Header.Get("Origin")
+			if origin != "" {
+				switch {
+				case allowAll:
+					w.Header().Set("Access-Control-Allow-Origin", "*")
+				case allowSet[origin]:
+					w.Header().Set("Access-Control-Allow-Origin", origin)
+					w.Header().Set("Vary", "Origin")
+				}
+			}
+			if allowAll || allowSet[origin] {
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+				// Limit headers to what the app actually uses instead of "*".
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Token, Authorization")
+				w.Header().Set("Access-Control-Max-Age", "600")
+			}
+			if r.Method == "OPTIONS" {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 func multiBasicAuth(auths []string) func(http.Handler) http.Handler {
@@ -195,8 +237,16 @@ func main() {
 		log.Fatal(err)
 	}
 	if gcfg.Debug {
-		data, _ := yaml.Marshal(gcfg)
-		fmt.Printf("--- config ---\n%s\n", string(data))
+		// Print the config for debugging, but redact secrets — the
+		// marshal below used to dump HTTP basic-auth passwords and the
+		// OAuth2 client secret to stdout, which then flowed into log
+		// collectors. We shallow-copy the config and blank the
+		// sensitive fields before printing.
+		debugCfg := gcfg
+		debugCfg.Auth.HTTP = nil
+		debugCfg.Auth.Secret = ""
+		data, _ := yaml.Marshal(debugCfg)
+		fmt.Printf("--- config (secrets redacted) ---\n%s\n", string(data))
 	}
 	log.SetFlags(log.Lshortfile | log.LstdFlags)
 
@@ -233,8 +283,8 @@ func main() {
 
 	hdlr = accesslog.NewLoggingHandler(hdlr, logger)
 
-	// CORS
-	hdlr = cors(hdlr)
+	// CORS — opt-in via --cors-origins. Empty = same-origin only.
+	hdlr = cors(gcfg.CORSOrigins)(hdlr)
 
 	if gcfg.XHeaders {
 		hdlr = handlers.ProxyHeaders(hdlr)
@@ -261,6 +311,12 @@ func main() {
 		// case "github":
 		// 	handleOAuth2ID(router, gcfg.Auth.Type, gcfg.Auth.ID, gcfg.Auth.Secret) // FIXME(ssx): set secure default to false
 	case "oauth2-proxy":
+		// Wrap the handler chain so the proxy-injected identity headers
+		// are persisted into the session before downstream authorisation
+		// checks read it. Without this the per-user rules in .ghs.yml
+		// never matched, because canDelete/canUpload/canEdit only look
+		// at the session.
+		hdlr = oauth2ProxyMiddleware(hdlr)
 		handleOauth2(router)
 		userHandlerRegistered = true
 	}
@@ -291,11 +347,35 @@ func main() {
 		gcfg.Addr = ":" + gcfg.Addr
 	}
 	_, port, _ := net.SplitHostPort(gcfg.Addr)
+
+	// oauth2-proxy mode trusts X-Auth-Request-* headers, which any
+	// client can forge if the server is reachable without going through
+	// the proxy. Refuse to start on a non-loopback bind unless the
+	// operator explicitly acknowledges the risk with --allow-public-oauth2.
+	if gcfg.Auth.Type == "oauth2-proxy" && !gcfg.AllowPublicOauth2 && !isLoopbackAddr(gcfg.Addr) {
+		log.Fatalf("Refusing to start: auth-type=oauth2-proxy on non-loopback %s is insecure " +
+			"(clients can forge X-Auth-Request-* headers). Bind to 127.0.0.1:%s or use --allow-public-oauth2 " +
+			"only if a proxy in front strips those headers.", gcfg.Addr, port)
+	}
 	log.Printf("listening on %s, local address http://%s:%s\n", strconv.Quote(gcfg.Addr), getLocalIP(), port)
 
 	srv := &http.Server{
 		Handler: mainRouter,
 		Addr:    gcfg.Addr,
+		// ReadHeaderTimeout mitigates Slowloris: a client must send the
+		// full request headers within this window or the connection is
+		// dropped. We don't set ReadTimeout/WriteTimeout because they
+		// would cap large file uploads/downloads (the body I/O is
+		// bounded by the handler-level limits already). IdleTimeout
+		// reaps keep-alive connections that have no active request.
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	// When serving over TLS, mark the session cookie Secure so browsers
+	// never send it over a plain-HTTP connection (downgrade sniffing).
+	if gcfg.Key != "" && gcfg.Cert != "" {
+		store.Options.Secure = true
 	}
 
 	var err error

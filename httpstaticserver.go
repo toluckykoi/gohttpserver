@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/md5"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"regexp"
@@ -70,7 +72,11 @@ type HTTPStaticServer struct {
 	DeepPathMaxDepth int
 	NoIndex          bool
 
-	indexes []IndexFileItem
+	// indexes is read by findIndex (HTTP goroutines) and overwritten by
+	// the background makeIndex loop. Stored as an atomic pointer so
+	// readers always see a consistent snapshot — the previous bare
+	// slice field was a data race under `go test -race`.
+	indexes atomic.Pointer[[]IndexFileItem]
 	m       *mux.Router
 	bufPool sync.Pool // use sync.Pool caching buf to reduce gc ratio
 }
@@ -133,6 +139,15 @@ func NewHTTPStaticServer(root string, noIndex bool) *HTTPStaticServer {
 	// Android-package-specific info endpoint (mirrors /-/info/ for .apk).
 	m.HandleFunc("/-/apk/info/{path:.*}", s.hInfo).Methods("GET")
 
+	// Stream a single entry out of a zip archive on disk. Used by the
+	// IPA install manifest to surface the app icon without extracting the
+	// whole archive. The route vars feed ExtractFromZip: zip_path is the
+	// archive path under s.Root, path is a dockerignore-style glob
+	// matching the entry to extract. The literal "/-/" segment separates
+	// the archive path from the glob so two greedy .* vars don't collapse
+	// into one (the IPA icon URL is /-/unzip/<ipaPath>/-/**/<icon>.png).
+	m.HandleFunc("/-/unzip/{zip_path:.*}/-/{path:.*}", s.hUnzip).Methods("GET")
+
 	m.HandleFunc("/{path:.*}", s.hIndex).Methods("GET", "HEAD")
 	m.HandleFunc("/{path:.*}", s.hUploadOrMkdir).Methods("POST")
 	m.HandleFunc("/{path:.*}", s.hEdit).Methods("PUT")
@@ -149,6 +164,20 @@ func (s *HTTPStaticServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Return real path with Seperator(/)
 func (s *HTTPStaticServer) getRealPath(r *http.Request) string {
 	return s.resolvePath(mux.Vars(r)["path"])
+}
+
+// relFromRoot returns path relative to s.Root, slash-normalised. Used to
+// avoid leaking the server's absolute filesystem path in JSON responses
+// (upload/edit/fetch destinations). Falls back to the slash-normalised
+// input if the relative computation fails (e.g. path is on a different
+// volume on Windows), which is acceptable since the caller already
+// validated the path is under Root.
+func (s *HTTPStaticServer) relFromRoot(path string) string {
+	rel, err := filepath.Rel(s.Root, path)
+	if err != nil {
+		return filepath.ToSlash(path)
+	}
+	return filepath.ToSlash(rel)
 }
 
 // resolvePath turns a URL path (already URL-decoded by gorilla/mux) into an
@@ -217,24 +246,28 @@ func (s *HTTPStaticServer) hIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *HTTPStaticServer) hDelete(w http.ResponseWriter, req *http.Request) {
-	path := mux.Vars(req)["path"]
 	realPath := s.getRealPath(req)
-	// path = filepath.Clean(path) // for safe reason, prevent path contain ..
+	// Defence-in-depth: resolvePath already runs filepath.Clean, but
+	// os.RemoveAll is destructive, so re-verify the resolved path stays
+	// under s.Root before deleting. This guards against any future
+	// change to resolvePath/Prefix handling that might reopen a
+	// traversal gap.
+	if !isUnderRoot(realPath, s.Root) {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
 	auth := s.readAccessConf(realPath)
 	if !auth.canDelete(req) {
 		http.Error(w, "Delete forbidden", http.StatusForbidden)
 		return
 	}
 
-	// TODO: path safe check
 	err := os.RemoveAll(realPath)
 	if err != nil {
-		pathErr, ok := err.(*os.PathError)
-		if ok {
-			http.Error(w, pathErr.Op+" "+path+": "+pathErr.Err.Error(), 500)
-		} else {
-			http.Error(w, err.Error(), 500)
-		}
+		// Log the detailed error internally; return a generic message so
+		// the response body doesn't leak the server's absolute path.
+		log.Printf("delete %q failed: %v", realPath, err)
+		http.Error(w, "Delete failed", http.StatusInternalServerError)
 		return
 	}
 	// Drop cached sizes — files just disappeared from disk.
@@ -256,8 +289,8 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 
 	if _, err := os.Stat(dirpath); os.IsNotExist(err) {
 		if err := os.MkdirAll(dirpath, os.ModePerm); err != nil {
-			log.Println("Create directory:", err)
-			http.Error(w, "Directory create "+err.Error(), http.StatusInternalServerError)
+			log.Printf("mkdir %q: %v", dirpath, err)
+			http.Error(w, "Directory create failed", http.StatusInternalServerError)
 			return
 		}
 	}
@@ -266,14 +299,14 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 		w.Header().Set("Content-Type", "application/json;charset=utf-8")
 		json.NewEncoder(w).Encode(map[string]any{
 			"success":     true,
-			"destination": dirpath,
+			"destination": s.relFromRoot(dirpath),
 		})
 		return
 	}
 
 	if err != nil {
-		log.Println("Parse form file:", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("parse form file: %v", err)
+		http.Error(w, "Failed to parse upload", http.StatusInternalServerError)
 		return
 	}
 	defer func() {
@@ -316,8 +349,8 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 		// create "MyFolder/" and "MyFolder/sub/" too.
 		if parent := filepath.Dir(dstPath); parent != dirpath {
 			if err := os.MkdirAll(parent, os.ModePerm); err != nil {
-				log.Println("Create parent directory:", err)
-				http.Error(w, "Directory create "+err.Error(), http.StatusInternalServerError)
+				log.Printf("mkdir parent %q: %v", parent, err)
+				http.Error(w, "Directory create failed", http.StatusInternalServerError)
 				return
 			}
 		}
@@ -334,29 +367,20 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 	// Note: it seems not working well, os.Rename might be failed
 
 	var copyErr error
-	// if osFile, ok := file.(*os.File); ok && fileExists(osFile.Name()) {
-	// 	tmpUploadPath := osFile.Name()
-	// 	osFile.Close() // Windows can not rename opened file
-	// 	log.Printf("Move %s -> %s", tmpUploadPath, dstPath)
-	// 	copyErr = os.Rename(tmpUploadPath, dstPath)
-	// } else {
 	dst, err := os.Create(dstPath)
 	if err != nil {
-		log.Println("Create file:", err)
-		http.Error(w, "File create "+err.Error(), http.StatusInternalServerError)
+		log.Printf("create file %q: %v", dstPath, err)
+		http.Error(w, "File create failed", http.StatusInternalServerError)
 		return
 	}
 
-	// Note: very large size file might cause poor performance
-	// _, copyErr = io.Copy(dst, file)
 	buf := s.bufPool.Get().([]byte)
 	defer s.bufPool.Put(buf)
 	_, copyErr = io.CopyBuffer(dst, file, buf)
 	dst.Close()
-	// }
 	if copyErr != nil {
-		log.Println("Handle upload file:", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("upload copy %q: %v", dstPath, copyErr)
+		http.Error(w, "Upload failed", http.StatusInternalServerError)
 		return
 	}
 
@@ -412,7 +436,7 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 
 	json.NewEncoder(w).Encode(map[string]any{
 		"success":     true,
-		"destination": dstPath,
+		"destination": s.relFromRoot(dstPath),
 	})
 }
 
@@ -454,7 +478,13 @@ func (s *HTTPStaticServer) hEdit(w http.ResponseWriter, req *http.Request) {
 	// would muddle the semantics of each handler.
 	fi, err := os.Stat(dstPath)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		// Don't echo err — it contains the absolute server path.
+		if os.IsNotExist(err) {
+			http.Error(w, "File not found", http.StatusNotFound)
+		} else {
+			log.Printf("edit stat %q: %v", dstPath, err)
+			http.Error(w, "Stat failed", http.StatusInternalServerError)
+		}
 		return
 	}
 	if fi.IsDir() {
@@ -496,7 +526,8 @@ func (s *HTTPStaticServer) hEdit(w http.ResponseWriter, req *http.Request) {
 
 	dst, err := os.Create(dstPath)
 	if err != nil {
-		http.Error(w, "File create "+err.Error(), http.StatusInternalServerError)
+		log.Printf("edit create %q: %v", dstPath, err)
+		http.Error(w, "File create failed", http.StatusInternalServerError)
 		return
 	}
 	defer dst.Close()
@@ -511,7 +542,8 @@ func (s *HTTPStaticServer) hEdit(w http.ResponseWriter, req *http.Request) {
 		if cerr := dst.Close(); cerr == nil {
 			os.Truncate(dstPath, fi.Size())
 		}
-		http.Error(w, copyErr.Error(), http.StatusInternalServerError)
+		log.Printf("edit copy %q: %v", dstPath, copyErr)
+		http.Error(w, "Edit failed", http.StatusInternalServerError)
 		return
 	}
 	// Defence-in-depth: if Content-Length was missing or lied, refuse
@@ -529,7 +561,7 @@ func (s *HTTPStaticServer) hEdit(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]any{
 		"success":     true,
-		"destination": dstPath,
+		"destination": s.relFromRoot(dstPath),
 		"size":        written,
 	})
 }
@@ -568,6 +600,8 @@ func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error
 	if err != nil {
 		return nil, err
 	}
+	// Validate every resolved address. If any is private/loopback we
+	// refuse — this catches the common SSRF payloads.
 	for _, ip := range ips {
 		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
 			ip.IsInterfaceLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() ||
@@ -575,8 +609,16 @@ func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error
 			return nil, fmt.Errorf("refusing to connect to private/loopback address %s", ip)
 		}
 	}
+	// DNS rebinding defence: connect to the IP we just validated rather
+	// than the hostname. If we passed `host` back to Dialer.DialContext
+	// it would resolve the name AGAIN, and a second resolution could
+	// return 127.0.0.1 (TOCTOU between the check and the connect).
+	// Dialling the validated IP directly closes that window. We pick the
+	// first address; for multi-IP hosts this loses some redundancy but
+	// that's acceptable for a fetch-from-URL feature.
+	dialAddr := net.JoinHostPort(ips[0].String(), port)
 	d := net.Dialer{Timeout: 10 * time.Second}
-	return d.DialContext(ctx, network, net.JoinHostPort(host, port))
+	return d.DialContext(ctx, network, dialAddr)
 }
 
 func isPrivateIPv4(ip net.IP) bool {
@@ -674,7 +716,8 @@ func (s *HTTPStaticServer) hFetch(w http.ResponseWriter, req *http.Request) {
 	// Make sure the parent dir exists (mirrors hUploadOrMkdir).
 	if _, err := os.Stat(dirpath); os.IsNotExist(err) {
 		if err := os.MkdirAll(dirpath, os.ModePerm); err != nil {
-			http.Error(w, "Directory create "+err.Error(), http.StatusInternalServerError)
+			log.Printf("fetch mkdir %q: %v", dirpath, err)
+			http.Error(w, "Directory create failed", http.StatusInternalServerError)
 			return
 		}
 	}
@@ -697,7 +740,8 @@ func (s *HTTPStaticServer) hFetch(w http.ResponseWriter, req *http.Request) {
 	httpReq, _ := http.NewRequestWithContext(req.Context(), "GET", parsed.String(), nil)
 	httpResp, err := client.Do(httpReq)
 	if err != nil {
-		http.Error(w, "Fetch failed: "+err.Error(), http.StatusBadGateway)
+		log.Printf("fetch %q: %v", parsed.String(), err)
+		http.Error(w, "Fetch failed", http.StatusBadGateway)
 		return
 	}
 	defer httpResp.Body.Close()
@@ -709,7 +753,8 @@ func (s *HTTPStaticServer) hFetch(w http.ResponseWriter, req *http.Request) {
 
 	dst, err := os.Create(dstPath)
 	if err != nil {
-		http.Error(w, "File create "+err.Error(), http.StatusInternalServerError)
+		log.Printf("fetch create %q: %v", dstPath, err)
+		http.Error(w, "File create failed", http.StatusInternalServerError)
 		return
 	}
 	defer dst.Close()
@@ -720,7 +765,8 @@ func (s *HTTPStaticServer) hFetch(w http.ResponseWriter, req *http.Request) {
 	if copyErr != nil {
 		// Roll back: drop the partial file. The user can re-trigger.
 		os.Remove(dstPath)
-		http.Error(w, "Fetch copy failed: "+copyErr.Error(), http.StatusBadGateway)
+		log.Printf("fetch copy %q: %v", dstPath, copyErr)
+		http.Error(w, "Fetch copy failed", http.StatusBadGateway)
 		return
 	}
 	if written > maxFetchSize {
@@ -734,7 +780,7 @@ func (s *HTTPStaticServer) hFetch(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]any{
 		"success":     true,
-		"destination": dstPath,
+		"destination": s.relFromRoot(dstPath),
 		"size":        written,
 		"source":      parsed.String(),
 	})
@@ -815,7 +861,14 @@ func (s *HTTPStaticServer) hInfo(w http.ResponseWriter, r *http.Request) {
 
 	fi, err := os.Stat(relPath)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		// Don't echo err — it contains the absolute server path. Return
+		// 404 for "not found" (the common case) and 500 otherwise.
+		if os.IsNotExist(err) {
+			http.Error(w, "File not found", http.StatusNotFound)
+		} else {
+			log.Printf("info stat %q: %v", relPath, err)
+			http.Error(w, "Stat failed", http.StatusInternalServerError)
+		}
 		return
 	}
 	fji := &FileJSONInfo{
@@ -880,6 +933,12 @@ type zipMultiRequest struct {
 // unreadable entries are silently skipped — the goal is "best effort
 // download", not a strict transactional archive.
 func (s *HTTPStaticServer) hZipMulti(w http.ResponseWriter, r *http.Request) {
+	// Limit the request size BEFORE decoding so a malicious client can't
+	// exhaust memory by streaming a multi-GB JSON body. The previous
+	// order (decode → MaxBytesReader) meant the limit never applied to
+	// the decode read. 64 KiB easily holds a few thousand URL paths.
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+
 	var req zipMultiRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
@@ -889,10 +948,6 @@ func (s *HTTPStaticServer) hZipMulti(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "No paths provided", http.StatusBadRequest)
 		return
 	}
-
-	// Limit the request size to keep a single multi-download from pinning
-	// the server: 64 KiB easily holds a few thousand URL paths.
-	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", `attachment; filename="download.zip"`)
@@ -953,13 +1008,26 @@ func (s *HTTPStaticServer) hZipMulti(w http.ResponseWriter, r *http.Request) {
 func (s *HTTPStaticServer) hUnzip(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	zipPath, path := vars["zip_path"], vars["path"]
+
+	// Resolve the archive path under s.Root and verify it stays there.
+	// zipPath comes from the URL, so without this check a request like
+	// /-/unzip/../../etc/passwd/-/foo could read arbitrary zips on disk.
+	absZip := filepath.Join(s.Root, filepath.FromSlash(zipPath))
+	if !isUnderRoot(absZip, s.Root) {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
 	ctype := mime.TypeByExtension(filepath.Ext(path))
 	if ctype != "" {
 		w.Header().Set("Content-Type", ctype)
 	}
-	err := ExtractFromZip(filepath.Join(s.Root, zipPath), path, w)
+	err := ExtractFromZip(absZip, path, w)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		// Log the detailed error (may contain the absolute archive path);
+		// return a generic message so the response body doesn't leak it.
+		log.Printf("unzip %q: %v", absZip, err)
+		http.Error(w, "Extract failed", http.StatusInternalServerError)
 		return
 	}
 }
@@ -982,7 +1050,10 @@ func (s *HTTPStaticServer) hPlist(w http.ResponseWriter, r *http.Request) {
 	relPath := s.getRealPath(r)
 	plinfo, err := parseIPA(relPath)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		// parseIPA opens the zip on disk; its error may contain the
+		// absolute server path (e.g. "open /srv/foo.ipa: ...").
+		log.Printf("plist parse %q: %v", relPath, err)
+		http.Error(w, "Failed to parse IPA", http.StatusInternalServerError)
 		return
 	}
 
@@ -996,7 +1067,8 @@ func (s *HTTPStaticServer) hPlist(w http.ResponseWriter, r *http.Request) {
 	}
 	data, err := generateDownloadPlist(baseURL, path, plinfo)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("plist gen: %v", err)
+		http.Error(w, "Failed to generate plist", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "text/xml")
@@ -1013,7 +1085,8 @@ func (s *HTTPStaticServer) hIpaLink(w http.ResponseWriter, r *http.Request) {
 		httpPlistLink := "http://" + r.Host + "/-/ipa/plist/" + path
 		url, err := s.genPlistLink(httpPlistLink)
 		if err != nil {
-			http.Error(w, err.Error(), 500)
+			log.Printf("plist proxy %q: %v", httpPlistLink, err)
+			http.Error(w, "Failed to generate plist link", http.StatusInternalServerError)
 			return
 		}
 		plistUrl = url
@@ -1030,20 +1103,31 @@ func (s *HTTPStaticServer) hIpaLink(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// plistProxyClient is the HTTP client used by genPlistLink. It reuses the
+// safe dialer so a forged Host header can't turn genPlistLink into an
+// SSRF vector (the plist link is built from r.Host, which the client can
+// set). The default http.Client has no timeout either, so 30s bounds it.
+var plistProxyClient = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: &http.Transport{
+		DialContext: safeDialContext,
+	},
+}
+
 func (s *HTTPStaticServer) genPlistLink(httpPlistLink string) (plistUrl string, err error) {
 	// Maybe need a proxy, a little slowly now.
 	pp := s.PlistProxy
 	if pp == "" {
 		pp = defaultPlistProxy
 	}
-	resp, err := http.Get(httpPlistLink)
+	resp, err := plistProxyClient.Get(httpPlistLink)
 	if err != nil {
 		return
 	}
 	defer resp.Body.Close()
 
 	data, _ := io.ReadAll(resp.Body)
-	retData, err := http.Post(pp, "text/xml", bytes.NewBuffer(data))
+	retData, err := plistProxyClient.Post(pp, "text/xml", bytes.NewBuffer(data))
 	if err != nil {
 		return
 	}
@@ -1056,10 +1140,6 @@ func (s *HTTPStaticServer) genPlistLink(httpPlistLink string) (plistUrl string, 
 	}
 	plistUrl = pp + "/" + ret["key"]
 	return
-}
-
-func (s *HTTPStaticServer) hFileOrDirectory(w http.ResponseWriter, r *http.Request) {
-	http.ServeFile(w, r, s.getRealPath(r))
 }
 
 type HTTPFileInfo struct {
@@ -1092,15 +1172,41 @@ type AccessConf struct {
 	AccessTables []AccessTable `yaml:"accessTables"`
 }
 
-var reCache = make(map[string]*regexp.Regexp)
+// reCache caches compiled access-table regexps. Access from HTTP handler
+// goroutines is concurrent, so the map is guarded by a RWMutex — the
+// previous unsynchronised map produced a data race under `go test -race`
+// and could corrupt the map on concurrent first-access of the same rule.
+var (
+	reCache    = make(map[string]*regexp.Regexp)
+	reCacheMu  sync.RWMutex
+)
+
+func compileCached(pattern string) *regexp.Regexp {
+	reCacheMu.RLock()
+	if re, ok := reCache[pattern]; ok {
+		reCacheMu.RUnlock()
+		return re
+	}
+	reCacheMu.RUnlock()
+	// Compile outside the write lock so a slow/invalid regexp doesn't
+	// block other readers. regexp.Compile never panics on invalid input.
+	re, _ := regexp.Compile(pattern)
+	reCacheMu.Lock()
+	// Another goroutine may have inserted the same key concurrently;
+	// keep the first one to preserve pointer identity with any caller
+	// that already grabbed it.
+	if existing, ok := reCache[pattern]; ok {
+		re = existing
+	} else {
+		reCache[pattern] = re
+	}
+	reCacheMu.Unlock()
+	return re
+}
 
 func (c *AccessConf) canAccess(fileName string) bool {
 	for _, table := range c.AccessTables {
-		pattern, ok := reCache[table.Regex]
-		if !ok {
-			pattern, _ = regexp.Compile(table.Regex)
-			reCache[table.Regex] = pattern
-		}
+		pattern := compileCached(table.Regex)
 		// skip wrong format regex
 		if pattern == nil {
 			continue
@@ -1112,16 +1218,34 @@ func (c *AccessConf) canAccess(fileName string) bool {
 	return true
 }
 
-func (c *AccessConf) canDelete(r *http.Request) bool {
+// userFromSession extracts the logged-in user from the session cookie.
+// Returns nil when there is no session, the value is absent, or —
+// crucially — when the stored value is not an *UserInfo. The previous
+// code used a panic-style type assertion (val.(*UserInfo)); a crafted
+// or legacy cookie whose "user" value deserialised to a different type
+// would crash the request goroutine. The comma-ok form degrades
+// gracefully to "not logged in" instead.
+func userFromSession(r *http.Request) *UserInfo {
 	session, err := store.Get(r, defaultSessionName)
 	if err != nil {
-		return c.Delete
+		return nil
 	}
 	val := session.Values["user"]
 	if val == nil {
+		return nil
+	}
+	userInfo, ok := val.(*UserInfo)
+	if !ok {
+		return nil
+	}
+	return userInfo
+}
+
+func (c *AccessConf) canDelete(r *http.Request) bool {
+	userInfo := userFromSession(r)
+	if userInfo == nil {
 		return c.Delete
 	}
-	userInfo := val.(*UserInfo)
 	for _, rule := range c.Users {
 		if rule.Email == userInfo.Email {
 			return rule.Delete
@@ -1132,7 +1256,10 @@ func (c *AccessConf) canDelete(r *http.Request) bool {
 
 func (c *AccessConf) canUploadByToken(token string) bool {
 	for _, rule := range c.Users {
-		if rule.Token == token {
+		// Constant-time comparison to prevent timing attacks that could
+		// leak the token byte-by-byte. Mirrors the basic-auth check in
+		// multiBasicAuth (main.go).
+		if subtle.ConstantTimeCompare([]byte(rule.Token), []byte(token)) == 1 {
 			return rule.Upload
 		}
 	}
@@ -1146,7 +1273,7 @@ func (c *AccessConf) canUploadByToken(token string) bool {
 // login.
 func (c *AccessConf) canEditByToken(token string) bool {
 	for _, rule := range c.Users {
-		if rule.Token == token {
+		if subtle.ConstantTimeCompare([]byte(rule.Token), []byte(token)) == 1 {
 			return rule.Edit
 		}
 	}
@@ -1154,15 +1281,10 @@ func (c *AccessConf) canEditByToken(token string) bool {
 }
 
 func (c *AccessConf) canEditSession(r *http.Request) bool {
-	session, err := store.Get(r, defaultSessionName)
-	if err != nil {
+	userInfo := userFromSession(r)
+	if userInfo == nil {
 		return c.Edit
 	}
-	val := session.Values["user"]
-	if val == nil {
-		return c.Edit
-	}
-	userInfo := val.(*UserInfo)
 	for _, rule := range c.Users {
 		if rule.Email == userInfo.Email {
 			return rule.Edit
@@ -1172,15 +1294,10 @@ func (c *AccessConf) canEditSession(r *http.Request) bool {
 }
 
 func (c *AccessConf) canUploadSession(r *http.Request) bool {
-	session, err := store.Get(r, defaultSessionName)
-	if err != nil {
+	userInfo := userFromSession(r)
+	if userInfo == nil {
 		return c.Upload
 	}
-	val := session.Values["user"]
-	if val == nil {
-		return c.Upload
-	}
-	userInfo := val.(*UserInfo)
 	for _, rule := range c.Users {
 		if rule.Email == userInfo.Email {
 			return rule.Upload
@@ -1194,16 +1311,10 @@ func (c *AccessConf) canEdit(r *http.Request) bool {
 	if token != "" {
 		return c.canEditByToken(token)
 	}
-	session, err := store.Get(r, defaultSessionName)
-	if err != nil {
+	userInfo := userFromSession(r)
+	if userInfo == nil {
 		return c.Edit
 	}
-	val := session.Values["user"]
-	if val == nil {
-		return c.Edit
-	}
-	userInfo := val.(*UserInfo)
-
 	for _, rule := range c.Users {
 		if rule.Email == userInfo.Email {
 			return rule.Edit
@@ -1217,16 +1328,10 @@ func (c *AccessConf) canUpload(r *http.Request) bool {
 	if token != "" {
 		return c.canUploadByToken(token)
 	}
-	session, err := store.Get(r, defaultSessionName)
-	if err != nil {
+	userInfo := userFromSession(r)
+	if userInfo == nil {
 		return c.Upload
 	}
-	val := session.Values["user"]
-	if val == nil {
-		return c.Upload
-	}
-	userInfo := val.(*UserInfo)
-
 	for _, rule := range c.Users {
 		if rule.Email == userInfo.Email {
 			return rule.Upload
@@ -1253,15 +1358,28 @@ func (s *HTTPStaticServer) hJSONList(w http.ResponseWriter, r *http.Request) {
 		if len(results) > 50 { // max 50
 			results = results[:50]
 		}
+		// filepath.HasPrefix is deprecated since Go 1.0 and has subtle
+		// bugs on Windows (it matches on path separators). Use a plain
+		// string prefix check after normalising both sides to slashes.
+		prefix := filepath.ToSlash(requestPath)
+		if !strings.HasSuffix(prefix, "/") {
+			prefix += "/"
+		}
+		// requestPath == "/" should match everything (root search).
+		matchRoot := prefix == "/" || requestPath == ""
 		for _, item := range results {
-			if filepath.HasPrefix(item.Path, requestPath) {
+			p := filepath.ToSlash(item.Path)
+			if matchRoot || strings.HasPrefix(p, prefix) || p == filepath.ToSlash(requestPath) {
 				fileInfoMap[item.Path] = item.Info
 			}
 		}
 	} else {
 		entries, err := os.ReadDir(realPath)
 		if err != nil {
-			http.Error(w, err.Error(), 500)
+			// err contains the absolute server path; log it internally
+			// and return a generic message to the client.
+			log.Printf("readdir %q: %v", realPath, err)
+			http.Error(w, "Failed to list directory", http.StatusInternalServerError)
 			return
 		}
 		for _, entry := range entries {
@@ -1345,7 +1463,9 @@ func (s *HTTPStaticServer) makeIndex() error {
 		indexes = append(indexes, IndexFileItem{path, info})
 		return nil
 	})
-	s.indexes = indexes
+	// Publish the new snapshot atomically so concurrent findIndex
+	// readers never see a half-written slice header.
+	s.indexes.Store(&indexes)
 	// Drop the directory-size cache so the next read recomputes against
 	// the freshly-walked index. Without this every displayed directory
 	// size stays pinned to whatever the very first walk observed —
@@ -1404,7 +1524,14 @@ func invalidateDirSizeCache() {
 
 func (s *HTTPStaticServer) findIndex(text string) []IndexFileItem {
 	ret := make([]IndexFileItem, 0)
-	for _, item := range s.indexes {
+	// Load the index snapshot atomically. makeIndex may be swapping the
+	// pointer concurrently; Store/Load guarantee we see either the old
+	// or the new slice in full, never a torn read.
+	ptr := s.indexes.Load()
+	if ptr == nil {
+		return ret
+	}
+	for _, item := range *ptr {
 		ok := true
 		// search algorithm, space for AND
 		for keyword := range strings.FieldsSeq(text) {
@@ -1557,15 +1684,23 @@ var funcMap = template.FuncMap{
 	"title": strings.Title,
 }
 
-var _tmpls = make(map[string]*template.Template)
+// _tmpls caches compiled HTML templates keyed by name. renderHTML is
+// called from HTTP handler goroutines, so the cache must be safe for
+// concurrent access — the previous bare map was a data race under
+// `go test -race` (concurrent read+write of the same map). sync.Map
+// gives lock-free reads after the first LoadOrStore, which matches the
+// "compile once, execute many" access pattern here.
+var _tmpls sync.Map
 
 func renderHTML(w http.ResponseWriter, name, content string, v any) {
-	if t, ok := _tmpls[name]; ok {
-		t.Execute(w, v)
-		return
+	var t *template.Template
+	if v, ok := _tmpls.Load(name); ok {
+		t = v.(*template.Template)
+	} else {
+		t = template.Must(template.New(name).Funcs(funcMap).Delims("[[", "]]").Parse(content))
+		actual, _ := _tmpls.LoadOrStore(name, t)
+		t = actual.(*template.Template)
 	}
-	t := template.Must(template.New(name).Funcs(funcMap).Delims("[[", "]]").Parse(content))
-	_tmpls[name] = t
 	t.Execute(w, v)
 }
 
@@ -1574,6 +1709,19 @@ func checkFilename(name string) error {
 		return errors.New("Name should not contains \\/:*<>|")
 	}
 	return nil
+}
+
+// isUnderRoot reports whether path is root itself or a descendant of root
+// after both are cleaned. Used as a defence-in-depth check before
+// destructive filesystem operations (e.g. os.RemoveAll in hDelete).
+func isUnderRoot(path, root string) bool {
+	cleanRoot := filepath.Clean(root)
+	cleanPath := filepath.Clean(path)
+	if cleanPath == cleanRoot {
+		return true
+	}
+	return strings.HasPrefix(cleanPath+string(filepath.Separator),
+		cleanRoot+string(filepath.Separator))
 }
 
 // checkPathSegment is the per-segment variant of checkFilename used when

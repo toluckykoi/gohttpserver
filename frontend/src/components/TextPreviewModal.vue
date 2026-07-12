@@ -193,6 +193,7 @@ import { copyText } from '@/utils/clipboard'
 import { useFileApi } from '@/composables/useFileApi'
 import { formatBytes } from '@/utils/formatBytes'
 import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 import { ElMessage } from 'element-plus'
 import {
   Reading,
@@ -279,7 +280,17 @@ const highlightedLines = computed(() => {
 
 const renderedMarkdown = computed(() => {
   if (meta.value.language !== 'markdown' || !content.value) return ''
-  return marked.parse(content.value) as string
+  // marked does not strip HTML by default (v4 removed the built-in
+  // sanitize). Without DOMPurify, a malicious .md like
+  //   <img src=x onerror="stealToken()">
+  // would execute in the file-server origin when previewed. Sanitise
+  // the rendered HTML before injecting via v-html.
+  return DOMPurify.sanitize(marked.parse(content.value) as string, {
+    // Allow common markdown-rendered elements; strip scripts, event
+    // handlers, and anything that could fetch credentials.
+    FORBID_TAGS: ['style', 'script', 'iframe', 'object', 'embed', 'form'],
+    FORBID_ATTR: ['onerror', 'onload', 'onclick', 'onmouseover', 'onfocus', 'onblur']
+  })
 })
 
 async function loadContent() {

@@ -1,0 +1,7 @@
+---
+upload: false
+users:
+- email: "user@example.com"
+  upload: true
+  delete: true
+  token: 123456

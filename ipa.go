@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
 	"path/filepath"
@@ -12,6 +13,14 @@ import (
 	goplist "github.com/fork2fix/go-plist"
 	//goplist "github.com/DHowett/go-plist"
 )
+
+// maxPlistSize caps how large an Info.plist entry we are willing to read
+// from an IPA. Real-world Info.plist files are a few KiB to a few dozen
+// KiB; anything bigger is either malicious or broken. The previous code
+// did make([]byte, plfile.FileInfo().Size()), so a crafted IPA declaring
+// a 10 GiB uncompressed size would trigger a 10 GiB allocation before
+// any read happened.
+const maxPlistSize = 16 * 1024 * 1024 // 16 MiB
 
 func parseIpaIcon(path string) (data []byte, err error) {
 	iconPattern := regexp.MustCompile(`(?i)^Payload/[^/]*/icon\.png$`)
@@ -64,7 +73,15 @@ func parseIPA(path string) (plinfo *plistBundle, err error) {
 		return
 	}
 	defer plreader.Close()
-	buf := make([]byte, plfile.FileInfo().Size())
+	// Guard against a crafted IPA declaring a huge uncompressed size:
+	// make([]byte, size) would allocate that much up front. Cap the
+	// allocation at maxPlistSize and reject anything bigger.
+	declared := plfile.FileInfo().Size()
+	if declared > maxPlistSize {
+		err = fmt.Errorf("plist entry too large: %d bytes (max %d)", declared, maxPlistSize)
+		return
+	}
+	buf := make([]byte, declared)
 	_, err = io.ReadFull(plreader, buf)
 	if err != nil {
 		return

@@ -2,6 +2,38 @@
 
 本文件记录 gohttpserver 各版本的发布说明。GitHub Actions 在打 tag 发版时会自动读取对应版本段落作为 Release 说明。
 
+## [v1.0.1] - 2026-07-12
+
+# gohttpserver v1.0.1 🔒
+
+代码审计修复版本：修复 IPA 图标失效、模板缓存数据竞争，并消除多处服务器绝对路径泄露。
+
+## 🔒 安全修复
+
+### P0 严重
+- **修复 IPA 图标 URL 404**：注册 `/-/unzip/{zip_path}/-/{path}` 路由，此前 `hUnzip` 处理函数从未注册路由，导致 iOS 安装清单中的图标 URL 全部失效
+- **修复模板缓存数据竞争**：`_tmpls` 由裸 map 改为 `sync.Map`，消除 `-race` 下的并发读写竞争
+
+### P1 高危
+- **错误信息脱敏**：`hJSONList`/`hUploadOrMkdir`/`hEdit`/`hFetch`/`hPlist`/`hIpaLink` 等 handler 不再向客户端返回包含服务器绝对路径的错误消息
+- **响应字段脱敏**：上传/编辑/下载 JSON 响应的 `destination` 字段改为相对路径，避免泄露服务器目录结构
+- **Slowloris 防护**：`http.Server` 添加 `ReadHeaderTimeout` 和 `IdleTimeout`
+
+## 🛠 代码质量
+
+### P2
+- **修复 zip 解压文件句柄累积**：`unzipFile` 循环内的 `defer rc.Close()` 抽取为 `extractZipEntry` 函数，每次迭代即时释放句柄
+- **修复 IPv6 地址解析**：`getRealIP` 改用 `net.SplitHostPort`，此前 IPv6 地址 `[::1]:8080` 被错误解析为 `[`
+
+### P3
+- 清理死代码 `hFileOrDirectory`
+- 清理 `hUploadOrMkdir` 中大文件 rename 方案的注释代码块
+
+## ✅ 测试
+
+- 新增 `getRealIP` IPv6 测试用例
+- 全部测试通过 `go test -race`
+
 ## [v1.0.0] - 2026-07-11
 
 # gohttpserver v1.0.0 🎉
