@@ -32,6 +32,7 @@ assets_vfsdata.go
 *.un~
 *.swp
 
+docs/
 dist/
 .DS_Store
 testdata/test

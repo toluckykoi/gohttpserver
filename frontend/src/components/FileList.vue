@@ -167,7 +167,7 @@
         <template #default="{ row }">
           <div
             class="file-name-cell-wrap"
-            :title="clickActionLabel(getClickAction(row.name, row.type === 'dir'))"
+            :title="rowClickLabel(row)"
           >
             <FileItem :file="row" />
           </div>
@@ -363,10 +363,8 @@
           'mobile-file-card--dir': row.type === 'dir',
           'mobile-file-card--selected': fileStore.selectedFiles.has(row.path)
         }"
-        :title="fileStore.selectionMode
-          ? (fileStore.selectedFiles.has(row.path) ? 'Tap to deselect' : 'Tap to select')
-          : clickActionLabel(getClickAction(row.name, row.type === 'dir'))"
-        @click="handleRowClick(row, $event)"
+        :title="rowClickLabel(row)"
+        @click="handleRowClick(row)"
       >
         <!-- Checkbox: always shown in selection mode, and on selected
              cards even after exiting mode (so the user can see what's
@@ -490,7 +488,7 @@ import type { FileItem as FileItemType } from '@/types'
 import { formatBytes } from '@/utils/formatBytes'
 import { getEncodePath, parentDirectory } from '@/utils/path'
 import { shouldHaveQrcode, isVideoFile, isImageFile, getFileIcon } from '@/utils/fileIcon'
-import { isPreviewable, getClickAction, clickActionLabel } from '@/utils/previewable'
+import { isPreviewable } from '@/utils/previewable'
 import { copyText } from '@/utils/clipboard'
 import FileItem from './FileItem.vue'
 
@@ -550,7 +548,7 @@ const currentInfoFile = ref<FileItemType | null>(null)
 const currentVideoFile = ref<FileItemType | null>(null)
 const currentPreviewFile = ref<FileItemType | null>(null)
 const currentImageFile = ref<FileItemType | null>(null)
-const mtimeTypeFromNow = ref(true)
+const mtimeTypeFromNow = ref(false)
 const refreshing = ref(false)
 // el-table instance ref. Used to drive the table's built-in selection from
 // the selection bar's "Select All" / "Clear" buttons. Each toggleRowSelection
@@ -671,53 +669,37 @@ function canPreview(file: FileItemType): boolean {
   return file.type !== 'dir' && isPreviewable(file.name)
 }
 
-function handleRowClick(row: FileItemType, event?: MouseEvent) {
-  // Mobile: when in selection mode, tapping a card toggles selection
-  // instead of navigating/previewing. Desktop uses the table's built-in
-  // checkbox column and never reaches this branch from a checkbox click.
+function selectOnly(row: FileItemType) {
+  const table = elTableRef.value
+  if (table) {
+    table.clearSelection()
+    table.toggleRowSelection(row, true)
+  } else {
+    fileStore.setSelection([row.path])
+  }
+}
+
+function handleRowClick(row: FileItemType) {
+  if (row.type === 'dir') {
+    const newPath = getEncodePath(row.name, currentPath.value)
+    fileStore.loadFiles(newPath)
+    return
+  }
+
   if (fileStore.selectionMode) {
     fileStore.toggleSelect(row.path)
     return
   }
 
-  // Ctrl / Cmd + click always forces a download — works for every file type,
-  // including directories (which download as ZIP).
-  if (event && (event.ctrlKey || event.metaKey)) {
-    if (row.type === 'dir') {
-      handleDownloadArchive(row)
-    } else {
-      handleDownload(row)
-    }
-    return
-  }
+  selectOnly(row)
+}
 
-  const action = getClickAction(row.name, row.type === 'dir')
-
-  switch (action.kind) {
-    case 'navigate': {
-      const newPath = getEncodePath(row.name, currentPath.value)
-      fileStore.loadFiles(newPath)
-      return
-    }
-    case 'preview-text': {
-      currentPreviewFile.value = row
-      showTextPreviewModal.value = true
-      return
-    }
-    case 'preview-image': {
-      currentImageFile.value = row
-      showImagePreviewModal.value = true
-      return
-    }
-    case 'play-video': {
-      handleVideoPlay(row)
-      return
-    }
-    case 'download': {
-      handleDownload(row)
-      return
-    }
+function rowClickLabel(row: FileItemType): string {
+  if (row.type === 'dir') return 'Open folder'
+  if (fileStore.selectionMode) {
+    return fileStore.selectedFiles.has(row.path) ? 'Tap to deselect' : 'Tap to select'
   }
+  return fileStore.selectedFiles.has(row.path) ? 'Selected file' : 'Select file'
 }
 
 function handleNavigateImage(target: FileItemType) {
@@ -725,12 +707,15 @@ function handleNavigateImage(target: FileItemType) {
 }
 
 /**
- * Element Plus row-class-name hook. Used to apply a CSS class per row
- * so we can give the cursor/title a per-file hint about what click does.
+ * Element Plus row-class-name hook. Keeps navigation/selection cursor hints
+ * and applies the same selected state used by the checkbox column.
  */
 function rowClassName({ row }: { row: FileItemType }): string {
-  const action = getClickAction(row.name, row.type === 'dir')
-  return `row-action-${action.kind}`
+  const classes = [row.type === 'dir' ? 'row-action-navigate' : 'row-action-select']
+  if (fileStore.selectedFiles.has(row.path)) {
+    classes.push('file-row-selected')
+  }
+  return classes.join(' ')
 }
 
 function handleDownload(file: FileItemType) {
@@ -1220,10 +1205,57 @@ function handleToggleSelectionMode() {
 }
 
 .file-list-container :deep(.el-table__body td) {
-  padding: 10px 0;
+  /* 8px top + 8px bottom = 16px vertical padding, leaving ~25px of
+     content area inside the 41px row for 13px monospace data cells. */
+  padding: 8px 0;
   border-bottom: 1px solid color-mix(in srgb, var(--el-border-color-lighter) 60%, transparent);
   background: transparent;
   transition: background-color var(--transition-base);
+  /* Element Plus distributes the tbody height across rows when the
+     table has a fixed/max height, leaving each cell expanded. Force
+     a 41px cell so the row settles to the requested compact size. */
+  height: 41px !important;
+  max-height: 41px !important;
+}
+
+.file-list-container :deep(.el-table__body tr) {
+  cursor: pointer;
+  transition: background-color var(--transition-base);
+  height: 41px !important;
+  max-height: 41px !important;
+}
+
+/* Element Plus drives the row height from the `.cell` wrapper's
+   line-height (default 23px) plus the td's padding + border. Setting
+   the line-height to 24px gives the body a tight 41px row
+   (8 padding + 24 line + 8 padding + 1 border = 41) without
+   fighting the table layout engine. */
+.file-list-container :deep(.el-table .cell) {
+  line-height: 24px;
+  /* Some mono-font glyphs exceed the line-height, padding them out by
+     ~1px. Hard-cap each cell to 24px so the row stays tight. */
+  max-height: 24px;
+  overflow: hidden;
+}
+
+/* Override the fixed heights Element Plus applies to specific column
+   cells (the selection column uses 23px, action buttons naturally
+   push the actions column taller). Cap them to 24px so the row
+   settles at 41px regardless of which column has the tallest
+   content. */
+.file-list-container :deep(.el-table-column--selection > .cell),
+.file-list-container :deep(.col-actions .cell) {
+  height: 24px;
+  max-height: 24px;
+}
+
+/* Action buttons inside the row: Element Plus defaults to 32px, which
+   alone exceeds our 41px row budget. Shrink to 24px and tighten
+   padding so the buttons still feel clickable but fit comfortably. */
+.file-list-container :deep(.col-actions .el-button) {
+  height: 24px;
+  min-height: 24px;
+  padding: 0 6px;
 }
 
 .file-list-container :deep(.el-table__body td .cell) {
@@ -1300,7 +1332,7 @@ function handleToggleSelectionMode() {
   flex-wrap: nowrap;
 }
 
-/* ── Smart click row hints ── */
+/* ── Row interaction and selected state ── */
 .file-name-cell-wrap {
   display: flex;
   align-items: center;
@@ -1308,17 +1340,17 @@ function handleToggleSelectionMode() {
   min-width: 0;
 }
 
-/* Per-action cursor cue. Tables are already cursor: pointer, but for
-   previewable files the cursor goes zoom-in to telegraph "this opens
-   a preview, not a download". */
-.file-list-container :deep(tr.row-action-preview-text) {
-  cursor: zoom-in;
-}
-.file-list-container :deep(tr.row-action-preview-image) {
-  cursor: zoom-in;
-}
-.file-list-container :deep(tr.row-action-play-video) {
+.file-list-container :deep(tr.row-action-navigate),
+.file-list-container :deep(tr.row-action-select) {
   cursor: pointer;
+}
+
+.file-list-container :deep(.el-table__body tr.file-row-selected > td.el-table__cell) {
+  background: var(--el-table-selected-row-bg-color);
+}
+
+.file-list-container :deep(.el-table__body tr.file-row-selected:hover > td.el-table__cell) {
+  background: color-mix(in srgb, var(--el-color-primary) 16%, transparent);
 }
 
 .action-buttons :deep(.el-button) {

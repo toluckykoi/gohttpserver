@@ -707,13 +707,13 @@ watch(editContent, () => {
 :deep(.tk-punct) { color: var(--el-text-color-secondary); }
 
 /* Dark theme overrides — same tokens, different palette. */
-:global(.theme-black) :deep(.tk-string),
-:global(.theme-green) :deep(.tk-string) { color: #4ade80; }
-:global(.theme-black) :deep(.tk-number),
-:global(.theme-green) :deep(.tk-number) { color: #fbbf24; }
-:global(.theme-black) :deep(.tk-keyword),
-:global(.theme-green) :deep(.tk-keyword) { color: #c084fc; }
-:global(.theme-black) :deep(.tk-tag) { color: #60a5fa; }
+:global([data-theme="black"]) :deep(.tk-string),
+:global([data-theme="green"]) :deep(.tk-string) { color: #4ade80; }
+:global([data-theme="black"]) :deep(.tk-number),
+:global([data-theme="green"]) :deep(.tk-number) { color: #fbbf24; }
+:global([data-theme="black"]) :deep(.tk-keyword),
+:global([data-theme="green"]) :deep(.tk-keyword) { color: #c084fc; }
+:global([data-theme="black"]) :deep(.tk-tag) { color: #60a5fa; }
 
 /* ── Dialog body padding ── */
 :deep(.preview-dialog .el-dialog__body) {

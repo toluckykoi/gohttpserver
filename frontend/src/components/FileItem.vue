@@ -1,6 +1,6 @@
 <template>
   <div class="file-name-cell">
-    <el-icon :size="20" class="file-icon">
+    <el-icon :size="18" class="file-icon">
       <component :is="iconComponent" />
     </el-icon>
     <span class="name">{{ file.name }}</span>
@@ -26,6 +26,9 @@ const iconComponent = computed(() => getFileIcon(props.file.name, props.file.typ
   display: flex;
   align-items: center;
   gap: 10px;
+  /* Match the cell's 24px line-height so the row stays at 41px
+     regardless of the icon's intrinsic height. */
+  height: 24px;
 }
 
 .file-icon {
@@ -36,6 +39,7 @@ const iconComponent = computed(() => getFileIcon(props.file.name, props.file.typ
 .name {
   font-weight: 500;
   font-size: 14px;
+  line-height: 24px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

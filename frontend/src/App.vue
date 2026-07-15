@@ -240,19 +240,22 @@ function handleShortcut(e: KeyboardEvent) {
   }
 }
 
+function handlePopState() {
+  fileStore.loadFiles(window.location.pathname)
+}
+
 onMounted(async () => {
   await fileStore.loadFiles(window.location.pathname)
   await fileStore.loadUser()
   await fileStore.loadSystemInfo()
 
-  window.addEventListener('popstate', () => {
-    fileStore.loadFiles(window.location.pathname)
-  })
+  window.addEventListener('popstate', handlePopState)
   window.addEventListener('resize', handleResize, { passive: true })
   window.addEventListener('keydown', handleShortcut)
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('popstate', handlePopState)
   window.removeEventListener('resize', handleResize)
   window.removeEventListener('keydown', handleShortcut)
 })
@@ -730,8 +733,8 @@ onBeforeUnmount(() => {
   fill: #c71d23;
 }
 
-.theme-black .footer-icon--github,
-.theme-green .footer-icon--github {
+:global([data-theme="black"]) .footer-icon--github,
+:global([data-theme="green"]) .footer-icon--github {
   fill: #e6edf3;
 }
 

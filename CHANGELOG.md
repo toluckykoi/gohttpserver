@@ -2,6 +2,29 @@
 
 本文件记录 gohttpserver 各版本的发布说明。GitHub Actions 在打 tag 发版时会自动读取对应版本段落作为 Release 说明。
 
+## [v1.0.2] - 2026-07-16
+
+# gohttpserver v1.0.2 🐛
+
+前端代码审计修复版本：修复暗色主题样式失效、事件监听器泄漏、视频播放器逻辑缺陷，并优化文件列表行高。
+
+## 🐛 Bug 修复
+
+### P0 严重
+- **修复暗色主题样式失效**：`App.vue` 与 `TextPreviewModal.vue` 中误用 `.theme-black`/`.theme-green` 类选择器，而主题实际通过 `data-theme` 属性应用，导致暗色主题下 GitHub 图标不可见、代码语法高亮颜色不切换。改为 `:global([data-theme="black"])`/`:global([data-theme="green"])` 属性选择器
+- **修复 popstate 事件监听器泄漏**：`App.vue` 中 popstate 监听器使用匿名箭头函数注册，`onBeforeUnmount` 未移除，HMR 下监听器累积导致每次导航触发多次 `loadFiles`。提取为具名函数 `handlePopState` 并在卸载时正确移除
+- **修复视频播放器 watch 逻辑缺陷**：`VideoPlayer.vue` 中 `videoRef.value` 判空检查在 `await nextTick()` 之前执行，由于 dialog 设置了 `destroy-on-close`，watch 回调在组件重渲染前同步执行时 `videoRef.value` 为 null，导致 `video.load()`/`video.focus()` 永不执行。将判空检查移到 `nextTick` 之后
+
+## 🎨 UI 优化
+
+- **文件列表行高调整**：桌面端表格行高从 35.33px 增加到 41px（内容区 line-height 18.33px → 24px），改善 Actions 操作按钮的显示，避免控件被挤压
+- **操作按钮高度同步**：Actions 列按钮高度从 22px 调整为 24px，适配新的行高
+
+## ✅ 测试
+
+- `vue-tsc` 类型检查通过
+- `vite build` 构建成功（1793 个模块）
+
 ## [v1.0.1] - 2026-07-12
 
 # gohttpserver v1.0.1 🔒

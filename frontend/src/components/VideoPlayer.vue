@@ -64,10 +64,12 @@ function handleClosed() {
 watch(
   () => props.visible,
   async (newVal) => {
-    if (newVal && videoRef.value) {
+    if (newVal) {
       await nextTick()
-      videoRef.value.load()
-      videoRef.value.focus()
+      if (videoRef.value) {
+        videoRef.value.load()
+        videoRef.value.focus()
+      }
     }
   }
 )
