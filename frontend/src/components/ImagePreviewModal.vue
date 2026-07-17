@@ -108,7 +108,7 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import type { FileItem } from '@/types'
 import { getEncodePath } from '@/utils/path'
-import { isImageFile } from '@/utils/fileIcon'
+import { isPreviewableImage } from '@/utils/fileIcon'
 import { useFileApi } from '@/composables/useFileApi'
 import { formatBytes } from '@/utils/formatBytes'
 import {
@@ -166,7 +166,7 @@ const src = computed(() => {
 })
 
 const siblings = computed(() =>
-  (props.siblings ?? []).filter((f) => f.type !== 'dir' && isImageFile(f.name))
+  (props.siblings ?? []).filter((f) => f.type !== 'dir' && isPreviewableImage(f.name))
 )
 
 const hasSiblings = computed(() => siblings.value.length > 1)

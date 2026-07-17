@@ -130,7 +130,7 @@
               target="_blank"
               rel="noopener"
               class="footer-author"
-            >codeskyblue</a>
+            >luckykoi</a>
             <span class="footer-divider" aria-hidden="true">·</span>
             <a
               href="https://github.com/toluckykoi/gohttpserver"

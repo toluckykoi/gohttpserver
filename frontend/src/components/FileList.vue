@@ -273,6 +273,15 @@
                   @click="handleShowPreview(row)"
                 />
               </el-tooltip>
+              <el-tooltip v-if="isImage(row)" content="Preview image" placement="top">
+                <el-button
+                  type="primary"
+                  :icon="Picture"
+                  circle
+                  size="small"
+                  @click="handleShowImagePreview(row)"
+                />
+              </el-tooltip>
               <el-tooltip content="Info" placement="top">
                 <el-button
                   type="info"
@@ -337,6 +346,7 @@
                     <el-dropdown-item command="download">Download</el-dropdown-item>
                     <el-dropdown-item command="copy">Copy Link</el-dropdown-item>
                     <el-dropdown-item command="qrcode">QR Code</el-dropdown-item>
+                    <el-dropdown-item v-if="isImage(row)" command="image-preview">Preview image</el-dropdown-item>
                     <el-dropdown-item v-if="canPreview(row)" command="preview">Preview</el-dropdown-item>
                     <el-dropdown-item v-if="isVideo(row)" command="video">Play Video</el-dropdown-item>
                     <el-dropdown-item v-if="hasQrCode(row)" command="install">Install</el-dropdown-item>
@@ -487,7 +497,7 @@ import { useFileApi } from '@/composables/useFileApi'
 import type { FileItem as FileItemType } from '@/types'
 import { formatBytes } from '@/utils/formatBytes'
 import { getEncodePath, parentDirectory } from '@/utils/path'
-import { shouldHaveQrcode, isVideoFile, isImageFile, getFileIcon } from '@/utils/fileIcon'
+import { shouldHaveQrcode, isVideoFile, isPreviewableImage, getFileIcon } from '@/utils/fileIcon'
 import { isPreviewable } from '@/utils/previewable'
 import { copyText } from '@/utils/clipboard'
 import FileItem from './FileItem.vue'
@@ -519,6 +529,7 @@ import {
   Box,
   MoreFilled,
   Reading,
+  Picture,
   Refresh,
   Check,
   Close
@@ -567,7 +578,7 @@ const isAllSelected = computed(() => fileStore.isAllSelected)
 
 /** Image siblings for the prev/next carousel inside ImagePreviewModal. */
 const imageSiblings = computed(() =>
-  sortedFiles.value.filter((f) => f.type !== 'dir' && isImageFile(f.name))
+  sortedFiles.value.filter((f) => f.type !== 'dir' && isPreviewableImage(f.name))
 )
 
 function goBack() {
@@ -663,6 +674,12 @@ function hasQrCode(file: FileItemType): boolean {
 
 function isVideo(file: FileItemType): boolean {
   return isVideoFile(file.name)
+}
+
+function isImage(file: FileItemType): boolean {
+  // Gate the "Preview image" button on formats the browser can actually
+  // decode into a native <img> — see isPreviewableImage's docstring.
+  return isPreviewableImage(file.name)
 }
 
 function canPreview(file: FileItemType): boolean {
@@ -778,6 +795,11 @@ function handleVideoPlay(file: FileItemType) {
   showVideoPlayerModal.value = true
 }
 
+function handleShowImagePreview(file: FileItemType) {
+  currentImageFile.value = file
+  showImagePreviewModal.value = true
+}
+
 function handleInstall(file: FileItemType) {
   const url = fileApi.getIpaInstallUrl(currentPath.value, file.name)
   window.location.href = url
@@ -793,6 +815,7 @@ function handleMobileAction(cmd: string, file: FileItemType) {
     case 'video': handleVideoPlay(file); break
     case 'install': handleInstall(file); break
     case 'preview': handleShowPreview(file); break
+    case 'image-preview': handleShowImagePreview(file); break
     case 'delete': handleDeleteFile(file); break
   }
 }
@@ -1206,29 +1229,30 @@ function handleToggleSelectionMode() {
 
 .file-list-container :deep(.el-table__body td) {
   /* 8px top + 8px bottom = 16px vertical padding, leaving ~25px of
-     content area inside the 41px row for 13px monospace data cells. */
+     content area inside the 43px row for 13px monospace data cells. */
   padding: 8px 0;
   border-bottom: 1px solid color-mix(in srgb, var(--el-border-color-lighter) 60%, transparent);
   background: transparent;
   transition: background-color var(--transition-base);
   /* Element Plus distributes the tbody height across rows when the
      table has a fixed/max height, leaving each cell expanded. Force
-     a 41px cell so the row settles to the requested compact size. */
-  height: 41px !important;
-  max-height: 41px !important;
+     a 43px cell so the row settles to the requested compact size. */
+  height: 43px !important;
+  max-height: 43px !important;
 }
 
 .file-list-container :deep(.el-table__body tr) {
   cursor: pointer;
   transition: background-color var(--transition-base);
-  height: 41px !important;
-  max-height: 41px !important;
+  height: 43px !important;
+  max-height: 43px !important;
 }
 
 /* Element Plus drives the row height from the `.cell` wrapper's
    line-height (default 23px) plus the td's padding + border. Setting
-   the line-height to 24px gives the body a tight 41px row
-   (8 padding + 24 line + 8 padding + 1 border = 41) without
+   the line-height to 24px gives the body a tight 43px row
+   (8 padding + 24 line + 8 padding + 1 border = 41, with the extra
+   2px of breathing room absorbed by the row) without
    fighting the table layout engine. */
 .file-list-container :deep(.el-table .cell) {
   line-height: 24px;
@@ -1241,7 +1265,7 @@ function handleToggleSelectionMode() {
 /* Override the fixed heights Element Plus applies to specific column
    cells (the selection column uses 23px, action buttons naturally
    push the actions column taller). Cap them to 24px so the row
-   settles at 41px regardless of which column has the tallest
+   settles at 43px regardless of which column has the tallest
    content. */
 .file-list-container :deep(.el-table-column--selection > .cell),
 .file-list-container :deep(.col-actions .cell) {
@@ -1250,7 +1274,7 @@ function handleToggleSelectionMode() {
 }
 
 /* Action buttons inside the row: Element Plus defaults to 32px, which
-   alone exceeds our 41px row budget. Shrink to 24px and tighten
+   alone exceeds our 43px row budget. Shrink to 24px and tighten
    padding so the buttons still feel clickable but fit comfortably. */
 .file-list-container :deep(.col-actions .el-button) {
   height: 24px;

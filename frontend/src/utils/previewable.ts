@@ -9,7 +9,7 @@
  * Anything else is treated as plain text.
  */
 
-import { isImageFile, isVideoFile } from './fileIcon'
+import { isPreviewableImage, isVideoFile } from './fileIcon'
 
 export type PreviewLanguage =
   | 'markdown'
@@ -217,7 +217,7 @@ export function getClickAction(
 ): ClickAction {
   if (isDir) return { kind: 'navigate' }
   if (isVideoFile(filename)) return { kind: 'play-video' }
-  if (isImageFile(filename)) return { kind: 'preview-image' }
+  if (isPreviewableImage(filename)) return { kind: 'preview-image' }
   if (isPreviewable(filename)) return { kind: 'preview-text' }
   return { kind: 'download' }
 }

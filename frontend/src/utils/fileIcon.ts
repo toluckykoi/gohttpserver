@@ -120,6 +120,21 @@ export function isImageFile(filename: string): boolean {
   ].includes(ext)
 }
 
+/**
+ * Subset of `isImageFile` that browsers can actually decode into a native
+ * `<img>` element. Excludes TIFF and HEIC/HEIF, which most desktop
+ * browsers (Chrome/Firefox/Edge) can't render — using `isImageFile` as a
+ * preview gate would surface a "Failed to load image" error after the
+ * user clicks the preview button.
+ */
+export function isPreviewableImage(filename: string): boolean {
+  const ext = filename.split('.').pop()?.toLowerCase() || ''
+  return [
+    'jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg', 'webp',
+    'avif', 'ico'
+  ].includes(ext)
+}
+
 export function isAudioFile(filename: string): boolean {
   const ext = filename.split('.').pop()?.toLowerCase() || ''
   return [
