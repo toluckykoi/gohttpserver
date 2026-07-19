@@ -22,8 +22,10 @@ export interface UserControl {
 }
 
 export interface UserInfo {
-    email: string
+    email?: string
     name: string
+    /** Authentication provider. "login" = local username/password. */
+    provider?: string
 }
 
 export interface FileInfo {
@@ -50,5 +52,46 @@ export interface ApkInfo {
 }
 
 export interface SystemInfo {
+    version: string
+}
+
+/** WebDAV account as returned by /-/api/admin/webdav/status.
+ *  Password hash is never included — plaintext is only present in the
+ *  create / reset-password responses (WebdavAccountWithPassword). */
+export interface WebdavAccount {
+    id: string
+    remark: string
+    username: string
+    root_path: string
+    readonly: boolean
+    protect_system_files: boolean
+    /** Storage cap in bytes. 0 = unlimited. */
+    quota_bytes: number
+    /** Server-computed current usage in bytes. Refreshed on every
+     *  /status call; for live updates the operator can trigger a
+     *  recalculate via POST /-/api/admin/webdav/recalculate-usage. */
+    used_bytes: number
+    created_at: number
+    updated_at: number
+}
+
+/** Response shape from POST /-/api/admin/webdav/accounts and
+ *  POST /-/api/admin/webdav/accounts/:id/reset-password. Plaintext
+ *  password is shown to the operator exactly once. */
+export interface WebdavAccountWithPassword extends WebdavAccount {
+    password: string
+}
+
+/** WebDAV server status + account list, from GET /-/api/admin/webdav/status. */
+export interface WebdavStatus {
+    enabled: boolean
+    accounts: WebdavAccount[]
+    webdav_url: string
+}
+
+/** Current user profile, from GET /-/api/admin/profile. */
+export interface AdminProfile {
+    username: string
+    provider: string
     version: string
 }

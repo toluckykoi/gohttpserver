@@ -5,12 +5,14 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -55,6 +57,9 @@ type Configure struct {
 	NoIndex          bool `yaml:"no-index"`
 	CORSOrigins      []string `yaml:"cors-origins"`
 	AllowPublicOauth2 bool   `yaml:"allow-public-oauth2"`
+	Login            bool   `yaml:"login"`
+	AuthState        string `yaml:"auth-state"`
+	WebdavAccounts   string `yaml:"webdav-accounts"`
 }
 
 type httpLogger struct{}
@@ -133,6 +138,9 @@ func parseFlags() error {
 	kingpin.Flag("no-index", "disable indexing").BoolVar(&gcfg.NoIndex)
 	kingpin.Flag("cors-origins", "allowed CORS origins (repeatable; empty = no CORS, '*' = allow all [insecure])").StringsVar(&gcfg.CORSOrigins)
 	kingpin.Flag("allow-public-oauth2", "allow oauth2-proxy mode on a non-loopback bind (insecure: only use behind a proxy that strips X-Auth-Request-*)").BoolVar(&gcfg.AllowPublicOauth2)
+	kingpin.Flag("login", "enable username/password login gate (independent of --auth-type). When enabled, upload/delete/edit are automatically enabled too. Default credentials: admin/admin.").BoolVar(&gcfg.Login)
+	kingpin.Flag("auth-state", "path to auth-state.json (default: ./auth-state.json in the working directory)").StringVar(&gcfg.AuthState)
+	kingpin.Flag("webdav-accounts", "path to webdav-accounts.json (default: ./webdav-accounts.json in the working directory)").StringVar(&gcfg.WebdavAccounts)
 
 	kingpin.Parse() // first parse conf
 
@@ -236,6 +244,17 @@ func main() {
 	if err := parseFlags(); err != nil {
 		log.Fatal(err)
 	}
+	// --login implies upload/delete/edit: an authenticated operator
+	// should be able to manage files without separately passing those
+	// flags. This runs after flag parsing, so passing --no-upload
+	// alongside --login will NOT disable upload — use --auth-type http
+	// or another auth mechanism instead of --login if you need a
+	// read-only authenticated server.
+	if gcfg.Login {
+		gcfg.Upload = true
+		gcfg.Delete = true
+		gcfg.Edit = true
+	}
 	if gcfg.Debug {
 		// Print the config for debugging, but redact secrets — the
 		// marshal below used to dump HTTP basic-auth passwords and the
@@ -300,6 +319,86 @@ func main() {
 		})
 	}
 
+	// --login gate. When enabled, an independent username/password login
+	// flow shadows every other auth-type. Must be installed BEFORE the
+	// HTTP Basic / OpenID / oauth2-proxy switch so the gate covers those
+	// wrapped handlers too (a config like `--auth-type http --login`
+	// would otherwise only HTTP-basic-gate on top of an un-gated server).
+	var loginStateObj *loginState
+	if gcfg.Login {
+		authStatePath := gcfg.AuthState
+		if authStatePath == "" {
+			// Keep the credential file in the CURRENT WORKING DIRECTORY,
+			// not under gcfg.Root. gcfg.Root is what gohttpserver serves
+			// over HTTP — putting auth-state.json there would let any
+			// config mistake (a misordered middleware, a future route
+			// that bypasses the gate, a --prefix edge case) expose the
+			// password hash via a simple GET /auth-state.json. The
+			// working directory is the conventional spot for server-
+			// side state and is never served by the file handler.
+			authStatePath = "auth-state.json"
+		}
+		loginStateObj = loadLoginCredentials(authStatePath)
+		// Routes must be registered BEFORE the catch-all router.PathPrefix("/").Handler(hdlr)
+		// below so mux routes /-/login specifically. Middleware is added to
+		// hdlr so the gate wraps everything (file handler, APIs) except
+		// the white-listed paths.
+		registerLoginRoutes(router, loginStateObj, true)
+		hdlr = loginAuthMiddleware(loginStateObj, hdlr)
+
+		// WebDAV server + admin API. Both depend on loginStateObj:
+		//   - webdav account usernames are bound to the login user
+		//   - admin API handlers re-authenticate against loginStateObj
+		//     for sensitive operations (e.g. username change).
+		// The webdav-accounts.json file lives in the working directory
+		// for the same reason auth-state.json does — never under --root
+		// (which is HTTP-served).
+		webdavAccountsPath := gcfg.WebdavAccounts
+		if webdavAccountsPath == "" {
+			webdavAccountsPath = "webdav-accounts.json"
+		}
+		webdavState := loadWebdavAccounts(webdavAccountsPath)
+
+		// Load per-account byte usage (storage-usage.json). Lives next
+		// to webdav-accounts.json so it never escapes the working dir.
+		// Missing file is fine — start with empty map and recalculate
+		// below if any accounts exist.
+		usagePath := filepath.Join(filepath.Dir(webdavAccountsPath), "storage-usage.json")
+		usageStateObj := loadUsageState(usagePath)
+		// Startup recalculation: if storage-usage.json doesn't exist
+		// (fresh install or migration from a pre-quota build), seed it
+		// by walking each account's chroot. Otherwise trust the cache
+		// — the operator can force a refresh via the admin endpoint.
+		if _, statErr := os.Stat(usagePath); errors.Is(statErr, os.ErrNotExist) {
+			for _, acc := range webdavState.list() {
+				full := filepath.Join(gcfg.Root, acc.RootPath)
+				if err := usageStateObj.recalculate(full, acc.ID); err != nil {
+					log.Printf("webdav-quota: startup recalculate for %s failed: %v", acc.ID, err)
+				}
+			}
+		}
+
+		webdavSrv := newWebdavServer(gcfg.Root, webdavState, usageStateObj)
+		// /dav/ is mounted on a subrouter so PROPFIND/PUT/DELETE/etc.
+		// all funnel through the same handler. PathPrefix matches the
+		// leading "/dav/" and the trailing wildcard is implicit.
+		router.PathPrefix("/dav/").Handler(webdavSrv)
+		// Some clients (notably GNOME/gvfs on Linux) probe the collection
+		// without a trailing slash ("/dav") during discovery. Route that
+		// exact path to the same handler so it doesn't fall through to the
+		// login gate and get rejected with Unauthorized.
+		router.Handle("/dav", webdavSrv)
+		// Admin API sits behind the login gate (it's not in
+		// loginWhitelist), so an unauthenticated request is redirected
+		// to /-/login rather than reaching the handlers.
+		registerAdminRoutes(router, &adminAPI{
+			login:  loginStateObj,
+			webdav: webdavState,
+			usage:  usageStateObj,
+			root:   gcfg.Root,
+		})
+	}
+
 	// HTTP Basic Authentication
 	var userHandlerRegistered bool
 	switch gcfg.Auth.Type {
@@ -321,10 +420,21 @@ func main() {
 		userHandlerRegistered = true
 	}
 
-	// 如果没有通过认证模块注册 /-/user 路由，则添加默认实现
+	// 如果没有通过认证模块注册 /-/user 路由，则添加默认实现。
+	// 当 --login 启用时，从 session 中读取 LoginUser 并返回其信息，
+	// 这样前端 loadUser() 能拿到非 null 的用户对象，不会把已经认证
+	// 的状态又覆盖成 null 而错误地回到登录页。
 	if !userHandlerRegistered {
 		router.HandleFunc("/-/user", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			if u := userFromLoginSession(r); u != nil {
+				data, _ := json.Marshal(map[string]any{
+					"name":     u.Name,
+					"provider": u.Provider,
+				})
+				w.Write(data)
+				return
+			}
 			w.Write([]byte("null"))
 		}).Methods("GET")
 	}

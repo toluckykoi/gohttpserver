@@ -250,6 +250,145 @@ export function useFileApi() {
     return await response.json()
   }
 
+  /** Probe the server for whether --login is enabled and the current
+   *  session's auth status. Always resolves; never throws. */
+  async function fetchAuthStatus(): Promise<{
+    login_enabled: boolean
+    authenticated?: boolean
+    name?: string
+  }> {
+    try {
+      const response = await fetch('/-/api/auth/status', { cache: 'no-store' })
+      if (!response.ok) return { login_enabled: false }
+      const data = await response.json()
+      return {
+        login_enabled: Boolean(data.login_enabled),
+        authenticated: data.authenticated === true,
+        name: typeof data.name === 'string' ? data.name : undefined
+      }
+    } catch {
+      // Server may be unreachable / not yet started; treat as no-login.
+      return { login_enabled: false }
+    }
+  }
+
+  /** Submit username/password to POST /-/login. The server responds
+   *  with a 302 redirect: to `next` on success, or back to /-/login
+   *  with an ?error= query on failure.
+   *
+   *  Reliability note: we previously used `redirect: 'follow'` and
+   *  inspected `response.url` to distinguish success from failure.
+   *  That works on most browsers, but a small number of browsers
+   *  (notably some Windows configurations) silently drop the
+   *  Set-Cookie attached to the original 302 response when they
+   *  follow the redirect inside the same fetch() call — leaving the
+   *  user in a "login loop" where the cookie never persists and the
+   *  page keeps redirecting back to /-/login.
+   *
+   *  To eliminate that race entirely, we now use `redirect: 'manual'`
+   *  so we receive the 302 (with Set-Cookie) directly. With
+   *  manual redirect, the browser still applies Set-Cookie to the
+   *  cookie jar (Set-Cookie on 3xx is well-defined per RFC 7231),
+   *  but never auto-navigates. The opaqueredirect response is what
+   *  tells us the server issued a redirect at all — anything else
+   *  (200, 400, 401, 5xx) means the credentials were rejected or the
+   *  server hit an error.
+   *
+   *  After a successful 302 we still verify with /-/api/auth/status
+   *  before returning ok — that single round-trip catches the rare
+   *  case where the browser dropped Set-Cookie (the auth probe will
+   *  then report authenticated: false and we fall through to the
+   *  invalid_credentials branch instead of letting the caller
+   *  navigate and bounce back). */
+  async function submitLogin(
+    username: string,
+    password: string,
+    next: string
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    const form = new FormData()
+    form.append('username', username)
+    form.append('password', password)
+    form.append('next', next)
+    let response: Response
+    try {
+      response = await fetch('/-/login', {
+        method: 'POST',
+        body: form,
+        // 'manual' prevents the fetch from auto-following the 302,
+        // which is where some browsers silently lose Set-Cookie.
+        // We receive the redirect opaquely and verify with a follow-up
+        // auth probe (see comment block above).
+        redirect: 'manual',
+        credentials: 'same-origin'
+      })
+    } catch {
+      return { ok: false, error: 'network' }
+    }
+    // With redirect:'manual', any 3xx (302 in particular) is reported
+    // as type='opaqueredirect' with status 0. Any other status is the
+    // real HTTP response — typically 200 (whitelisted SPA HTML rendered
+    // by mistake) or 400/401 (form error / bad credentials).
+    if (response.type === 'opaqueredirect') {
+      // Server issued a 302. The Set-Cookie from that response was
+      // applied to the cookie jar. Verify by hitting the auth-status
+      // endpoint with the now-current cookie jar; if it reports
+      // authenticated:true, the login genuinely succeeded.
+      try {
+        const probe = await fetch('/-/api/auth/status', {
+          credentials: 'same-origin',
+          cache: 'no-store'
+        })
+        if (probe.ok) {
+          const status = await probe.json().catch(() => null)
+          if (status && status.authenticated === true) {
+            return { ok: true }
+          }
+        }
+      } catch {
+        // Network error on the probe — fall through and report
+        // invalid_credentials so the UI doesn't appear to hang.
+      }
+      return { ok: false, error: 'invalid_credentials' }
+    }
+    // Non-redirect response. 400 (form parse error) and 401 (rare
+    // path — middleware shouldn't see login, but be defensive) both
+    // mean the credentials were not accepted.
+    if (response.status === 401 || response.status === 400) {
+      return { ok: false, error: 'invalid_credentials' }
+    }
+    // Any other 2xx without a redirect means the server rendered the
+    // SPA HTML directly. Treat as success (the session cookie was
+    // applied during session.Save and the next navigation will carry
+    // it).
+    if (response.ok) {
+      return { ok: true }
+    }
+    return { ok: false, error: `HTTP ${response.status}` }
+  }
+
+  /** Change the current user's password. 401 means not signed in (the
+   *  user should be brought back to the login page). */
+  async function changePassword(
+    oldPassword: string,
+    newPassword: string
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    try {
+      const response = await fetch('/-/api/auth/password', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ old: oldPassword, new: newPassword }),
+        credentials: 'same-origin'
+      })
+      if (response.ok) return { ok: true }
+      const text = await response.text().catch(() => '')
+      if (response.status === 401) return { ok: false, error: 'unauthorized' }
+      if (text) return { ok: false, error: text }
+      return { ok: false, error: `HTTP ${response.status}` }
+    } catch {
+      return { ok: false, error: 'network' }
+    }
+  }
+
   async function fetchSystemInfo(): Promise<SystemInfo> {
     const response = await fetch('/-/sysinfo')
     if (!response.ok) {
@@ -383,6 +522,9 @@ export function useFileApi() {
     deleteFile,
     fetchUser,
     fetchSystemInfo,
+    fetchAuthStatus,
+    submitLogin,
+    changePassword,
     downloadFile,
     downloadArchive,
     downloadMulti,

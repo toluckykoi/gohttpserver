@@ -40,6 +40,9 @@
 - [x] Create folder
 - [x] Hold Alt to skip delete confirmation
 - [x] Unzip zip files during upload (with extraction progress)
+- [x] Built-in username/password login gate (`--login`, independent of `--auth-type`)
+- [x] Admin panel (profile + settings) with username/password management
+- [x] Built-in WebDAV server (`/dav/`) with per-account root confinement, readonly mode, system-file protection, and RFC 4331 disk capacity display
 
 ## Installation
 
@@ -116,6 +119,119 @@ Run `gohttpserver --help` to see more options.
   ```bash
   gohttpserver --edit
   ```
+
+- Enable a username/password login gate (independent of `--auth-type`):
+
+  ```bash
+  gohttpserver --login
+  ```
+
+  Default credentials are `admin` / `admin`. No file is written until you
+  rotate the password — defaults live in memory only. After you change the
+  password via the user menu (top-right) → "管理面板" → "个人中心", the
+  new hash is persisted to `./auth-state.json` in the working directory
+  (NOT under `--root`, which would expose it over HTTP). Use
+  `--auth-state /path/to/auth-state.json` to override the location.
+
+  Note: `--login` is fully independent from `--auth-type`. You can use it
+  on its own, or layer it on top of another auth method. When `--login`
+  is passed, `--upload`, `--delete`, and `--edit` are automatically
+  enabled (an authenticated operator should be able to manage files
+  without separately passing those flags).
+
+## Admin Panel
+
+When `--login` is enabled, click the user avatar (top-right) → "管理面板"
+to open the full-screen admin panel. The panel has two tabs:
+
+- **个人中心 (Profile)**: Shows the current user's username, auth
+  provider, and version. Supports changing the username (requires the
+  current password as re-authentication) and changing the password.
+- **参数设置 (Settings)**: Toggles the WebDAV server on/off and manages
+  WebDAV accounts.
+
+## WebDAV Server
+
+The built-in WebDAV server is mounted at `/dav/` and is only available
+when `--login` is enabled. It uses HTTP Basic Auth with its own account
+list (independent of the login session — WebDAV clients like Cyberduck,
+rclone, and Windows Explorer don't share browser cookies).
+
+Enable the WebDAV server via the admin panel (参数设置 → master switch),
+then create accounts:
+
+- **Remark** (required): a label so you can later identify which
+  credential to revoke.
+- **Root path** (default `/`): the account is confined to
+  `<--root>/<root_path>`. Path traversal (`../`) is rejected.
+- **Username**: automatically bound to the current login user (cannot be
+  changed).
+- **Password**: a random 10-character string is generated and shown
+  exactly once. Use "reset password" in the account list to rotate it.
+- **Read-only** (advanced): rejects PUT/DELETE/MKCOL/MOVE/COPY/PROPPATCH
+  with 403.
+- **Protect system files** (advanced, default on): refuses writes to
+  `auth-state.json`, `webdav-accounts.json`, `.ghs.yml`, `favicon.ico`,
+  `favicon.png`, and any dotfile.
+
+WebDAV account state is persisted to `./webdav-accounts.json` in the
+working directory (NOT under `--root`). Use
+`--webdav-accounts /path/to/webdav-accounts.json` to override the
+location.
+
+### Disk capacity display (RFC 4331)
+
+`golang.org/x/net/webdav` does not implement RFC 4331 quota properties,
+so WebDAV clients (Windows Explorer, Cyberduck, rclone) connected but
+showed no disk capacity. gohttpserver injects
+`quota-available-bytes` / `quota-used-bytes` into PROPFIND 207 multistatus
+responses for collections (directories) via a response-interception
+middleware: it strips the underlying 404 quota propstat and appends a
+200 propstat with real values from a cross-platform disk-usage call
+(`syscall.Statfs` on Unix, `GetDiskFreeSpaceEx` on Windows). File
+responses are left untouched (404) — clients read capacity from the
+parent directory.
+
+Example curl usage:
+
+```bash
+# PROPFIND the root
+curl -u admin:RANDOM_PASSWORD -X PROPFIND http://localhost:8000/dav/ -H "Depth: 1"
+
+# Upload a file
+curl -u admin:RANDOM_PASSWORD -T file.txt http://localhost:8000/dav/file.txt
+```
+
+### Connecting from Windows Explorer (map network drive)
+
+Windows' built-in WebDAV mini-redirector has two quirks you need to
+handle:
+
+1. **It fires an anonymous `OPTIONS` preflight** before prompting for
+   credentials. gohttpserver answers this preflight with `DAV: 1, 2`
+   + `MS-Author-Via: DAV` so Windows recognises the endpoint as a
+   WebDAV share — no action needed on your side.
+2. **By default it refuses to send Basic Auth over plain HTTP**
+   (only HTTPS qualifies out of the box). If you map a drive over
+   `http://` and get "401 Unauthorized" immediately, raise
+   `BasicAuthLevel` in the registry:
+
+   ```text
+   HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\WebClient\Parameters\BasicAuthLevel
+   ```
+
+   Set it from `1` (HTTPS only) to `2` (HTTP and HTTPS), then restart
+   the WebClient service:
+
+   ```powershell
+   Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" -Name BasicAuthLevel -Value 2
+   Restart-Service WebClient
+   ```
+
+   Then map `\\192.168.120.141@8000\DavWWWRoot\dav\` (or
+   `http://192.168.120.141:8000/dav/`) as a network drive and enter
+   the WebDAV account credentials when prompted. For production,
+   prefer HTTPS — then the registry change is unnecessary.
 
 ## Advanced Usage
 

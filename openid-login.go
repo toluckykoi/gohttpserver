@@ -49,10 +49,18 @@ func init() {
 	}
 	// Harden the session cookie by default: HttpOnly prevents JS from
 	// reading it (mitigates XSS token theft), SameSite=Lax blocks most
-	// CSRF. Secure (HTTPS-only) is set in main() when TLS is configured;
-	// defaulting it to true here would break plain-HTTP local dev.
+	// CSRF. gorilla/sessions v1.4.0 changed NewCookieStore to default
+	// Secure=true and SameSite=None — that breaks plain-HTTP local dev
+	// (the browser refuses to store a Secure cookie over HTTP, so the
+	// session is silently lost on every login). We explicitly reset
+	// Secure=false here; main() flips it back to true when TLS is on.
+	// Path="/" ensures the cookie is sent on all requests, not just
+	// the login path — without this, some browsers won't send the
+	// cookie after the post-login redirect, causing a login loop.
 	store.Options.HttpOnly = true
 	store.Options.SameSite = http.SameSiteLaxMode
+	store.Options.Secure = false
+	store.Options.Path = "/"
 }
 
 type UserInfo struct {

@@ -1,6 +1,13 @@
 <template>
   <el-config-provider :locale="locale">
-    <div class="app-shell" :data-theme="currentTheme">
+    <!-- Login gate: when --login is enabled and we have no session,
+         render only the Login view. The whole shell (header / footer /
+         file list) is hidden so nothing leaks before authentication. -->
+    <template v-if="showLoginGate">
+      <Login :next="pendingPath" />
+    </template>
+
+    <div v-else class="app-shell" :data-theme="currentTheme">
       <!-- Header: frosted-glass bar that floats over content.
            Uses backdrop-filter for the modern translucent effect.
            On phones it collapses search/theme into a more compact row. -->
@@ -32,17 +39,6 @@
                 <el-icon :size="17"><Camera /></el-icon>
               </el-button>
             </el-tooltip>
-
-            <template v-if="fileStore.user">
-              <div class="header-user" :title="fileStore.user.email || ''">
-                <span class="header-avatar" aria-hidden="true">
-                  {{ (fileStore.user.name || fileStore.user.email || '?').charAt(0).toUpperCase() }}
-                </span>
-                <span class="header-user-name">
-                  {{ fileStore.user.name || fileStore.user.email || 'Guest' }}
-                </span>
-              </div>
-            </template>
 
             <div class="header-search">
               <el-input
@@ -96,6 +92,53 @@
                 </button>
               </div>
             </el-popover>
+
+            <!-- User pill: kept last (rightmost) so the account anchor
+                 sits at the far edge of the header, the conventional
+                 spot for identity controls. -->
+            <template v-if="fileStore.user">
+              <el-popover
+                ref="userPopoverRef"
+                placement="bottom-end"
+                :width="200"
+                trigger="click"
+                :show-arrow="false"
+              >
+                <template #reference>
+                  <button
+                    class="header-user header-user--button"
+                    :title="fileStore.user.email || fileStore.user.name"
+                    type="button"
+                  >
+                    <span class="header-avatar" aria-hidden="true">
+                      {{ (fileStore.user.name || fileStore.user.email || '?').charAt(0).toUpperCase() }}
+                    </span>
+                    <span class="header-user-name">
+                      {{ fileStore.user.name || fileStore.user.email || 'Guest' }}
+                    </span>
+                  </button>
+                </template>
+                <div class="user-menu">
+                  <button
+                    v-if="fileStore.user.provider === 'login'"
+                    type="button"
+                    class="user-menu-item"
+                    @click="openAdminPanel"
+                  >
+                    <el-icon :size="14"><Setting /></el-icon>
+                    Admin Panel
+                  </button>
+                  <button
+                    type="button"
+                    class="user-menu-item user-menu-item--danger"
+                    @click="handleLogout"
+                  >
+                    <el-icon :size="14"><SwitchButton /></el-icon>
+                    Sign out
+                  </button>
+                </div>
+              </el-popover>
+            </template>
           </div>
         </div>
       </header>
@@ -163,6 +206,12 @@
         :file="currentQrFile"
         :current-path="currentPath"
       />
+
+      <AdminPanel
+        v-if="showAdminPanel"
+        @close="showAdminPanel = false"
+        @username-changed="handleUsernameChanged"
+      />
     </div>
   </el-config-provider>
 </template>
@@ -173,6 +222,8 @@ import { useFileStore } from './stores/fileStore'
 import { useTheme } from './composables/useTheme'
 import Breadcrumb from './components/Breadcrumb.vue'
 import FileList from './components/FileList.vue'
+import Login from './views/Login.vue'
+import AdminPanel from './views/AdminPanel.vue'
 import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
 // Lazy-load QR modal: it's only shown when the user explicitly
 // taps the "view on phone" chip in the header. Pulling qrcode + its
@@ -180,7 +231,7 @@ import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
 const QRCodeModal = defineAsyncComponent(() => import('./components/QrCodeModal.vue'))
 import type { FileItem } from './types'
 import {
-  Camera, Search, Check
+  Camera, Search, Check, Setting, SwitchButton
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 
@@ -191,9 +242,41 @@ const locale = zhCn
 const showQrCodeModal = ref(false)
 const currentQrFile = ref<FileItem | null>(null)
 const searchValue = ref('')
+const showAdminPanel = ref(false)
+// Ref to the user-menu popover so we can imperatively close it when
+// one of its menu items is clicked. trigger="click" toggles on the
+// reference element only; clicks inside the popover body don't hide
+// it, which left the menu stuck open after opening the admin panel.
+const userPopoverRef = ref<{ hide: () => void } | null>(null)
 
 const version = computed(() => fileStore.version)
 const currentPath = computed(() => window.location.pathname)
+
+// Show the login screen when:
+//   1. The /-/api/auth/status probe reports login is enabled, AND
+//   2. We don't have a session (fileStore.user is null), AND
+//   3. The probe has actually completed (loginChecked) — otherwise we'd
+//      flash the manager for one tick before auth state arrives and
+//      yank it back to the login screen, which feels broken.
+const showLoginGate = computed(() => {
+  return (
+    fileStore.loginChecked &&
+    fileStore.loginEnabled &&
+    !fileStore.user
+  )
+})
+
+// Path the user was trying to reach when intercepted by the server's
+// 302 to /-/login?next=…. We pass it forward to Login.vue so a
+// successful POST lands them back where they started. The server
+// passes the original path via the `next` query param; if absent
+// (e.g. user navigated directly to /-/login), fall back to "/".
+const pendingPath = computed(() => {
+  const params = new URLSearchParams(window.location.search)
+  const next = params.get('next')
+  if (next && next.startsWith('/')) return next
+  return window.location.pathname || '/'
+})
 
 // Reactive phone breakpoint. Used to hide kbd hint, toggle button
 // labels, etc. without re-mounting the whole tree.
@@ -225,6 +308,31 @@ function handleThemeChange(theme: string) {
   ElMessage.success(`Theme: ${theme}`)
 }
 
+function openAdminPanel() {
+  userPopoverRef.value?.hide()
+  showAdminPanel.value = true
+}
+
+async function handleLogout() {
+  userPopoverRef.value?.hide()
+  await fileStore.logout()
+  // Force a reload so the middleware gets a clean chance to redirect
+  // us, and the file list caches are evicted. Soft re-render leaves
+  // cached data in the Pinia store that re-appears on the next mount.
+  ElMessage.info('Signed out')
+  window.location.assign('/')
+}
+
+// When the operator renames their account in the admin panel, update
+// the fileStore's user object so the header pill shows the new name
+// immediately. The session cookie was already re-stamped by the
+// backend; we just need to mirror it in Pinia.
+function handleUsernameChanged(newName: string) {
+  if (fileStore.user) {
+    fileStore.user = { ...fileStore.user, name: newName }
+  }
+}
+
 // "/" focuses search; Esc clears. These are file-manager-y shortcuts
 // every user already expects from tools like VS Code / GitHub.
 function handleShortcut(e: KeyboardEvent) {
@@ -245,9 +353,19 @@ function handlePopState() {
 }
 
 onMounted(async () => {
-  await fileStore.loadFiles(window.location.pathname)
-  await fileStore.loadUser()
-  await fileStore.loadSystemInfo()
+  // Login status is the gate decision; load it FIRST so the login
+  // page can render without a flash of the file manager. The other
+  // loads (files/user/sysinfo) still happen and their results are
+  // just ignored by the v-if once showLoginGate is true.
+  await fileStore.loadLoginStatus()
+
+  if (!showLoginGate.value) {
+    await Promise.all([
+      fileStore.loadFiles(window.location.pathname),
+      fileStore.loadUser(),
+      fileStore.loadSystemInfo()
+    ])
+  }
 
   window.addEventListener('popstate', handlePopState)
   window.addEventListener('resize', handleResize, { passive: true })
@@ -283,7 +401,7 @@ onBeforeUnmount(() => {
   top: 0;
   z-index: var(--z-sticky);
   flex-shrink: 0;
-  height: 64px;
+  height: 52px;
   background: color-mix(in srgb, var(--el-bg-color) 70%, transparent);
   border-bottom: 1px solid color-mix(in srgb, var(--el-border-color) 50%, transparent);
   backdrop-filter: saturate(180%) blur(20px);
@@ -390,11 +508,10 @@ onBeforeUnmount(() => {
 }
 
 .header-chip {
-  /* Square icon button — uniform across the header.
-     36×36 is the "comfortable desktop" target; min-width:0 lets it
-     shrink on narrow viewports without overflowing. */
-  width: 36px;
-  height: 36px;
+  /* Square icon button — matches the user pill height (34px).
+     min-width:0 lets it shrink on narrow viewports without overflowing. */
+  width: 34px;
+  height: 34px;
   padding: 0;
   color: var(--el-text-color-regular);
 }
@@ -410,6 +527,8 @@ onBeforeUnmount(() => {
 }
 
 .header-search :deep(.el-input__wrapper) {
+  height: 34px;
+  box-sizing: border-box;
   padding: 4px 12px;
   border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--el-fill-color) 50%, transparent);
@@ -465,14 +584,67 @@ onBeforeUnmount(() => {
   font-weight: 500;
   color: var(--el-text-color-regular);
   background: color-mix(in srgb, var(--el-fill-color) 40%, transparent);
+  border: 1px solid transparent;
   border-radius: var(--radius-pill);
   white-space: nowrap;
   max-width: 200px;
-  transition: background var(--transition-base);
+  transition: background var(--transition-base), border-color var(--transition-base);
+  cursor: default;
+  user-select: none;
 }
 
 .header-user:hover {
   background: var(--el-fill-color-light);
+}
+
+/* When the user pill is rendered as a clickable trigger (for the popover
+   menu), it gets a hover affordance and a pointer cursor. */
+.header-user--button {
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.header-user--button:hover {
+  background: var(--el-fill-color-light);
+  border-color: var(--el-border-color-lighter);
+}
+.header-user--button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--el-color-primary) 35%, transparent);
+  outline-offset: 2px;
+}
+
+/* User menu (popover body) */
+.user-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+}
+.user-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--el-text-color-regular);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--transition-base), color var(--transition-base);
+}
+.user-menu-item:hover {
+  background: var(--el-fill-color-light);
+}
+.user-menu-item--danger {
+  color: var(--el-color-danger);
+}
+.user-menu-item--danger:hover {
+  background: color-mix(in srgb, var(--el-color-danger) 10%, transparent);
 }
 
 .header-avatar {
@@ -783,8 +955,24 @@ onBeforeUnmount(() => {
   .header-title { font-size: 14px; }
 
   .header-search {
-    min-width: 80px;
-    max-width: 160px;
+    flex: 0 1 auto;
+    min-width: 60px;
+    max-width: 110px;
+  }
+
+  /* Compact the input internals on phone so the field stays usable
+     without forcing the rest of the header off-screen. */
+  .header-search :deep(.el-input__wrapper) {
+    padding: 4px 8px;
+  }
+  .header-search :deep(.el-input__inner) {
+    font-size: 13px;
+  }
+  /* On phone the field is too narrow for the placeholder to fit
+     alongside the icon; hide it so the input looks clean. The search
+     icon is enough to convey purpose. */
+  .header-search :deep(.el-input__inner::placeholder) {
+    color: transparent;
   }
 
   .header-search-kbd { display: none; }

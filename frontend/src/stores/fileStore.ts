@@ -26,6 +26,10 @@ export const useFileStore = defineStore('file', () => {
   // Mobile-only: when true, every card shows its checkbox and tapping a
   // card toggles selection instead of navigating. Desktop ignores this.
   const selectionMode = ref(false)
+  // Login flow: when loginEnabled is true, App.vue shows the login
+  // route instead of the file manager until `user` is populated.
+  const loginEnabled = ref(false)
+  const loginChecked = ref(false)
 
   // Computed
   const sortedFiles = computed(() => {
@@ -125,6 +129,65 @@ export const useFileStore = defineStore('file', () => {
     } catch (error) {
       console.error('Failed to load system info:', error)
     }
+  }
+
+  /** Probe /-/api/auth/status to discover whether --login is enabled
+   *  and, if so, whether the current request already has a session.
+   *  Idempotent and safe to call from App.vue onMounted. */
+  async function loadLoginStatus() {
+    try {
+      const status = await fileApi.fetchAuthStatus()
+      loginEnabled.value = status.login_enabled
+      // If login is enabled and the session is already valid the
+      // server reports the user — fold that into the user state so
+      // App.vue doesn't need to keep a parallel session object.
+      if (status.login_enabled && status.authenticated) {
+        user.value = { name: status.name || 'admin', provider: 'login' }
+      }
+    } catch (error) {
+      console.error('Failed to load login status:', error)
+    } finally {
+      loginChecked.value = true
+    }
+  }
+
+  /** Submit credentials via POST /-/login. On success, record the
+   *  user locally so the caller can drive its own navigation flow.
+   *  We intentionally do NOT pre-fetch the file list here: Login.vue
+   *  follows a successful login with window.location.replace(target),
+   *  which hard-reloads the SPA and lets App.vue's onMounted issue
+   *  the first (and only) loadFiles. Pre-fetching here would race
+   *  with the reload and waste a request. */
+  async function loginWithCredentials(username: string, password: string) {
+    const next = currentPath.value || '/'
+    const res = await fileApi.submitLogin(username, password, next)
+    if (res.ok) {
+      user.value = { name: username, provider: 'login' }
+      return { ok: true as const }
+    }
+    return { ok: false as const, error: res.error }
+  }
+
+  /** Logout via /-/logout (GET clears the session cookie server-side),
+   *  then reset all authed UI state so App.vue re-mounts the login
+   *  page on the next render. */
+  async function logout() {
+    try {
+      // The cookie is cleared by the server response; the fetch with
+      // manual redirect surfaces the 302 without following it.
+      await fetch('/-/logout', { method: 'GET', credentials: 'same-origin' })
+    } catch {
+      // Even if the network call fails, locally clear state — the
+      // cookie may still be valid until the next reload.
+    }
+    user.value = null
+    files.value = []
+  }
+
+  /** PUT /-/api/auth/password wrapper for the change-password UI. */
+  async function changePassword(oldPw: string, newPw: string) {
+    const res = await fileApi.changePassword(oldPw, newPw)
+    return res
   }
 
   async function uploadFile(file: File, options?: { filename?: string; unzip?: boolean }) {
@@ -243,9 +306,15 @@ export const useFileStore = defineStore('file', () => {
     isAllSelected,
     selectionMode,
     currentTheme,
+    loginEnabled,
+    loginChecked,
     loadFiles,
     loadUser,
     loadSystemInfo,
+    loadLoginStatus,
+    loginWithCredentials,
+    logout,
+    changePassword,
     uploadFile,
     createDirectory,
     deleteFile,

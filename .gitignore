@@ -36,4 +36,7 @@ docs/
 dist/
 .DS_Store
 testdata/test
+auth-state.json
+storage-usage.json
+webdav-accounts.json
 frontend/node_modules/
