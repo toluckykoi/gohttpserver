@@ -46,6 +46,21 @@
 
 ## Installation
 
+### One-line install (recommended, Linux)
+
+Run the official installer — it downloads the binary, sets up a systemd
+service, and walks you through port and flag configuration:
+
+```bash
+curl -fsSL https://gitee.com/toluckykoi/gohttpserver/raw/main/install-gohttpserver.sh -o install-gohttpserver.sh && sudo bash install-gohttpserver.sh
+```
+
+The script offers TUI interaction (whiptail), an uninstall prompt, and
+flag configuration. Once finished, start the service with
+`systemctl start gohttpserver`.
+
+### Manual binary download
+
 Download a pre-built binary from [GitHub Releases](https://github.com/toluckykoi/gohttpserver/releases) or [Gitee Releases](https://gitee.com/toluckykoi/gohttpserver/releases).
 
 ## Usage

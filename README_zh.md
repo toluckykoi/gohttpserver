@@ -47,6 +47,18 @@
 
 ## 安装
 
+### 一键安装（推荐，Linux）
+
+运行官方安装脚本，自动下载二进制、配置 systemd 服务、引导设置端口和参数：
+
+```bash
+curl -fsSL https://gitee.com/toluckykoi/gohttpserver/raw/main/install-gohttpserver.sh -o install-gohttpserver.sh && sudo bash install-gohttpserver.sh
+```
+
+脚本支持 TUI 交互（whiptail）、卸载询问、参数配置等，安装完成后即可通过 `systemctl start gohttpserver` 启动。
+
+### 手动下载二进制
+
 从 [GitHub Releases](https://github.com/toluckykoi/gohttpserver/releases) 或者 [Gitee Releases](https://gitee.com/toluckykoi/gohttpserver/releases) 下载二进制文件进行安装。
 
 ## 使用方法
