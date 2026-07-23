@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"database/sql"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -47,63 +47,63 @@ var ErrInsufficientCapacity = errors.New("webdav: insufficient storage capacity"
 
 // usageState persists the per-account byte totals for the WebDAV server.
 //
-// On-disk shape (storage-usage.json):
-//
-//	{
-//	  "version": 1,
-//	  "used": { "wd_abcdef": 1234567, ... }
-//	}
+// Persistence is backed by the SQLite storage_usage table (account_id →
+// used_bytes), replacing the previous storage-usage.json file.
 //
 // Concurrency: an RWMutex guards the in-memory map. addDelta takes the
 // write lock and persists on every call. recalculate takes the write
 // lock once, walks the filesystem, replaces the entry, and persists.
 // Both are O(1) for the lock holder but block other writers briefly.
-//
-// The file is rewritten atomically using the same temp+fsync+chmod+
-// rename pattern as webdavAccountState.saveLocked (see
-// webdav_accounts.go:456).
 type usageState struct {
-	mu   sync.RWMutex
-	used map[string]int64
-	path string
+	mu     sync.RWMutex
+	used   map[string]int64
+	db     *sql.DB
+	dbPath string // kept so tests can reopen the same DB to verify persistence
 }
 
-// usageFile is the on-disk JSON envelope for usageState.
-type usageFile struct {
-	Version int            `json:"version"`
-	Used    map[string]int `json:"used"`
+// loadUsageState reads the storage_usage table. A read error is logged and
+// falls back to an empty state (the operator can re-trigger recalculation
+// via the admin endpoint to repopulate).
+func loadUsageState(db *sql.DB) *usageState {
+	return loadUsageStateAt(db, "")
 }
 
-// loadUsageState reads storage-usage.json from path. A missing file is
-// not an error — it returns an empty state. JSON parse errors are
-// logged and fall back to an empty state (the operator can re-trigger
-// recalculation via the admin endpoint to repopulate).
-func loadUsageState(path string) *usageState {
+// loadUsageStateAt is loadUsageState with the database path recorded on
+// the returned state. Tests use the path to reopen the same DB to verify
+// persistence.
+func loadUsageStateAt(db *sql.DB, path string) *usageState {
 	s := &usageState{
-		path: path,
-		used: make(map[string]int64),
+		db:     db,
+		dbPath: path,
+		used:   make(map[string]int64),
 	}
-	data, err := os.ReadFile(path)
+	rows, err := db.Query("SELECT account_id, used_bytes FROM storage_usage")
 	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			log.Printf("webdav-quota: failed to read %s (%v); starting with empty usage", path, err)
-		} else {
-			log.Printf("webdav-quota: %s does not exist; starting with empty usage", path)
-		}
+		log.Printf("webdav-quota: failed to read storage_usage (%v); starting with empty usage", err)
 		return s
 	}
-	var f usageFile
-	if err := json.Unmarshal(data, &f); err != nil {
-		log.Printf("webdav-quota: %s is not valid JSON (%v); starting with empty usage", path, err)
-		return s
-	}
-	if f.Used != nil {
-		for k, v := range f.Used {
-			s.used[k] = int64(v)
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var used int64
+		if scanErr := rows.Scan(&id, &used); scanErr != nil {
+			log.Printf("webdav-quota: scan storage_usage row failed: %v", scanErr)
+			continue
 		}
+		s.used[id] = used
 	}
-	log.Printf("webdav-quota: loaded usage for %d account(s) from %s", len(s.used), path)
+	log.Printf("webdav-quota: loaded usage for %d account(s)", len(s.used))
 	return s
+}
+
+// usageStateFromDB opens the database at path and loads the usage table.
+// Test-only convenience for re-opening the same DB to verify persistence.
+func usageStateFromDB(path string) (*usageState, error) {
+	db, err := openDB(path)
+	if err != nil {
+		return nil, err
+	}
+	return loadUsageStateAt(db, path), nil
 }
 
 // get returns the cached byte count for an account. Zero is a valid
@@ -113,6 +113,16 @@ func (s *usageState) get(accountID string) int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.used[accountID]
+}
+
+// isEmpty reports whether the usage map is empty. Used at startup to
+// decide whether a fresh DB needs the per-account chroot walk to seed
+// initial byte totals (a brand-new DB is empty even if accounts are
+// present).
+func (s *usageState) isEmpty() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.used) == 0
 }
 
 // addDelta atomically updates the cached byte count for accountID and
@@ -184,56 +194,42 @@ func (s *usageState) recalculateAll(accounts []webdavAccount, root string) []map
 	return out
 }
 
-// saveLocked writes storage-usage.json atomically. Same shape as
-// webdavAccountState.saveLocked (webdav_accounts.go:456) and
-// loginState.saveLocked (login.go:194).
+// saveLocked persists the in-memory usage map to the storage_usage table.
+// Only positive totals are stored (matching the previous JSON behaviour);
+// accounts at zero are deleted so the table stays sparse. The whole update
+// runs in one transaction for atomicity. Caller must hold s.mu in write mode.
 func (s *usageState) saveLocked() error {
-	// Marshal ints as ints (smaller on disk, easier to grep).
-	asInt := make(map[string]int, len(s.used))
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	upsert, err := tx.Prepare(
+		`INSERT INTO storage_usage (account_id, used_bytes) VALUES (?, ?)
+		 ON CONFLICT(account_id) DO UPDATE SET used_bytes = excluded.used_bytes`)
+	if err != nil {
+		return err
+	}
+	defer upsert.Close()
+	del, err := tx.Prepare("DELETE FROM storage_usage WHERE account_id = ?")
+	if err != nil {
+		return err
+	}
+	defer del.Close()
+
 	for k, v := range s.used {
-		if v < 0 {
-			v = 0
+		if v <= 0 {
+			if _, err := del.Exec(k); err != nil {
+				return err
+			}
+			continue
 		}
-		if v > 0 {
-			asInt[k] = int(v) // int is at least 32 bits on every supported Go target
-		}
-	}
-	f := usageFile{Version: 1, Used: asInt}
-	data, err := json.MarshalIndent(f, "", "  ")
-	if err != nil {
-		return err
-	}
-	dir := filepath.Dir(s.path)
-	if dir != "" && dir != "." {
-		if mkErr := os.MkdirAll(dir, 0o700); mkErr != nil {
-			return mkErr
+		if _, err := upsert.Exec(k, v); err != nil {
+			return err
 		}
 	}
-	tmp, err := os.CreateTemp(dir, "storage-usage-*.json.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer func() {
-		if _, statErr := os.Stat(tmpName); statErr == nil {
-			os.Remove(tmpName)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpName, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, s.path)
+	return tx.Commit()
 }
 
 // walkSize sums the size of every regular file under root. Symlinks and

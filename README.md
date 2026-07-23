@@ -126,12 +126,20 @@ Run `gohttpserver --help` to see more options.
   gohttpserver --login
   ```
 
-  Default credentials are `admin` / `admin`. No file is written until you
+  Default credentials are `admin` / `admin`. No row is written until you
   rotate the password — defaults live in memory only. After you change the
   password via the user menu (top-right) → "管理面板" → "个人中心", the
-  new hash is persisted to `./auth-state.json` in the working directory
-  (NOT under `--root`, which would expose it over HTTP). Use
-  `--auth-state /path/to/auth-state.json` to override the location.
+  new hash is persisted to `./gohttpserver.db` (a SQLite database) in
+  the working directory (NOT under `--root`, which would expose it over
+  HTTP). Use `--db /path/to/gohttpserver.db` to override the location.
+
+  Logged-in sessions are valid for 12 hours by default (browser cookie
+  persistence, surviving restarts). Configure with `--session-ttl` (e.g.
+  `--session-ttl=24h`, or `--session-ttl=0` to fall back to a session-only
+  cookie that is dropped when the browser closes). To keep sessions
+  valid across server restarts, also set the `GHS_SESSION_KEY`
+  environment variable — otherwise each restart mints a new signing key
+  and existing cookies become invalid.
 
   Note: `--login` is fully independent from `--auth-type`. You can use it
   on its own, or layer it on top of another auth method. When `--login`
@@ -171,7 +179,7 @@ then create accounts:
 - **Read-only** (advanced): rejects PUT/DELETE/MKCOL/MOVE/COPY/PROPPATCH
   with 403.
 - **Protect system files** (advanced, default on): refuses writes to
-  `auth-state.json`, `webdav-accounts.json`, `.ghs.yml`, `favicon.ico`,
+  `gohttpserver.db`, `.ghs.yml`, `favicon.ico`,
   `favicon.png`, and any dotfile.
 
 WebDAV account state is persisted to `./webdav-accounts.json` in the

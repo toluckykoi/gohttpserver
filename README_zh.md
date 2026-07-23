@@ -127,9 +127,15 @@ gohttpserver -r ./ --port 8000 --upload --delete --edit
 
   默认凭据为 `admin` / `admin`，未修改密码前不会在磁盘上生成任何文件，
   默认凭据仅保留在内存中。登录后可在右上角用户菜单 → 「管理面板」→ 「个人中心」
-  中更新密码，新密码会持久化到当前工作目录下的 `./auth-state.json`（不会放在
-  `--root` 目录下，避免被 HTTP 服务暴露）。如需自定义文件位置，可使用
-  `--auth-state /path/to/auth-state.json`。
+  中更新密码，新密码会持久化到当前工作目录下的 `./gohttpserver.db`（SQLite
+  数据库文件，不会放在 `--root` 目录下，避免被 HTTP 服务暴露）。如需自定义
+  数据库位置，可使用 `--db /path/to/gohttpserver.db`。
+
+  登录会话默认保留 12 小时（cookie 持久化，重启软件期间有效）。可通过
+  `--session-ttl` 调整（例如 `--session-ttl=24h`，或 `--session-ttl=0`
+  设为仅本浏览器会话有效——关闭浏览器即失效）。如需跨服务器重启保持登录
+  状态，还需设置环境变量 `GHS_SESSION_KEY`，否则每次重启会重新生成签名密钥，
+  旧的 cookie 全部失效。
 
   注意：`--login` 与 `--auth-type` 完全独立，可单独使用或组合使用（同时叠加两种认证）。
   当显式传入 `--login` 时，`--upload`、`--delete`、`--edit` 会自动启用（已认证的操作员
@@ -159,8 +165,8 @@ Windows 资源管理器不共享浏览器 cookie，必须用 Basic Auth）。
 - **高级选项**（可折叠）：
   - **只读模式**：开启后用户只能通过此账号读取文件，所有写操作
     （PUT/DELETE/MKCOL/MOVE/COPY/PROPPATCH）返回 403
-  - **阻止删除/上传系统文件**（默认开启）：拒绝写入 `auth-state.json`、
-    `webdav-accounts.json`、`.ghs.yml`、`favicon.ico`、`favicon.png` 以及任何
+  - **阻止删除/上传系统文件**（默认开启）：拒绝写入 `gohttpserver.db`、
+    `.ghs.yml`、`favicon.ico`、`favicon.png` 以及任何
     以 `.` 开头的隐藏文件
   - **配额（Quota）**：限制该账号可写入的总字节数，默认单位 GB，留空或 0
     表示不限

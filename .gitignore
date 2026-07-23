@@ -39,4 +39,7 @@ testdata/test
 auth-state.json
 storage-usage.json
 webdav-accounts.json
+gohttpserver.db
+gohttpserver.db-wal
+gohttpserver.db-shm
 frontend/node_modules/

@@ -3,12 +3,11 @@ package main
 import (
 	"crypto/rand"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -40,21 +39,24 @@ type webdavAccount struct {
 	UpdatedAtUnix int64 `json:"updated_at"`
 }
 
-// webdavAccountsFile is the on-disk shape of webdav-accounts.json.
+// webdavAccountsFile is the in-memory shape of the WebDAV account state.
 // The top-level "enabled" flag lets the operator turn the whole WebDAV
-// server off without deleting configured accounts.
+// server off without deleting configured accounts. It is persisted to the
+// webdav_meta table (key="enabled") and the webdav_accounts table.
 type webdavAccountsFile struct {
 	Enabled  bool            `json:"enabled"`
 	Accounts []webdavAccount `json:"accounts"`
 }
 
 // webdavAccountState is the in-memory state, guarded by a RWMutex.
-// Same persistence pattern as loginState: atomic write (temp + fsync +
-// rename) under the write lock, snapshot reads under the read lock.
+// Persistence is backed by SQLite (webdav_accounts + webdav_meta tables),
+// replacing the previous webdav-accounts.json file. Snapshot reads under
+// the read lock, transactional writes under the write lock.
 type webdavAccountState struct {
-	mu   sync.RWMutex
-	data *webdavAccountsFile
-	path string
+	mu     sync.RWMutex
+	data   *webdavAccountsFile
+	db     *sql.DB
+	dbPath string // kept so tests can reopen the same DB to verify persistence
 }
 
 // systemFileNames are the filenames protected by ProtectSystemFiles.
@@ -64,42 +66,78 @@ type webdavAccountState struct {
 var systemFileNames = map[string]bool{
 	"auth-state.json":      true,
 	"webdav-accounts.json": true,
+	"storage-usage.json":   true,
+	"gohttpserver.db":      true,
+	"gohttpserver.db-wal":  true,
+	"gohttpserver.db-shm":  true,
 	".ghs.yml":             true,
 	"favicon.ico":          true,
 	"favicon.png":          true,
 }
 
-// loadWebdavAccounts reads webdav-accounts.json (or returns an empty
-// state if the file doesn't exist yet). Errors during read are logged
-// but non-fatal — the server falls back to an empty (disabled) state
+// loadWebdavAccounts reads the WebDAV account state from SQLite (or returns
+// an empty, disabled state if nothing is stored yet). Errors during read
+// are logged but non-fatal — the server falls back to an empty state
 // rather than refusing to start.
-func loadWebdavAccounts(path string) *webdavAccountState {
+func loadWebdavAccounts(db *sql.DB) *webdavAccountState {
+	return loadWebdavAccountsAt(db, "")
+}
+
+// loadWebdavAccountsAt is loadWebdavAccounts with the database path
+// recorded on the returned state. Tests use the path to reopen the same
+// DB to verify persistence. Production callers (main.go) use the
+// parameter-less variant and ignore the empty path.
+func loadWebdavAccountsAt(db *sql.DB, path string) *webdavAccountState {
 	st := &webdavAccountState{
-		path: path,
-		data: &webdavAccountsFile{Enabled: false},
+		db:     db,
+		dbPath: path,
+		data:   &webdavAccountsFile{Enabled: false},
 	}
-	data, err := os.ReadFile(path)
+
+	// Read the enabled flag from webdav_meta.
+	var enabledStr string
+	err := db.QueryRow("SELECT value FROM webdav_meta WHERE key = 'enabled'").Scan(&enabledStr)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		log.Printf("webdav: failed to read enabled flag (%v); starting with empty account list", err)
+		return st
+	}
+	st.data.Enabled = enabledStr == "true"
+
+	rows, err := db.Query(
+		`SELECT id, remark, username, password_sha256, root_path, readonly,
+		        protect_system_files, quota_bytes, created_at, updated_at
+		 FROM webdav_accounts ORDER BY created_at`)
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			log.Printf("webdav: failed to read %s (%v); starting with empty account list", path, err)
-		} else {
-			log.Printf("webdav: %s does not exist; starting with empty account list (enabled=false)", path)
+		log.Printf("webdav: failed to read accounts (%v); starting with empty account list", err)
+		return st
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var a webdavAccount
+		if scanErr := rows.Scan(
+			&a.ID, &a.Remark, &a.Username, &a.PasswordSHA, &a.RootPath,
+			&a.ReadOnly, &a.ProtectSystemFiles, &a.QuotaBytes,
+			&a.CreatedAtUnix, &a.UpdatedAtUnix,
+		); scanErr != nil {
+			log.Printf("webdav: scan account row failed: %v", scanErr)
+			continue
 		}
-		return st
+		st.data.Accounts = append(st.data.Accounts, a)
 	}
-	var f webdavAccountsFile
-	if err := json.Unmarshal(data, &f); err != nil {
-		log.Printf("webdav: %s is not valid JSON (%v); starting with empty account list", path, err)
-		return st
-	}
-	st.data = &f
-	// Log a concise summary at startup — useful when a user reports
-	// "WebDAV login fails" to confirm accounts were persisted. The
-	// per-account details (username / root_path) are intentionally not
-	// logged to keep startup output quiet.
-	log.Printf("webdav: loaded %d account(s) from %s (enabled=%v)",
-		len(f.Accounts), path, f.Enabled)
+	log.Printf("webdav: loaded %d account(s) (enabled=%v)", len(st.data.Accounts), st.data.Enabled)
 	return st
+}
+
+// webdavAccountsFromDB opens the database at path and loads the WebDAV
+// account state. Test-only convenience for re-opening the same DB to
+// verify persistence. Cleanup of the new handle is the caller's
+// responsibility (close the state.db or register a t.Cleanup).
+func webdavAccountsFromDB(path string) (*webdavAccountState, error) {
+	db, err := openDB(path)
+	if err != nil {
+		return nil, err
+	}
+	return loadWebdavAccountsAt(db, path), nil
 }
 
 // generateWebdavPassword returns a random 10-character alphanumeric
@@ -444,48 +482,52 @@ func normaliseWebdavRoot(input string) (string, error) {
 	return cleaned, nil
 }
 
-// saveLocked writes webdav-accounts.json atomically. Same pattern as
-// loginState.saveLocked: temp file in the same dir, fsync, chmod 0600,
-// rename. Caller must hold s.mu in write mode.
+// saveLocked persists the full account state to SQLite in one transaction:
+// the enabled flag into webdav_meta and the account list into
+// webdav_accounts (delete-all + reinsert, mirroring the previous
+// whole-file-rewrite semantics). The transaction gives atomicity — a
+// failed commit rolls back cleanly. Caller must hold s.mu in write mode.
 func (s *webdavAccountState) saveLocked() error {
 	if s.data == nil {
 		return errors.New("webdav: no state loaded")
 	}
-	data, err := json.MarshalIndent(s.data, "", "  ")
+	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(s.path)
-	if dir != "" && dir != "." {
-		if mkErr := os.MkdirAll(dir, 0o700); mkErr != nil {
-			return mkErr
-		}
+	defer tx.Rollback()
+
+	enabled := "false"
+	if s.data.Enabled {
+		enabled = "true"
 	}
-	tmp, err := os.CreateTemp(dir, "webdav-accounts-*.json.tmp")
+	if _, err := tx.Exec(
+		`INSERT INTO webdav_meta (key, value) VALUES ('enabled', ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`, enabled); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec("DELETE FROM webdav_accounts"); err != nil {
+		return err
+	}
+	insert, err := tx.Prepare(
+		`INSERT INTO webdav_accounts
+		   (id, remark, username, password_sha256, root_path, readonly,
+		    protect_system_files, quota_bytes, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
-	tmpName := tmp.Name()
-	defer func() {
-		if _, statErr := os.Stat(tmpName); statErr == nil {
-			os.Remove(tmpName)
+	defer insert.Close()
+	for _, a := range s.data.Accounts {
+		if _, err := insert.Exec(
+			a.ID, a.Remark, a.Username, a.PasswordSHA, a.RootPath, a.ReadOnly,
+			a.ProtectSystemFiles, a.QuotaBytes, a.CreatedAtUnix, a.UpdatedAtUnix,
+		); err != nil {
+			return err
 		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
 	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpName, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, s.path)
+	return tx.Commit()
 }
 
 // isProtectedFilename returns true if the given basename should be

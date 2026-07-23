@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/gob"
 	"encoding/hex"
 	"encoding/json"
@@ -11,8 +12,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -44,10 +43,9 @@ type LoginUser struct {
 	Provider string `json:"provider"`
 }
 
-// loginCredentials is the on-disk shape of auth-state.json. The file is
-// intentionally a tiny, hand-written struct (no schema versioning) so
-// operators can `cat` it. Atomicity on save is provided by write-to-temp
-// + os.Rename below.
+// loginCredentials is the shape of the single row in the login_credentials
+// table. Kept as a plain struct (no schema versioning) — the row is a
+// singleton keyed on id=1.
 type loginCredentials struct {
 	Username      string `json:"username"`
 	PasswordSHA   string `json:"password_sha256"` // hex SHA-256
@@ -57,48 +55,65 @@ type loginCredentials struct {
 
 // loginState bundles the in-memory credentials with a mutex guarding
 // concurrent load/save. Loads are snapshot reads, saves are exclusive
-// writes — the actual on-disk file is updated atomically (write + fsync
-// + rename) so a crash mid-save can't leave a half-written JSON.
+// writes — persistence is backed by the SQLite login_credentials table
+// (see db.go), replacing the previous auth-state.json file.
 type loginState struct {
-	mu    sync.RWMutex
-	creds *loginCredentials
-	path  string
+	mu     sync.RWMutex
+	creds  *loginCredentials
+	db     *sql.DB
+	dbPath string // kept so tests can reopen the same DB to verify persistence
 }
 
-// load reads auth-state.json (or initialises defaults if missing), and
+// load reads the credentials row (or initialises defaults if absent), and
 // returns the in-memory state. Errors during read are logged but not
 // fatal — the server falls back to the default admin/admin credentials so
 // a misconfigured operator never locks themselves out of their own box.
 //
-// When the file is absent the defaults are kept in memory ONLY — no file
-// is written. This keeps transient runs (e.g. `gohttpserver --login` for
-// a quick test) from littering auth-state.json across the filesystem.
-// The file is created on the first successful changePassword call, which
-// is the moment the operator has actually chosen a secret worth keeping.
-func loadLoginCredentials(path string) *loginState {
-	st := &loginState{path: path}
-	data, err := os.ReadFile(path)
+// When no row exists the defaults are kept in memory ONLY — nothing is
+// written. This keeps transient runs (e.g. `gohttpserver --login` for a
+// quick test) from persisting credentials. The row is created on the first
+// successful changePassword call, which is the moment the operator has
+// actually chosen a secret worth keeping.
+func loadLoginCredentials(db *sql.DB) *loginState {
+	return loadLoginCredentialsAt(db, "")
+}
+
+// loadLoginCredentialsAt is loadLoginCredentials with the database path
+// recorded on the returned state. Tests use the path to reopen the same
+// DB to verify persistence.
+func loadLoginCredentialsAt(db *sql.DB, path string) *loginState {
+	st := &loginState{db: db, dbPath: path}
+	var c loginCredentials
+	err := db.QueryRow(
+		"SELECT username, password_sha256, created_at, updated_at FROM login_credentials WHERE id = 1",
+	).Scan(&c.Username, &c.PasswordSHA, &c.CreatedAtUnix, &c.UpdatedAtUnix)
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			log.Printf("login: failed to read %s (%v); using default credentials", path, err)
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("login: failed to read credentials (%v); using default credentials", err)
 		}
 		st.creds = defaultLoginCredentials()
-		log.Printf("login: no %s found; using in-memory default credentials (admin/admin). " +
-			"Change the password via PUT /-/api/auth/password to persist a new one.", path)
+		log.Printf("login: no stored credentials; using in-memory default credentials (admin/admin). " +
+			"Change the password via PUT /-/api/auth/password to persist a new one.")
 		return st
 	}
-
-	var c loginCredentials
-	if err := json.Unmarshal(data, &c); err != nil {
-		log.Printf("login: %s is not valid JSON (%v); using default credentials", path, err)
-		c = *defaultLoginCredentials()
-	}
 	if c.Username == "" || c.PasswordSHA == "" {
-		log.Printf("login: %s missing username or password; using default credentials", path)
+		log.Printf("login: stored credentials missing username or password; using default credentials")
 		c = *defaultLoginCredentials()
 	}
 	st.creds = &c
 	return st
+}
+
+// loginFromDB opens the database at path and loads credentials. Used by
+// tests that need to verify the on-disk state was actually written (they
+// call loginFromDB after a changePassword to confirm the row persisted
+// across an SQLite reopen).
+func loginFromDB(path string) (*loginState, error) {
+	db, err := openDB(path)
+	if err != nil {
+		return nil, err
+	}
+	return loadLoginCredentialsAt(db, path), nil
 }
 
 // defaultLoginCredentials returns admin/admin (SHA-256). Hex string is
@@ -188,57 +203,24 @@ func (s *loginState) credsUsername() string {
 	return s.creds.Username
 }
 
-// save writes the credentials to disk atomically. Callers must hold
+// saveLocked upserts the singleton credentials row. Callers must hold
 // s.mu in write mode (via saveLocked) — the public save() helper below
-// does the right locking.
+// does the right locking. SQLite gives us atomicity for free.
 func (s *loginState) saveLocked() error {
 	if s.creds == nil {
 		return errors.New("login: no credentials loaded")
 	}
-	data, err := json.MarshalIndent(s.creds, "", "  ")
-	if err != nil {
-		return err
-	}
-	dir := filepath.Dir(s.path)
-	if dir != "" && dir != "." {
-		if mkErr := os.MkdirAll(dir, 0o700); mkErr != nil {
-			return mkErr
-		}
-	}
-	tmp, err := os.CreateTemp(dir, "auth-state-*.json.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer func() {
-		// If we never renamed, clean up the temp file.
-		if _, statErr := os.Stat(tmpName); statErr == nil {
-			os.Remove(tmpName)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpName, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, s.path)
-}
-
-// save is the locking wrapper around saveLocked; used during initial
-// load to persist defaulted credentials.
-func (s *loginState) save() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.saveLocked()
+	_, err := s.db.Exec(
+		`INSERT INTO login_credentials (id, username, password_sha256, created_at, updated_at)
+		 VALUES (1, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   username = excluded.username,
+		   password_sha256 = excluded.password_sha256,
+		   created_at = excluded.created_at,
+		   updated_at = excluded.updated_at`,
+		s.creds.Username, s.creds.PasswordSHA, s.creds.CreatedAtUnix, s.creds.UpdatedAtUnix,
+	)
+	return err
 }
 
 // ─── Routes / middleware ────────────────────────────────────────────────
