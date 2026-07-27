@@ -36,6 +36,7 @@ INSTALL_DIR="/opt/gohttpserver"
 DATA_DIR="/opt/gohttpserver/data"
 SERVICE_NAME="gohttpserver"
 BINARY_PATH="$INSTALL_DIR/gohttpserver"
+DB_FILE="$INSTALL_DIR/gohttpserver.db"
 DEFAULT_PORT="8000"
 LISTEN_PORT=""
 REPO="toluckykoi/gohttpserver"
@@ -708,6 +709,14 @@ uninstall_gohttpserver() {
         delete_data=true
     fi
 
+    # 询问是否删除登录数据库（使用 --login 时生成）
+    local delete_db=false
+    if [ -f "$DB_FILE" ]; then
+        if ui_yesno "删除登录数据库" "检测到登录数据库：$DB_FILE\n\n该数据库保存了登录账号信息（使用 --login 功能时生成）。\n是否一并删除？\n此操作不可恢复！"; then
+            delete_db=true
+        fi
+    fi
+
     if check_systemd; then
         log_step "停止并禁用服务..."
         systemctl stop ${SERVICE_NAME}.service >/dev/null 2>&1
@@ -719,11 +728,16 @@ uninstall_gohttpserver() {
 
     log_step "删除二进制文件..."
     rm -f "$BINARY_PATH"
-    # 尝试在目录为空时删除该目录
-    rmdir "$INSTALL_DIR" 2>/dev/null || log_info "安装目录 $INSTALL_DIR 不为空，未删除"
     log_success "GoHTTPServer 二进制文件已删除"
 
-    # 根据用户选择处理数据目录
+    # 删除登录数据库（含 SQLite 的 -shm / -wal 附属文件）
+    if [ "$delete_db" = true ]; then
+        log_step "删除登录数据库..."
+        rm -f "$DB_FILE" "${DB_FILE}-shm" "${DB_FILE}-wal"
+        log_success "登录数据库已删除"
+    fi
+
+    # 删除用户数据目录
     if [ "$delete_data" = true ]; then
         log_step "删除用户数据..."
         if [ -d "$DATA_DIR" ]; then
@@ -732,7 +746,23 @@ uninstall_gohttpserver() {
         else
             log_info "数据目录不存在：$DATA_DIR"
         fi
-        ui_msgbox "卸载完成" "GoHTTPServer 卸载完成。\n\n二进制文件和用户数据均已删除。"
+    fi
+
+    # 不保留任何数据时（用户数据已删且无数据库残留），删除整个安装目录
+    if [ "$delete_data" = true ] && [ ! -f "$DB_FILE" ]; then
+        log_step "删除安装目录..."
+        rm -rf "$INSTALL_DIR"
+        log_success "安装目录已删除：$INSTALL_DIR"
+    else
+        # 尝试在目录为空时删除该目录
+        rmdir "$INSTALL_DIR" 2>/dev/null || log_info "安装目录 $INSTALL_DIR 不为空，未删除"
+    fi
+
+    # 卸载结果提示（依据安装目录是否仍存在）
+    if [ ! -d "$INSTALL_DIR" ]; then
+        ui_msgbox "卸载完成" "GoHTTPServer 卸载完成。\n\n二进制文件、用户数据及安装目录均已删除。"
+    elif [ "$delete_data" = true ]; then
+        ui_msgbox "卸载完成" "GoHTTPServer 卸载完成。\n\n用户数据已删除。\n安装目录保留：$INSTALL_DIR"
     else
         ui_msgbox "卸载完成" "GoHTTPServer 卸载完成。\n\n数据文件保留在 $DATA_DIR"
     fi
