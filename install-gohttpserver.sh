@@ -587,7 +587,7 @@ After=network.target
 [Service]
 Type=simple
 ExecStart=${BINARY_PATH} ${exec_args}
-WorkingDirectory=${ROOT_DIR}
+WorkingDirectory=${INSTALL_DIR}
 Restart=always
 User=root
 
