@@ -184,6 +184,61 @@ export function useAdminApi() {
     )
   }
 
+  /** Fetch FRP client status including enabled state, running state, and config. */
+  async function fetchFRPStatus(): Promise<ApiResult<{
+    enabled: boolean
+    running: boolean
+    config?: {
+      serverAddr: string
+      serverPort: number
+      authToken: string
+      proxyName: string
+      proxyType: string
+      localIP: string
+      localPort: number
+      remotePort: number
+    }
+  }>> {
+    return send(
+      '/-/api/admin/frp/status',
+      { method: 'GET' },
+      async (res) => await res.json() as any,
+    )
+  }
+
+  /** Enable or disable the FRP client. */
+  async function setFRPEnabled(enabled: boolean): Promise<ApiResult<{ enabled: boolean }>> {
+    return send(
+      '/-/api/admin/frp/enabled',
+      {
+        method: 'PUT',
+        body: JSON.stringify({ enabled }),
+      },
+      async (res) => await res.json() as { enabled: boolean },
+    )
+  }
+
+  /** Update FRP client configuration. */
+  async function updateFRPConfig(req: {
+    serverAddr: string
+    serverPort: number
+    authToken: string
+    proxyName: string
+    proxyType: string
+    localIP: string
+    localPort: number
+    remotePort: number
+  }): Promise<ApiResult<null>> {
+    return send(
+      '/-/api/admin/frp/config',
+      {
+        method: 'PUT',
+        body: JSON.stringify(req),
+      },
+      async () => null,
+    )
+  }
+
   return {
     fetchProfile,
     changeUsername,
@@ -195,6 +250,9 @@ export function useAdminApi() {
     deleteWebdavAccount,
     resetWebdavPassword,
     recalculateWebdavUsage,
+    fetchFRPStatus,
+    setFRPEnabled,
+    updateFRPConfig,
   }
 }
 

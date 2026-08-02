@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gorilla/mux"
@@ -22,6 +24,11 @@ type adminAPI struct {
 	// root is the --root filesystem path; needed by the recalculate
 	// endpoint to walk each account's chroot.
 	root string
+	// localAddr is the program's listening address (IP:port)
+	localAddr string
+	// frp is the FRP client manager; nil-safe — handlers degrade to
+	// returning disabled status when frp is unset.
+	frp *FRPClient
 }
 
 // registerAdminRoutes wires every /-/api/admin/* endpoint onto the
@@ -50,6 +57,11 @@ func registerAdminRoutes(router *mux.Router, api *adminAPI) {
 	router.HandleFunc("/-/api/admin/webdav/accounts/{id}", api.handleWebdavDelete).Methods("DELETE")
 	router.HandleFunc("/-/api/admin/webdav/accounts/{id}/reset-password", api.handleWebdavResetPassword).Methods("POST")
 	router.HandleFunc("/-/api/admin/webdav/recalculate-usage", api.handleWebdavRecalculateUsage).Methods("POST")
+
+	// FRP endpoints
+	router.HandleFunc("/-/api/admin/frp/status", api.handleFRPStatus).Methods("GET")
+	router.HandleFunc("/-/api/admin/frp/enabled", api.handleFRPSetEnabled).Methods("PUT")
+	router.HandleFunc("/-/api/admin/frp/config", api.handleFRPUpdateConfig).Methods("PUT")
 }
 
 // handleProfile returns the current user's profile information. The
@@ -378,4 +390,117 @@ func (api *adminAPI) webdavAccountPublic(a webdavAccount) map[string]any {
 		"created_at":           a.CreatedAtUnix,
 		"updated_at":           a.UpdatedAtUnix,
 	}
+}
+
+// handleFRPStatus returns the current FRP client status including
+// enabled state, running state, and configuration.
+func (api *adminAPI) handleFRPStatus(w http.ResponseWriter, r *http.Request) {
+	if userFromLoginSession(r) == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if api.frp == nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"enabled": false,
+			"running": false,
+		})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(api.frp.Status())
+}
+
+// handleFRPSetEnabled toggles the FRP client on/off. Body:
+// {"enabled": true|false}.
+func (api *adminAPI) handleFRPSetEnabled(w http.ResponseWriter, r *http.Request) {
+	if userFromLoginSession(r) == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if api.frp == nil {
+		http.Error(w, "FRP client not initialized", http.StatusServiceUnavailable)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 256))
+	if err != nil {
+		http.Error(w, "Body too large or unreadable", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if err := api.frp.SetEnabled(req.Enabled); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "enabled": req.Enabled})
+}
+
+// handleFRPUpdateConfig updates the FRP client configuration and
+// restarts the client if needed. Body: JSON with FRP configuration fields.
+func (api *adminAPI) handleFRPUpdateConfig(w http.ResponseWriter, r *http.Request) {
+	if userFromLoginSession(r) == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if api.frp == nil {
+		http.Error(w, "FRP client not initialized", http.StatusServiceUnavailable)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4096))
+	if err != nil {
+		http.Error(w, "Body too large or unreadable", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		ServerAddr string `json:"serverAddr"`
+		ServerPort int    `json:"serverPort"`
+		AuthToken  string `json:"authToken"`
+		ProxyName  string `json:"proxyName"`
+		ProxyType  string `json:"proxyType"`
+		LocalIP    string `json:"localIP"`
+		LocalPort  int    `json:"localPort"`
+		RemotePort int    `json:"remotePort"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	cfg := &FRPConfig{
+		ServerAddr: req.ServerAddr,
+		ServerPort: req.ServerPort,
+		AuthToken:  req.AuthToken,
+		ProxyName:  req.ProxyName,
+		ProxyType:  req.ProxyType,
+		LocalIP:    req.LocalIP,
+		LocalPort:  req.LocalPort,
+		RemotePort: req.RemotePort,
+	}
+	// Auto-fill local address from program's listening address if not specified
+	if cfg.LocalIP == "" || cfg.LocalIP == "127.0.0.1" {
+		if api.localAddr != "" {
+			if host, portStr, err := net.SplitHostPort(api.localAddr); err == nil {
+				if host != "" && host != "0.0.0.0" && host != "::" {
+					cfg.LocalIP = host
+				} else if lanIP := getLocalIP(); lanIP != "" {
+					cfg.LocalIP = lanIP
+				}
+				if p, err := strconv.Atoi(portStr); err == nil && cfg.LocalPort == 0 {
+					cfg.LocalPort = p
+				}
+			}
+		}
+	}
+	if err := api.frp.UpdateConfig(cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
 }

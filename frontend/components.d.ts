@@ -59,6 +59,7 @@ declare module 'vue' {
     FileList: typeof import('./src/components/FileList.vue')['default']
     FileStore: typeof import('./src/stores/fileStore.ts')['default']
     FormatBytes: typeof import('./src/utils/formatBytes.ts')['default']
+    FrpSection: typeof import('./src/components/admin/FrpSection.vue')['default']
     ImagePreviewModal: typeof import('./src/components/ImagePreviewModal.vue')['default']
     Login: typeof import('./src/views/Login.vue')['default']
     Main: typeof import('./src/main.ts')['default']

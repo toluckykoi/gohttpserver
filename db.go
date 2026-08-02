@@ -56,6 +56,20 @@ CREATE TABLE IF NOT EXISTS storage_usage (
 	account_id TEXT PRIMARY KEY,
 	used_bytes INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS frp_config (
+	id              INTEGER PRIMARY KEY CHECK (id = 1),
+	enabled         INTEGER NOT NULL DEFAULT 0,
+	server_addr     TEXT NOT NULL DEFAULT '',
+	server_port     INTEGER NOT NULL DEFAULT 7000,
+	auth_token      TEXT NOT NULL DEFAULT '',
+	proxy_name      TEXT NOT NULL DEFAULT 'gohttpserver',
+	proxy_type      TEXT NOT NULL DEFAULT 'tcp',
+	local_ip        TEXT NOT NULL DEFAULT '127.0.0.1',
+	local_port      INTEGER NOT NULL DEFAULT 8000,
+	remote_port     INTEGER NOT NULL DEFAULT 30000,
+	updated_at      INTEGER NOT NULL
+);
 `
 
 // openDB opens (creating if needed) the SQLite database at path and ensures

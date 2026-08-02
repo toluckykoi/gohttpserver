@@ -59,6 +59,17 @@ type Configure struct {
 	Login            bool   `yaml:"login"`
 	DB               string `yaml:"db"`
 	SessionTTL       time.Duration `yaml:"session-ttl"`
+	FRP              struct {
+		Enabled    bool   `yaml:"enabled"`
+		ServerAddr string `yaml:"serverAddr"`
+		ServerPort int    `yaml:"serverPort"`
+		AuthToken  string `yaml:"authToken"`
+		ProxyName  string `yaml:"proxyName"`
+		ProxyType  string `yaml:"proxyType"`
+		LocalIP    string `yaml:"localIP"`
+		LocalPort  int    `yaml:"localPort"`
+		RemotePort int    `yaml:"remotePort"`
+	} `yaml:"frp"`
 }
 
 type httpLogger struct{}
@@ -318,6 +329,109 @@ func main() {
 		})
 	}
 
+	// Normalize address early for FRP auto-configuration
+	if gcfg.Addr == "" {
+		gcfg.Addr = fmt.Sprintf(":%d", gcfg.Port)
+	}
+	if !strings.Contains(gcfg.Addr, ":") {
+		gcfg.Addr = ":" + gcfg.Addr
+	}
+
+	// Parse local address for FRP auto-configuration
+	// When binding to 0.0.0.0 or ::, use getLocalIP() to get the real LAN IP
+	// When binding to a specific IP, use that IP
+	localIP := "127.0.0.1"
+	localPort := gcfg.Port
+	if gcfg.Addr != "" {
+		if host, portStr, err := net.SplitHostPort(gcfg.Addr); err == nil {
+			// If binding to all interfaces, get the real LAN IP
+			if host == "" || host == "0.0.0.0" || host == "::" {
+				if lanIP := getLocalIP(); lanIP != "" {
+					localIP = lanIP
+				}
+			} else {
+				// Binding to a specific IP, use it directly
+				localIP = host
+			}
+			if p, err := strconv.Atoi(portStr); err == nil {
+				localPort = p
+			}
+		}
+	}
+
+	// Open database for FRP config persistence (and login/webdav if enabled)
+	// Keep the database in the CURRENT WORKING DIRECTORY, not under
+	// gcfg.Root. gcfg.Root is what gohttpserver serves over HTTP —
+	// putting gohttpserver.db there would let any config mistake (a
+	// misordered middleware, a future route that bypasses the gate,
+	// a --prefix edge case) expose the password hash via a simple
+	// GET /gohttpserver.db. The working directory is the conventional
+	// spot for server-side state and is never served by the file
+	// handler.
+	dbPath := gcfg.DB
+	if dbPath == "" {
+		dbPath = "gohttpserver.db"
+	}
+	db, err := openDB(dbPath)
+	if err != nil {
+		log.Fatalf("open database %q: %v", dbPath, err)
+	}
+	defer db.Close()
+
+	// FRP client initialization with database for config persistence
+	frpClient := NewFRPClient(db)
+
+	// Try to load FRP config from database first
+	dbFRPCfg, dbFRPEnabled, err := frpClient.LoadFromDB()
+	if err != nil {
+		log.Printf("FRP load config from DB error: %v", err)
+	}
+
+	// Auto-fill LocalIP and LocalPort from program's listening address
+	frpLocalIP := gcfg.FRP.LocalIP
+	if frpLocalIP == "" || frpLocalIP == "127.0.0.1" {
+		frpLocalIP = localIP
+	}
+	frpLocalPort := gcfg.FRP.LocalPort
+	if frpLocalPort == 0 {
+		frpLocalPort = localPort
+	}
+
+	// Determine which config to use: config file takes precedence over database
+	var frpCfg *FRPConfig
+	var frpEnabled bool
+
+	if gcfg.FRP.Enabled || gcfg.FRP.ServerAddr != "" {
+		// Config file has FRP settings, use them
+		frpCfg = &FRPConfig{
+			ServerAddr: gcfg.FRP.ServerAddr,
+			ServerPort: gcfg.FRP.ServerPort,
+			AuthToken:  gcfg.FRP.AuthToken,
+			ProxyName:  gcfg.FRP.ProxyName,
+			ProxyType:  gcfg.FRP.ProxyType,
+			LocalIP:    frpLocalIP,
+			LocalPort:  frpLocalPort,
+			RemotePort: gcfg.FRP.RemotePort,
+		}
+		frpEnabled = gcfg.FRP.Enabled
+	} else if dbFRPCfg != nil {
+		// No config file settings, use database config
+		frpCfg = dbFRPCfg
+		frpEnabled = dbFRPEnabled
+	}
+
+	// Apply FRP config if available
+	if frpCfg != nil {
+		if err := frpClient.UpdateConfig(frpCfg); err != nil {
+			log.Printf("FRP config error: %v", err)
+		}
+		if frpEnabled {
+			if err := frpClient.SetEnabled(true); err != nil {
+				log.Printf("FRP start error: %v", err)
+			}
+		}
+	}
+
 	// --login gate. When enabled, an independent username/password login
 	// flow shadows every other auth-type. Must be installed BEFORE the
 	// HTTP Basic / OpenID / oauth2-proxy switch so the gate covers those
@@ -325,24 +439,6 @@ func main() {
 	// would otherwise only HTTP-basic-gate on top of an un-gated server).
 	var loginStateObj *loginState
 	if gcfg.Login {
-		// Keep the database in the CURRENT WORKING DIRECTORY, not under
-		// gcfg.Root. gcfg.Root is what gohttpserver serves over HTTP —
-		// putting gohttpserver.db there would let any config mistake (a
-		// misordered middleware, a future route that bypasses the gate,
-		// a --prefix edge case) expose the password hash via a simple
-		// GET /gohttpserver.db. The working directory is the conventional
-		// spot for server-side state and is never served by the file
-		// handler.
-		dbPath := gcfg.DB
-		if dbPath == "" {
-			dbPath = "gohttpserver.db"
-		}
-		db, err := openDB(dbPath)
-		if err != nil {
-			log.Fatalf("login: open database %q: %v", dbPath, err)
-		}
-		defer db.Close()
-
 		loginStateObj = loadLoginCredentials(db)
 		// Routes must be registered BEFORE the catch-all router.PathPrefix("/").Handler(hdlr)
 		// below so mux routes /-/login specifically. Middleware is added to
@@ -389,10 +485,19 @@ func main() {
 		// loginWhitelist), so an unauthenticated request is redirected
 		// to /-/login rather than reaching the handlers.
 		registerAdminRoutes(router, &adminAPI{
-			login:  loginStateObj,
-			webdav: webdavState,
-			usage:  usageStateObj,
-			root:   gcfg.Root,
+			login:     loginStateObj,
+			webdav:    webdavState,
+			usage:     usageStateObj,
+			root:      gcfg.Root,
+			localAddr: gcfg.Addr,
+			frp:       frpClient,
+		})
+	} else {
+		// When login is disabled, still register FRP routes but without
+		// authentication. This allows FRP management if needed.
+		registerAdminRoutes(router, &adminAPI{
+			localAddr: gcfg.Addr,
+			frp:       frpClient,
 		})
 	}
 
@@ -499,7 +604,6 @@ func main() {
 		store.Options.Secure = true
 	}
 
-	var err error
 	if gcfg.Key != "" && gcfg.Cert != "" {
 		err = srv.ListenAndServeTLS(gcfg.Cert, gcfg.Key)
 	} else {

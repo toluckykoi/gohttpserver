@@ -44,6 +44,16 @@
             </template>
             <SettingsSection v-if="activeTab === 'settings'" />
           </el-tab-pane>
+
+          <el-tab-pane name="frp">
+            <template #label>
+              <span class="admin-tab-label">
+                <el-icon><Connection /></el-icon>
+                <span class="admin-tab-text">FRP</span>
+              </span>
+            </template>
+            <FrpSection v-if="activeTab === 'frp'" />
+          </el-tab-pane>
         </el-tabs>
       </div>
     </div>
@@ -52,16 +62,17 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount } from 'vue'
-import { Close, UserFilled, Setting } from '@element-plus/icons-vue'
+import { Close, UserFilled, Setting, Connection } from '@element-plus/icons-vue'
 import ProfileSection from '@/components/admin/ProfileSection.vue'
 import SettingsSection from '@/components/admin/SettingsSection.vue'
+import FrpSection from '@/components/admin/FrpSection.vue'
 
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'username-changed', value: string): void
 }>()
 
-const activeTab = ref<'profile' | 'settings'>('profile')
+const activeTab = ref<'profile' | 'settings' | 'frp'>('profile')
 
 // Phone breakpoint — same threshold as App.vue's isPhone so the panel
 // matches the rest of the app's responsive behaviour.

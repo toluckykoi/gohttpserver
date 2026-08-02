@@ -18,6 +18,24 @@ export const useAdminStore = defineStore('admin', () => {
   const webdavLoaded = ref(false)
   const webdavLoading = ref(false)
 
+  // ─── FRP tab state ────────────────────────────────────────────────
+  const frpStatus = ref<{
+    enabled: boolean
+    running: boolean
+    config?: {
+      serverAddr: string
+      serverPort: number
+      authToken: string
+      proxyName: string
+      proxyType: string
+      localIP: string
+      localPort: number
+      remotePort: number
+    }
+  } | null>(null)
+  const frpLoaded = ref(false)
+  const frpLoading = ref(false)
+
   // Plaintext WebDAV passwords, cached locally. The server only ever
   // returns a password once (at create / reset time) and stores only a
   // hash afterwards — so to let the operator re-view a password in the
@@ -207,6 +225,48 @@ export const useAdminStore = defineStore('admin', () => {
     return res
   }
 
+  // ─── FRP actions ──────────────────────────────────────────────────
+  async function loadFRPStatus() {
+    frpLoading.value = true
+    const res = await api.fetchFRPStatus()
+    if (res.ok) {
+      frpStatus.value = res.data
+    } else {
+      frpStatus.value = null
+    }
+    frpLoaded.value = true
+    frpLoading.value = false
+    return res
+  }
+
+  async function setFRPEnabled(enabled: boolean) {
+    const res = await api.setFRPEnabled(enabled)
+    if (res.ok && frpStatus.value) {
+      frpStatus.value = { ...frpStatus.value, enabled }
+    }
+    return res
+  }
+
+  async function updateFRPConfig(req: {
+    serverAddr: string
+    serverPort: number
+    authToken: string
+    proxyName: string
+    proxyType: string
+    localIP: string
+    localPort: number
+    remotePort: number
+  }) {
+    const res = await api.updateFRPConfig(req)
+    if (res.ok && frpStatus.value) {
+      frpStatus.value = {
+        ...frpStatus.value,
+        config: { ...req },
+      }
+    }
+    return res
+  }
+
   // ─── Computed convenience accessors ───────────────────────────────
   const webdavEnabled = computed(() => webdavStatus.value?.enabled ?? false)
   const webdavAccounts = computed<WebdavAccount[]>(
@@ -236,5 +296,12 @@ export const useAdminStore = defineStore('admin', () => {
     resetWebdavPassword,
     recalculateWebdavUsage,
     getWebdavPassword,
+    // frp
+    frpStatus,
+    frpLoaded,
+    frpLoading,
+    loadFRPStatus,
+    setFRPEnabled,
+    updateFRPConfig,
   }
 })
