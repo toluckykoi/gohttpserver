@@ -37,7 +37,17 @@ import (
 
 const YAMLCONF = ".ghs.yml"
 
-const contentSecurityPolicy = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://www.google-analytics.com https://www.googletagmanager.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://www.google-analytics.com https://www.googletagmanager.com; font-src 'self' data:; media-src 'self'; connect-src 'self' https://www.google-analytics.com https://www.googletagmanager.com; form-action 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'"
+const contentSecurityPolicy = "default-src 'self'; script-src 'self' 'unsafe-inline' https://www.google-analytics.com https://www.googletagmanager.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://www.google-analytics.com https://www.googletagmanager.com; font-src 'self' data:; media-src 'self'; connect-src 'self' https://www.google-analytics.com https://www.googletagmanager.com; form-action 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'"
+
+// maxUploadSize caps the size of file uploads (10 GiB). Prevents a single
+// upload from exhausting disk space. Set via --max-upload flag if needed.
+const maxUploadSize int64 = 10 * 1024 * 1024 * 1024
+
+// maxZipExpansionRatio rejects zip files whose uncompressed size exceeds
+// this multiple of the compressed size. A ratio > 100:1 is almost always
+// a zip bomb (typical text/code compresses ~3-10x; only highly repetitive
+// binary data achieves >100x).
+const maxZipExpansionRatio = 100
 
 type ApkInfo struct {
 	PackageName  string `json:"packageName"`
@@ -82,10 +92,6 @@ type HTTPStaticServer struct {
 }
 
 func NewHTTPStaticServer(root string, noIndex bool) *HTTPStaticServer {
-	// if root == "" {
-	// 	root = "./"
-	// }
-	// root = filepath.ToSlash(root)
 	root = filepath.ToSlash(filepath.Clean(root))
 	if !strings.HasSuffix(root, "/") {
 		root = root + "/"
@@ -110,8 +116,7 @@ func NewHTTPStaticServer(root string, noIndex bool) *HTTPStaticServer {
 				log.Println("Started making search index")
 				s.makeIndex()
 				log.Printf("Completed search index in %v", time.Since(startTime))
-				//time.Sleep(time.Second * 1)
-				time.Sleep(time.Minute * 10)
+			time.Sleep(time.Minute * 10)
 			}
 		}()
 	}
@@ -156,8 +161,16 @@ func NewHTTPStaticServer(root string, noIndex bool) *HTTPStaticServer {
 }
 
 func (s *HTTPStaticServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Defense-in-depth for uploaded content and README previews.
+	// Security headers - defense in depth
 	w.Header().Set("Content-Security-Policy", contentSecurityPolicy)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+	w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+	// HSTS only when serving over TLS
+	if r.TLS != nil {
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+	}
 	s.m.ServeHTTP(w, r)
 }
 
@@ -215,7 +228,7 @@ func (s *HTTPStaticServer) hIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Println("GET", path, realPath)
+	log.Println("GET", sanitizeLogInput(path), sanitizeLogInput(realPath))
 	if r.FormValue("raw") == "false" || isDir(realPath) {
 		if r.Method == "HEAD" {
 			return
@@ -266,7 +279,7 @@ func (s *HTTPStaticServer) hDelete(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		// Log the detailed error internally; return a generic message so
 		// the response body doesn't leak the server's absolute path.
-		log.Printf("delete %q failed: %v", realPath, err)
+		log.Printf("delete %q failed: %v", sanitizeLogInput(realPath), err)
 		http.Error(w, "Delete failed", http.StatusInternalServerError)
 		return
 	}
@@ -289,7 +302,7 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 
 	if _, err := os.Stat(dirpath); os.IsNotExist(err) {
 		if err := os.MkdirAll(dirpath, os.ModePerm); err != nil {
-			log.Printf("mkdir %q: %v", dirpath, err)
+			log.Printf("mkdir %q: %v", sanitizeLogInput(dirpath), err)
 			http.Error(w, "Directory create failed", http.StatusInternalServerError)
 			return
 		}
@@ -313,6 +326,13 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 		file.Close()
 		req.MultipartForm.RemoveAll() // Seen from go source code, req.MultipartForm not nil after call FormFile(..)
 	}()
+
+	// Check upload size limit to prevent disk exhaustion
+	if header.Size > maxUploadSize {
+		log.Printf("upload rejected: file size %d exceeds limit %d", header.Size, maxUploadSize)
+		http.Error(w, fmt.Sprintf("File too large (max %d bytes)", maxUploadSize), http.StatusRequestEntityTooLarge)
+		return
+	}
 
 	filename := req.FormValue("filename")
 	if filename == "" {
@@ -349,7 +369,7 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 		// create "MyFolder/" and "MyFolder/sub/" too.
 		if parent := filepath.Dir(dstPath); parent != dirpath {
 			if err := os.MkdirAll(parent, os.ModePerm); err != nil {
-				log.Printf("mkdir parent %q: %v", parent, err)
+				log.Printf("mkdir parent %q: %v", sanitizeLogInput(parent), err)
 				http.Error(w, "Directory create failed", http.StatusInternalServerError)
 				return
 			}
@@ -369,7 +389,7 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 	var copyErr error
 	dst, err := os.Create(dstPath)
 	if err != nil {
-		log.Printf("create file %q: %v", dstPath, err)
+		log.Printf("create file %q: %v", sanitizeLogInput(dstPath), err)
 		http.Error(w, "File create failed", http.StatusInternalServerError)
 		return
 	}
@@ -379,7 +399,7 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 	_, copyErr = io.CopyBuffer(dst, file, buf)
 	dst.Close()
 	if copyErr != nil {
-		log.Printf("upload copy %q: %v", dstPath, copyErr)
+		log.Printf("upload copy %q: %v", sanitizeLogInput(dstPath), copyErr)
 		http.Error(w, "Upload failed", http.StatusInternalServerError)
 		return
 	}
@@ -482,7 +502,7 @@ func (s *HTTPStaticServer) hEdit(w http.ResponseWriter, req *http.Request) {
 		if os.IsNotExist(err) {
 			http.Error(w, "File not found", http.StatusNotFound)
 		} else {
-			log.Printf("edit stat %q: %v", dstPath, err)
+			log.Printf("edit stat %q: %v", sanitizeLogInput(dstPath), err)
 			http.Error(w, "Stat failed", http.StatusInternalServerError)
 		}
 		return
@@ -526,7 +546,7 @@ func (s *HTTPStaticServer) hEdit(w http.ResponseWriter, req *http.Request) {
 
 	dst, err := os.Create(dstPath)
 	if err != nil {
-		log.Printf("edit create %q: %v", dstPath, err)
+		log.Printf("edit create %q: %v", sanitizeLogInput(dstPath), err)
 		http.Error(w, "File create failed", http.StatusInternalServerError)
 		return
 	}
@@ -542,7 +562,7 @@ func (s *HTTPStaticServer) hEdit(w http.ResponseWriter, req *http.Request) {
 		if cerr := dst.Close(); cerr == nil {
 			os.Truncate(dstPath, fi.Size())
 		}
-		log.Printf("edit copy %q: %v", dstPath, copyErr)
+		log.Printf("edit copy %q: %v", sanitizeLogInput(dstPath), copyErr)
 		http.Error(w, "Edit failed", http.StatusInternalServerError)
 		return
 	}
@@ -716,7 +736,7 @@ func (s *HTTPStaticServer) hFetch(w http.ResponseWriter, req *http.Request) {
 	// Make sure the parent dir exists (mirrors hUploadOrMkdir).
 	if _, err := os.Stat(dirpath); os.IsNotExist(err) {
 		if err := os.MkdirAll(dirpath, os.ModePerm); err != nil {
-			log.Printf("fetch mkdir %q: %v", dirpath, err)
+			log.Printf("fetch mkdir %q: %v", sanitizeLogInput(dirpath), err)
 			http.Error(w, "Directory create failed", http.StatusInternalServerError)
 			return
 		}
@@ -740,7 +760,7 @@ func (s *HTTPStaticServer) hFetch(w http.ResponseWriter, req *http.Request) {
 	httpReq, _ := http.NewRequestWithContext(req.Context(), "GET", parsed.String(), nil)
 	httpResp, err := client.Do(httpReq)
 	if err != nil {
-		log.Printf("fetch %q: %v", parsed.String(), err)
+		log.Printf("fetch %q: %v", sanitizeLogInput(parsed.String()), err)
 		http.Error(w, "Fetch failed", http.StatusBadGateway)
 		return
 	}
@@ -753,7 +773,7 @@ func (s *HTTPStaticServer) hFetch(w http.ResponseWriter, req *http.Request) {
 
 	dst, err := os.Create(dstPath)
 	if err != nil {
-		log.Printf("fetch create %q: %v", dstPath, err)
+		log.Printf("fetch create %q: %v", sanitizeLogInput(dstPath), err)
 		http.Error(w, "File create failed", http.StatusInternalServerError)
 		return
 	}
@@ -765,7 +785,7 @@ func (s *HTTPStaticServer) hFetch(w http.ResponseWriter, req *http.Request) {
 	if copyErr != nil {
 		// Roll back: drop the partial file. The user can re-trigger.
 		os.Remove(dstPath)
-		log.Printf("fetch copy %q: %v", dstPath, copyErr)
+		log.Printf("fetch copy %q: %v", sanitizeLogInput(dstPath), copyErr)
 		http.Error(w, "Fetch copy failed", http.StatusBadGateway)
 		return
 	}
@@ -866,7 +886,7 @@ func (s *HTTPStaticServer) hInfo(w http.ResponseWriter, r *http.Request) {
 		if os.IsNotExist(err) {
 			http.Error(w, "File not found", http.StatusNotFound)
 		} else {
-			log.Printf("info stat %q: %v", relPath, err)
+			log.Printf("info stat %q: %v", sanitizeLogInput(relPath), err)
 			http.Error(w, "Stat failed", http.StatusInternalServerError)
 		}
 		return
@@ -960,9 +980,14 @@ func (s *HTTPStaticServer) hZipMulti(w http.ResponseWriter, r *http.Request) {
 
 	for _, p := range req.Paths {
 		realPath := s.resolvePath(p)
+		// Verify the resolved path is under root to prevent path traversal
+		if !isUnderRoot(realPath, s.Root) {
+			log.Printf("zip-multi path traversal blocked: %q", sanitizeLogInput(realPath))
+			continue
+		}
 		info, err := os.Stat(realPath)
 		if err != nil {
-			log.Printf("zip-multi skip %q: %v", realPath, err)
+			log.Printf("zip-multi skip %q: %v", sanitizeLogInput(realPath), err)
 			continue
 		}
 
@@ -977,7 +1002,7 @@ func (s *HTTPStaticServer) hZipMulti(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					// Skip entries we can't read rather than aborting
 					// the whole archive.
-					log.Printf("zip-multi walk skip %q: %v", path, err)
+					log.Printf("zip-multi walk skip %q: %v", sanitizeLogInput(path), err)
 					return nil
 				}
 				if fi.Name() == YAMLCONF {
@@ -994,13 +1019,13 @@ func (s *HTTPStaticServer) hZipMulti(w http.ResponseWriter, r *http.Request) {
 				return zw.Add(zipPath, path)
 			})
 			if walkErr != nil {
-				log.Printf("zip-multi walk %q: %v", realPath, walkErr)
+				log.Printf("zip-multi walk %q: %v", sanitizeLogInput(realPath), walkErr)
 			}
 			continue
 		}
 
 		if err := zw.Add(entryName, realPath); err != nil {
-			log.Printf("zip-multi add %q: %v", realPath, err)
+			log.Printf("zip-multi add %q: %v", sanitizeLogInput(realPath), err)
 		}
 	}
 }
@@ -1026,7 +1051,7 @@ func (s *HTTPStaticServer) hUnzip(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Log the detailed error (may contain the absolute archive path);
 		// return a generic message so the response body doesn't leak it.
-		log.Printf("unzip %q: %v", absZip, err)
+		log.Printf("unzip %q: %v", sanitizeLogInput(absZip), err)
 		http.Error(w, "Extract failed", http.StatusInternalServerError)
 		return
 	}
@@ -1052,7 +1077,7 @@ func (s *HTTPStaticServer) hPlist(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// parseIPA opens the zip on disk; its error may contain the
 		// absolute server path (e.g. "open /srv/foo.ipa: ...").
-		log.Printf("plist parse %q: %v", relPath, err)
+		log.Printf("plist parse %q: %v", sanitizeLogInput(relPath), err)
 		http.Error(w, "Failed to parse IPA", http.StatusInternalServerError)
 		return
 	}
@@ -1378,7 +1403,7 @@ func (s *HTTPStaticServer) hJSONList(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			// err contains the absolute server path; log it internally
 			// and return a generic message to the client.
-			log.Printf("readdir %q: %v", realPath, err)
+			log.Printf("readdir %q: %v", sanitizeLogInput(realPath), err)
 			http.Error(w, "Failed to list directory", http.StatusInternalServerError)
 			return
 		}
@@ -1706,7 +1731,7 @@ func renderHTML(w http.ResponseWriter, name, content string, v any) {
 
 func checkFilename(name string) error {
 	if strings.ContainsAny(name, "\\/:*<>|") {
-		return errors.New("Name should not contains \\/:*<>|")
+		return errors.New("name should not contain \\/:*<>|")
 	}
 	return nil
 }
@@ -1732,10 +1757,10 @@ func isUnderRoot(path, root string) bool {
 // past the split.
 func checkPathSegment(seg string) error {
 	if seg == "" || seg == "." || seg == ".." {
-		return errors.New("Invalid path segment")
+		return errors.New("invalid path segment")
 	}
 	if strings.ContainsAny(seg, "\\:*<>|\"\x00") {
-		return errors.New("Path segment should not contain \\:*<>|\"")
+		return errors.New("path segment should not contain \\:*<>|\"")
 	}
 	return nil
 }

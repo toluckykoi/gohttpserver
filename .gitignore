@@ -39,6 +39,7 @@ testdata/test
 auth-state.json
 storage-usage.json
 webdav-accounts.json
+frp-encryption.key
 gohttpserver.db
 gohttpserver.db-wal
 gohttpserver.db-shm

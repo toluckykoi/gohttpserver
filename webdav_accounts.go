@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // webdavAccount is a single WebDAV credential entry. The username is
@@ -124,6 +126,9 @@ func loadWebdavAccountsAt(db *sql.DB, path string) *webdavAccountState {
 		}
 		st.data.Accounts = append(st.data.Accounts, a)
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("webdav: error iterating accounts: %v", err)
+	}
 	log.Printf("webdav: loaded %d account(s) (enabled=%v)", len(st.data.Accounts), st.data.Enabled)
 	return st
 }
@@ -223,12 +228,17 @@ func (s *webdavAccountState) createAccount(req createAccountRequest, loginUserna
 	if err != nil {
 		return webdavAccount{}, "", fmt.Errorf("generate password: %w", err)
 	}
+	// Use bcrypt for password hashing
+	hash, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
+	if err != nil {
+		return webdavAccount{}, "", fmt.Errorf("hash password: %w", err)
+	}
 	now := time.Now().Unix()
 	acc := webdavAccount{
 		ID:                 id,
 		Remark:             req.Remark,
 		Username:           loginUsername,
-		PasswordSHA:        sha256Hex(pw),
+		PasswordSHA:        string(hash),
 		RootPath:           root,
 		ReadOnly:           req.ReadOnly,
 		ProtectSystemFiles: req.ProtectSystemFiles,
@@ -327,7 +337,12 @@ func (s *webdavAccountState) resetPassword(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	s.data.Accounts[idx].PasswordSHA = sha256Hex(pw)
+	// Use bcrypt for password hashing
+	hash, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	s.data.Accounts[idx].PasswordSHA = string(hash)
 	s.data.Accounts[idx].UpdatedAtUnix = time.Now().Unix()
 	if err := s.saveLocked(); err != nil {
 		return "", err
@@ -409,8 +424,8 @@ func (s *webdavAccountState) syncUsernamesTo(oldName, newName string) (int, erro
 
 // verifyWebdav looks up an account by username and checks the password.
 // Returns the matching account (copied, safe for caller to mutate) and
-// true on success, or zero-value + false on any failure. Constant-time
-// comparison is used for the password hash.
+// true on success, or zero-value + false on any failure.
+// Supports both bcrypt (new) and SHA-256 (legacy) password hashes.
 //
 // Multiple accounts may share the same username (the admin can create
 // several accounts bound to "admin" with different root_path / readonly
@@ -424,7 +439,6 @@ func (s *webdavAccountState) syncUsernamesTo(oldName, newName string) (int, erro
 func (s *webdavAccountState) verifyWebdav(username, password string) (webdavAccount, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	givenHash := sha256Hex(password)
 	var matched webdavAccount
 	found := false
 	userMatched := 0
@@ -433,10 +447,24 @@ func (s *webdavAccountState) verifyWebdav(username, password string) (webdavAcco
 			continue
 		}
 		userMatched++
-		if subtle.ConstantTimeCompare([]byte(givenHash), []byte(acc.PasswordSHA)) == 1 {
-			matched = acc
-			found = true
-			break
+		// Check password based on hash format
+		if isBcryptHash(acc.PasswordSHA) {
+			// New bcrypt format
+			if err := bcrypt.CompareHashAndPassword([]byte(acc.PasswordSHA), []byte(password)); err == nil {
+				matched = acc
+				found = true
+				break
+			}
+		} else if isLegacySHA256Hash(acc.PasswordSHA) {
+			// Legacy SHA-256 format
+			givenHash := sha256Hex(password)
+			if subtle.ConstantTimeCompare([]byte(givenHash), []byte(acc.PasswordSHA)) == 1 {
+				matched = acc
+				found = true
+				// Upgrade to bcrypt in background
+				go s.upgradeWebdavPasswordHash(acc.ID, password)
+				break
+			}
 		}
 	}
 	if !found {
@@ -454,6 +482,44 @@ func (s *webdavAccountState) verifyWebdav(username, password string) (webdavAcco
 			username, userMatched, len(s.data.Accounts))
 	}
 	return matched, found
+}
+
+// upgradeWebdavPasswordHash upgrades a legacy SHA-256 hash to bcrypt after
+// successful WebDAV login. Runs in a goroutine to avoid blocking the response.
+func (s *webdavAccountState) upgradeWebdavPasswordHash(accountID, password string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Find the account by ID
+	idx := -1
+	for i := range s.data.Accounts {
+		if s.data.Accounts[i].ID == accountID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return
+	}
+
+	// Double-check we still have legacy hash (might have been changed concurrently)
+	if !isLegacySHA256Hash(s.data.Accounts[idx].PasswordSHA) {
+		return
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		log.Printf("webdav: failed to upgrade password hash to bcrypt for account %q: %v", accountID, err)
+		return
+	}
+
+	s.data.Accounts[idx].PasswordSHA = string(hash)
+	s.data.Accounts[idx].UpdatedAtUnix = time.Now().Unix()
+	if err := s.saveLocked(); err != nil {
+		log.Printf("webdav: failed to save upgraded password hash for account %q: %v", accountID, err)
+		return
+	}
+	log.Printf("webdav: successfully upgraded password hash from SHA-256 to bcrypt for account %q", accountID)
 }
 
 // normaliseWebdavRoot validates and canonicalises a WebDAV account's

@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/sha256"
-	"crypto/subtle"
 	"database/sql"
 	"encoding/gob"
 	"encoding/hex"
@@ -10,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // loginProviderName is the discriminator used in session.Values["user"] to
@@ -48,10 +49,18 @@ type LoginUser struct {
 // singleton keyed on id=1.
 type loginCredentials struct {
 	Username      string `json:"username"`
-	PasswordSHA   string `json:"password_sha256"` // hex SHA-256
+	PasswordSHA   string `json:"password_sha256"` // bcrypt hash; legacy installs may hold hex SHA-256
 	CreatedAtUnix int64  `json:"created_at"`
 	UpdatedAtUnix int64  `json:"updated_at"`
 }
+
+// defaultUsername and defaultPassword are the fallback credentials used
+// when no stored credentials exist. We keep them as constants so we can
+// detect when the admin is still using the defaults and warn them.
+const (
+	defaultUsername = "admin"
+	defaultPassword = "admin"
+)
 
 // loginState bundles the in-memory credentials with a mutex guarding
 // concurrent load/save. Loads are snapshot reads, saves are exclusive
@@ -62,6 +71,20 @@ type loginState struct {
 	creds  *loginCredentials
 	db     *sql.DB
 	dbPath string // kept so tests can reopen the same DB to verify persistence
+
+	// Rate limiting for brute-force protection
+	rateLimitMu      sync.Mutex
+	loginAttempts    map[string]*loginAttempt // key: IP address
+	rateLimitEnabled bool
+	maxAttempts      int
+	lockoutDuration  time.Duration
+}
+
+// loginAttempt tracks failed login attempts from an IP address
+type loginAttempt struct {
+	count       int
+	lastFail    time.Time
+	lockedUntil time.Time
 }
 
 // load reads the credentials row (or initialises defaults if absent), and
@@ -82,7 +105,20 @@ func loadLoginCredentials(db *sql.DB) *loginState {
 // recorded on the returned state. Tests use the path to reopen the same
 // DB to verify persistence.
 func loadLoginCredentialsAt(db *sql.DB, path string) *loginState {
-	st := &loginState{db: db, dbPath: path}
+	st := &loginState{
+		db:               db,
+		dbPath:           path,
+		loginAttempts:    make(map[string]*loginAttempt),
+		rateLimitEnabled: true,
+		maxAttempts:      5,
+		lockoutDuration:  15 * time.Minute,
+	}
+	// Guard against nil db to prevent panic
+	if db == nil {
+		st.creds = defaultLoginCredentials()
+		log.Println("login: database is nil; using in-memory default credentials (admin/admin)")
+		return st
+	}
 	var c loginCredentials
 	err := db.QueryRow(
 		"SELECT username, password_sha256, created_at, updated_at FROM login_credentials WHERE id = 1",
@@ -116,44 +152,131 @@ func loginFromDB(path string) (*loginState, error) {
 	return loadLoginCredentialsAt(db, path), nil
 }
 
-// defaultLoginCredentials returns admin/admin (SHA-256). Hex string is
-// computed once here so callers don't have to rebuild it on every
-// fallback path.
+// defaultLoginCredentials returns admin/admin (bcrypt).
 func defaultLoginCredentials() *loginCredentials {
 	now := time.Now().Unix()
+	hash, err := bcrypt.GenerateFromPassword([]byte(defaultPassword), bcrypt.DefaultCost)
+	if err != nil {
+		// bcrypt should never fail with a valid cost
+		log.Fatalf("login: failed to generate default password hash: %v", err)
+	}
 	return &loginCredentials{
-		Username:      "admin",
-		PasswordSHA:   sha256Hex("admin"),
+		Username:      defaultUsername,
+		PasswordSHA:   string(hash),
 		CreatedAtUnix: now,
 		UpdatedAtUnix: now,
 	}
 }
 
-// sha256Hex returns the hex-encoded SHA-256 of s.
+// isBcryptHash reports whether the stored hash is a bcrypt hash.
+// bcrypt hashes start with "$2a$", "$2b$", or "$2y$".
+func isBcryptHash(hash string) bool {
+	return strings.HasPrefix(hash, "$2a$") || strings.HasPrefix(hash, "$2b$") || strings.HasPrefix(hash, "$2y$")
+}
+
+// isLegacySHA256Hash reports whether the stored hash is a legacy SHA-256 hex digest.
+// SHA-256 hex digests are 64 characters long and contain only hex characters.
+func isLegacySHA256Hash(hash string) bool {
+	if len(hash) != 64 {
+		return false
+	}
+	for _, c := range hash {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+// sha256Hex returns the hex-encoded SHA-256 of s (kept for legacy hash verification).
 func sha256Hex(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
 }
 
 // verify returns true iff username matches the stored username AND the
-// SHA-256 of password matches the stored hash. Both comparisons go
-// through subtle.ConstantTimeCompare so timing-based enumeration of
-// either field is impractical against the localhost file manager.
+// password matches the stored hash. Supports both bcrypt (new) and
+// SHA-256 (legacy) hashes for backward compatibility.
 func (s *loginState) verify(username, password string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.creds == nil {
 		return false
 	}
-	wantUser := sha256Hex(username)
-	wantPass := sha256Hex(password)
-	userMatch := subtle.ConstantTimeCompare([]byte(wantUser), []byte(sha256Hex(s.creds.Username))) == 1
-	passMatch := subtle.ConstantTimeCompare([]byte(wantPass), []byte(s.creds.PasswordSHA)) == 1
-	return userMatch && passMatch
+
+	// Username check (case-sensitive)
+	if username != s.creds.Username {
+		return false
+	}
+
+	// Password check - support both bcrypt and legacy SHA-256
+	if isBcryptHash(s.creds.PasswordSHA) {
+		// New bcrypt hash
+		err := bcrypt.CompareHashAndPassword([]byte(s.creds.PasswordSHA), []byte(password))
+		return err == nil
+	} else if isLegacySHA256Hash(s.creds.PasswordSHA) {
+		// Legacy SHA-256 hash - verify and upgrade to bcrypt
+		expectedHash := sha256Hex(password)
+		if expectedHash == s.creds.PasswordSHA {
+			// Password matches legacy hash - upgrade to bcrypt in background
+			go s.upgradePasswordHash(password)
+			return true
+		}
+		return false
+	}
+
+	return false
+}
+
+// upgradePasswordHash upgrades a legacy SHA-256 hash to bcrypt after successful login.
+// This runs in a goroutine to avoid blocking the login response.
+func (s *loginState) upgradePasswordHash(password string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Double-check we still have legacy hash (might have been changed concurrently)
+	if !isLegacySHA256Hash(s.creds.PasswordSHA) {
+		return
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		log.Printf("login: failed to upgrade password hash to bcrypt: %v", err)
+		return
+	}
+
+	s.creds.PasswordSHA = string(hash)
+	s.creds.UpdatedAtUnix = time.Now().Unix()
+	if err := s.saveLocked(); err != nil {
+		log.Printf("login: failed to save upgraded password hash: %v", err)
+		return
+	}
+	log.Println("login: successfully upgraded password hash from SHA-256 to bcrypt")
+}
+
+// isDefaultPassword checks if the current credentials are still the default admin/admin.
+func (s *loginState) isDefaultPassword() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.creds == nil {
+		return false
+	}
+	// Check if username is still "admin"
+	if s.creds.Username != defaultUsername {
+		return false
+	}
+	// Check if password hash matches default password
+	if isBcryptHash(s.creds.PasswordSHA) {
+		err := bcrypt.CompareHashAndPassword([]byte(s.creds.PasswordSHA), []byte(defaultPassword))
+		return err == nil
+	} else if isLegacySHA256Hash(s.creds.PasswordSHA) {
+		return sha256Hex(defaultPassword) == s.creds.PasswordSHA
+	}
+	return false
 }
 
 // changePassword verifies the old password, then atomically replaces the
-// stored hash. Returns an error if old is wrong or if the file write
+// stored hash with a bcrypt hash. Returns an error if old is wrong or if the file write
 // fails. The lock is held across saveLogin so two concurrent changes
 // can't race and lose one of the writes.
 func (s *loginState) changePassword(old, new string) error {
@@ -163,9 +286,16 @@ func (s *loginState) changePassword(old, new string) error {
 	if len(new) < 4 {
 		return errors.New("new password must be at least 4 characters")
 	}
+
+	// Generate bcrypt hash for new password
+	hash, err := bcrypt.GenerateFromPassword([]byte(new), bcrypt.DefaultCost)
+	if err != nil {
+		return errors.New("failed to hash password")
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.creds.PasswordSHA = sha256Hex(new)
+	s.creds.PasswordSHA = string(hash)
 	s.creds.UpdatedAtUnix = time.Now().Unix()
 	return s.saveLocked()
 }
@@ -221,6 +351,127 @@ func (s *loginState) saveLocked() error {
 		s.creds.Username, s.creds.PasswordSHA, s.creds.CreatedAtUnix, s.creds.UpdatedAtUnix,
 	)
 	return err
+}
+
+// ─── Rate Limiting ────────────────────────────────────────────────────────
+
+// getClientIP extracts the client IP address from the request.
+// It checks X-Forwarded-For and X-Real-IP headers first (for reverse proxy setups),
+// then falls back to RemoteAddr.
+func getClientIP(r *http.Request) string {
+	// Check X-Forwarded-For header (common for reverse proxies)
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// X-Forwarded-For can contain multiple IPs: client, proxy1, proxy2
+		// Take the first one (the original client)
+		if idx := strings.Index(xff, ","); idx != -1 {
+			return strings.TrimSpace(xff[:idx])
+		}
+		return strings.TrimSpace(xff)
+	}
+
+	// Check X-Real-IP header (nginx, etc.)
+	if xri := r.Header.Get("X-Real-IP"); xri != "" {
+		return strings.TrimSpace(xri)
+	}
+
+	// Fall back to RemoteAddr
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr // RemoteAddr might not have port
+	}
+	return ip
+}
+
+// checkRateLimit checks if the IP is currently locked out.
+// Returns true if login is allowed, false if locked out.
+func (s *loginState) checkRateLimit(ip string) bool {
+	if !s.rateLimitEnabled {
+		return true
+	}
+
+	s.rateLimitMu.Lock()
+	defer s.rateLimitMu.Unlock()
+
+	attempt, exists := s.loginAttempts[ip]
+	if !exists {
+		return true
+	}
+
+	// Check if lockout period has expired
+	if !attempt.lockedUntil.IsZero() && time.Now().After(attempt.lockedUntil) {
+		// Lockout expired, reset counter
+		delete(s.loginAttempts, ip)
+		return true
+	}
+
+	// Check if currently locked
+	if !attempt.lockedUntil.IsZero() && time.Now().Before(attempt.lockedUntil) {
+		return false
+	}
+
+	return true
+}
+
+// recordFailedLogin records a failed login attempt and potentially locks the IP.
+func (s *loginState) recordFailedLogin(ip string) {
+	if !s.rateLimitEnabled {
+		return
+	}
+
+	s.rateLimitMu.Lock()
+	defer s.rateLimitMu.Unlock()
+
+	attempt, exists := s.loginAttempts[ip]
+	if !exists {
+		attempt = &loginAttempt{
+			count:    0,
+			lastFail: time.Now(),
+		}
+		s.loginAttempts[ip] = attempt
+	}
+
+	attempt.count++
+	attempt.lastFail = time.Now()
+
+	// Lock if exceeded max attempts
+	if attempt.count >= s.maxAttempts {
+		attempt.lockedUntil = time.Now().Add(s.lockoutDuration)
+		log.Printf("login: IP %s locked out for %v after %d failed attempts",
+			ip, s.lockoutDuration, attempt.count)
+	}
+}
+
+// recordSuccessfulLogin clears the rate limit counter for an IP after successful login.
+func (s *loginState) recordSuccessfulLogin(ip string) {
+	if !s.rateLimitEnabled {
+		return
+	}
+
+	s.rateLimitMu.Lock()
+	defer s.rateLimitMu.Unlock()
+
+	delete(s.loginAttempts, ip)
+}
+
+// getRemainingAttempts returns how many login attempts remain before lockout.
+func (s *loginState) getRemainingAttempts(ip string) int {
+	if !s.rateLimitEnabled {
+		return s.maxAttempts
+	}
+
+	s.rateLimitMu.Lock()
+	defer s.rateLimitMu.Unlock()
+
+	attempt, exists := s.loginAttempts[ip]
+	if !exists {
+		return s.maxAttempts
+	}
+
+	remaining := s.maxAttempts - attempt.count
+	if remaining < 0 {
+		remaining = 0
+	}
+	return remaining
 }
 
 // ─── Routes / middleware ────────────────────────────────────────────────
@@ -427,10 +678,25 @@ func handleLoginSubmit(state *loginState, w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Check rate limit before attempting login
+	clientIP := getClientIP(r)
+	if !state.checkRateLimit(clientIP) {
+		log.Printf("login: rate limit exceeded for IP %s", sanitizeLogInput(clientIP))
+		redirectToLoginWithError(w, r, next, "rate_limit_exceeded")
+		return
+	}
+
 	if !state.verify(username, password) {
+		// Record failed login attempt
+		state.recordFailedLogin(clientIP)
+		remaining := state.getRemainingAttempts(clientIP)
+		log.Printf("login: failed login attempt from %s (remaining attempts: %d)", sanitizeLogInput(clientIP), remaining)
 		redirectToLoginWithError(w, r, next, "invalid_credentials")
 		return
 	}
+
+	// Successful login - clear rate limit counter
+	state.recordSuccessfulLogin(clientIP)
 
 	// store.Get returns a usable (new, empty) session even when the
 	// existing cookie can't be decoded — e.g. after a server restart
@@ -482,7 +748,7 @@ func handleLoginLogout(w http.ResponseWriter, r *http.Request) {
 // from /-/user) so the SPA can tell the difference between "auth not
 // configured" and "auth configured but you're not signed in" — both
 // cases look the same (user == null) under /-/user alone.
-func handleAuthStatus(loginEnabled bool) http.Handler {
+func handleAuthStatus(loginEnabled bool, state *loginState) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		user := userFromLoginSession(r)
@@ -492,6 +758,10 @@ func handleAuthStatus(loginEnabled bool) http.Handler {
 		if loginEnabled && user != nil {
 			status["authenticated"] = true
 			status["name"] = user.Name
+			// Check if using default password
+			if state != nil && state.isDefaultPassword() {
+				status["using_default_password"] = true
+			}
 		} else if loginEnabled {
 			status["authenticated"] = false
 		}
@@ -547,7 +817,7 @@ func registerLoginRoutes(router *mux.Router, state *loginState, loginEnabled boo
 	}).Methods("POST")
 
 	router.HandleFunc("/-/logout", handleLoginLogout).Methods("GET")
-	router.HandleFunc("/-/api/auth/status", handleAuthStatus(loginEnabled).ServeHTTP).Methods("GET")
+	router.HandleFunc("/-/api/auth/status", handleAuthStatus(loginEnabled, state).ServeHTTP).Methods("GET")
 	router.HandleFunc("/-/api/auth/password", func(w http.ResponseWriter, r *http.Request) {
 		handleChangePassword(state, w, r)
 	}).Methods("PUT")

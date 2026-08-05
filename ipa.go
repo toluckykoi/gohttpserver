@@ -11,7 +11,6 @@ import (
 	"regexp"
 
 	goplist "github.com/fork2fix/go-plist"
-	//goplist "github.com/DHowett/go-plist"
 )
 
 // maxPlistSize caps how large an Info.plist entry we are willing to read
@@ -136,7 +135,7 @@ func generateDownloadPlist(baseURL *url.URL, ipaPath string, plinfo *plistBundle
 	})
 
 	iconFiles := plinfo.CFBundleIcons.CFBundlePrimaryIcon.CFBundleIconFiles
-	if iconFiles != nil && len(iconFiles) > 0 {
+	if len(iconFiles) > 0 {
 		baseURL.Path = "/-/unzip/" + ipaPath + "/-/**/" + iconFiles[0] + ".png"
 		imgUrl := baseURL.String()
 		item.Assets = append(item.Assets, &plAsset{

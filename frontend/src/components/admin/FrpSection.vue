@@ -4,9 +4,9 @@
     <section class="frp-card">
       <div class="card-header">
         <div>
-          <h2 class="section-title">FRP 内网穿透</h2>
+          <h2 class="section-title">FRP NAT Traversal</h2>
           <p class="section-hint">
-            启用后，可通过 FRP 服务器将本地服务暴露到公网。
+            When enabled, local services can be exposed to the public internet via an FRP server.
           </p>
         </div>
         <el-switch
@@ -18,9 +18,9 @@
 
       <!-- Status indicator -->
       <div class="status-row" v-if="store.frpStatus?.enabled">
-        <span class="status-label">状态:</span>
+        <span class="status-label">Status:</span>
         <el-tag :type="store.frpStatus?.running ? 'success' : 'danger'" size="small">
-          {{ store.frpStatus?.running ? '运行中' : '已停止' }}
+          {{ store.frpStatus?.running ? 'Running' : 'Stopped' }}
         </el-tag>
       </div>
     </section>
@@ -28,7 +28,7 @@
     <!-- Configuration form -->
     <section class="frp-card" v-if="store.frpStatus?.enabled">
       <div class="card-header">
-        <h2 class="section-title">FRP 配置</h2>
+        <h2 class="section-title">FRP Configuration</h2>
       </div>
 
       <el-form
@@ -39,15 +39,15 @@
       >
         <!-- Server settings -->
         <div class="form-group">
-          <h3 class="group-title">服务器设置</h3>
-          <el-form-item label="服务器地址" required>
+          <h3 class="group-title">Server Settings</h3>
+          <el-form-item label="Server Address" required>
             <el-input
               v-model="form.serverAddr"
-              placeholder="例如: frp.example.com"
+              placeholder="e.g., frp.example.com"
               clearable
             />
           </el-form-item>
-          <el-form-item label="服务器端口" required>
+          <el-form-item label="Server Port" required>
             <el-input-number
               v-model="form.serverPort"
               :min="1"
@@ -55,12 +55,12 @@
               controls-position="right"
             />
           </el-form-item>
-          <el-form-item label="认证令牌">
+          <el-form-item label="Auth Token">
             <el-input
               v-model="form.authToken"
               type="password"
               show-password
-              placeholder="FRP 服务器认证令牌"
+              placeholder="FRP server authentication token"
               clearable
             />
           </el-form-item>
@@ -68,15 +68,15 @@
 
         <!-- Proxy settings -->
         <div class="form-group">
-          <h3 class="group-title">代理设置</h3>
-          <el-form-item label="代理名称">
+          <h3 class="group-title">Proxy Settings</h3>
+          <el-form-item label="Proxy Name">
             <el-input
               v-model="form.proxyName"
               placeholder="gohttpserver"
               clearable
             />
           </el-form-item>
-          <el-form-item label="代理类型">
+          <el-form-item label="Proxy Type">
             <el-select v-model="form.proxyType" style="width: 100%">
               <el-option label="TCP" value="tcp" />
               <el-option label="HTTP" value="http" />
@@ -87,28 +87,28 @@
 
         <!-- Local settings (auto-detected, read-only) -->
         <div class="form-group">
-          <h3 class="group-title">本地服务（自动检测）</h3>
-          <el-form-item label="本地 IP">
+          <h3 class="group-title">Local Service (Auto-detected)</h3>
+          <el-form-item label="Local IP">
             <el-input
               :model-value="form.localIP"
               readonly
               disabled
             >
               <template #append>
-                <el-tooltip content="自动从程序启动配置获取" placement="top">
+                <el-tooltip content="Automatically obtained from program startup configuration" placement="top">
                   <el-icon><InfoFilled /></el-icon>
                 </el-tooltip>
               </template>
             </el-input>
           </el-form-item>
-          <el-form-item label="本地端口">
+          <el-form-item label="Local Port">
             <el-input
               :model-value="form.localPort"
               readonly
               disabled
             >
               <template #append>
-                <el-tooltip content="自动从程序启动配置获取" placement="top">
+                <el-tooltip content="Automatically obtained from program startup configuration" placement="top">
                   <el-icon><InfoFilled /></el-icon>
                 </el-tooltip>
               </template>
@@ -118,8 +118,8 @@
 
         <!-- Remote settings -->
         <div class="form-group">
-          <h3 class="group-title">远程端口</h3>
-          <el-form-item label="远程端口" required>
+          <h3 class="group-title">Remote Port</h3>
+          <el-form-item label="Remote Port" required>
             <el-input-number
               v-model="form.remotePort"
               :min="1"
@@ -132,7 +132,7 @@
         <!-- Save button -->
         <div class="form-actions">
           <el-button type="primary" :loading="saving" @click="handleSaveConfig">
-            保存配置
+            Save Configuration
           </el-button>
         </div>
       </el-form>
@@ -141,15 +141,15 @@
     <!-- Connection info -->
     <section class="frp-card" v-if="store.frpStatus?.enabled && store.frpStatus?.running">
       <div class="card-header">
-        <h2 class="section-title">连接信息</h2>
+        <h2 class="section-title">Connection Info</h2>
       </div>
       <div class="connection-info">
         <div class="info-row">
-          <span class="info-label">公网访问地址:</span>
+          <span class="info-label">Public Access Address:</span>
           <code class="info-value">{{ form.serverAddr }}:{{ form.remotePort }}</code>
           <el-button text size="small" @click="copyAddress">
             <el-icon><CopyDocument /></el-icon>
-            复制
+            Copy
           </el-button>
         </div>
       </div>
@@ -202,11 +202,11 @@ async function handleToggleEnabled(target: boolean) {
   try {
     const res = await store.setFRPEnabled(target)
     if (res.ok) {
-      ElMessage.success(target ? 'FRP 已启用' : 'FRP 已禁用')
+      ElMessage.success(target ? 'FRP enabled' : 'FRP disabled')
       // Refresh status to update UI
       await store.loadFRPStatus()
     } else {
-      ElMessage.error(res.error || '切换失败')
+      ElMessage.error(res.error || 'Toggle failed')
     }
   } finally {
     togglingEnabled.value = false
@@ -216,19 +216,19 @@ async function handleToggleEnabled(target: boolean) {
 async function handleSaveConfig() {
   // Validation
   if (!form.serverAddr) {
-    ElMessage.error('请输入服务器地址')
+    ElMessage.error('Please enter server address')
     return
   }
   if (!form.serverPort || form.serverPort < 1 || form.serverPort > 65535) {
-    ElMessage.error('请输入有效的服务器端口')
+    ElMessage.error('Please enter a valid server port')
     return
   }
   if (!form.localPort || form.localPort < 1 || form.localPort > 65535) {
-    ElMessage.error('请输入有效的本地端口')
+    ElMessage.error('Please enter a valid local port')
     return
   }
   if (!form.remotePort || form.remotePort < 1 || form.remotePort > 65535) {
-    ElMessage.error('请输入有效的远程端口')
+    ElMessage.error('Please enter a valid remote port')
     return
   }
 
@@ -245,11 +245,11 @@ async function handleSaveConfig() {
       remotePort: form.remotePort,
     })
     if (res.ok) {
-      ElMessage.success('配置已保存')
+      ElMessage.success('Configuration saved')
       // Refresh status to update UI
       await store.loadFRPStatus()
     } else {
-      ElMessage.error(res.error || '保存失败')
+      ElMessage.error(res.error || 'Save failed')
     }
   } finally {
     saving.value = false
@@ -259,9 +259,9 @@ async function handleSaveConfig() {
 async function copyAddress() {
   const address = `${form.serverAddr}:${form.remotePort}`
   if (await copyText(address)) {
-    ElMessage.success('已复制到剪贴板')
+    ElMessage.success('Copied to clipboard')
   } else {
-    ElMessage.error('复制失败，请手动选择复制')
+    ElMessage.error('Copy failed, please select and copy manually')
   }
 }
 

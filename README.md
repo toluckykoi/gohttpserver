@@ -42,7 +42,9 @@
 - [x] Unzip zip files during upload (with extraction progress)
 - [x] Built-in username/password login gate (`--login`, independent of `--auth-type`)
 - [x] Admin panel (profile + settings) with username/password management
-- [x] Built-in WebDAV server (`/dav/`) with per-account root confinement, readonly mode, system-file protection, and RFC 4331 disk capacity display
+- [x] Built-in WebDAV server (`/dav/`) with per-account root confinement, readonly mode, system-file protection, quota limits, and RFC 4331 disk capacity display
+- [x] WebDAV account management: click to view basic info (link/username/password), edit online, reset password, delete; compatible with Windows / macOS / Linux clients
+- [x] Login rate limiting (5 failures per 15 minutes per IP)
 
 ## Installation
 
@@ -52,7 +54,14 @@ Run the official installer — it downloads the binary, sets up a systemd
 service, and walks you through port and flag configuration:
 
 ```bash
+# Linux install command:
 curl -fsSL https://gitee.com/toluckykoi/gohttpserver/raw/main/install-gohttpserver.sh -o install-gohttpserver.sh && sudo bash install-gohttpserver.sh
+
+# Windows install command (PowerShell)
+iwr -useb https://gitee.com/toluckykoi/gohttpserver/raw/main/install-gohttpserver.ps1 -o install-gohttpserver.ps1; .\install-gohttpserver.ps1
+
+# Windows install command (CMD)
+curl -fsSL https://gitee.com/toluckykoi/gohttpserver/raw/main/install-gohttpserver.bat -o install-gohttpserver.bat && install-gohttpserver.bat
 ```
 
 The script offers TUI interaction (whiptail), an uninstall prompt, and
@@ -83,7 +92,13 @@ Enable upload, delete, and edit all at once:
 gohttpserver -r ./ --port 8000 --upload --delete --edit
 ```
 
-Run `gohttpserver --help` to see more options.
+Enable login:
+
+```bash
+gohttpserver -r ./ --port 8000 --login
+```
+
+Run `gohttpserver --help` to see more options. You can also use the one-line install script to start the service without command-line arguments.
 
 ## Docker (under development)
 
@@ -117,61 +132,17 @@ Run `gohttpserver --help` to see more options.
   | X-Auth-Request-Fullname | Display name (URL-encoded) |
   | X-Auth-Request-User | User nickname (usually the email prefix) |
 
-- Enable upload:
-
-  ```bash
-  gohttpserver --upload
-  ```
-
-- Enable delete and create-folder:
-
-  ```bash
-  gohttpserver --delete
-  ```
-
-- Enable file editing:
-
-  ```bash
-  gohttpserver --edit
-  ```
-
-- Enable a username/password login gate (independent of `--auth-type`):
-
-  ```bash
-  gohttpserver --login
-  ```
-
-  Default credentials are `admin` / `admin`. No row is written until you
-  rotate the password — defaults live in memory only. After you change the
-  password via the user menu (top-right) → "管理面板" → "个人中心", the
-  new hash is persisted to `./gohttpserver.db` (a SQLite database) in
-  the working directory (NOT under `--root`, which would expose it over
-  HTTP). Use `--db /path/to/gohttpserver.db` to override the location.
-
-  Logged-in sessions are valid for 12 hours by default (browser cookie
-  persistence, surviving restarts). Configure with `--session-ttl` (e.g.
-  `--session-ttl=24h`, or `--session-ttl=0` to fall back to a session-only
-  cookie that is dropped when the browser closes). To keep sessions
-  valid across server restarts, also set the `GHS_SESSION_KEY`
-  environment variable — otherwise each restart mints a new signing key
-  and existing cookies become invalid.
-
-  Note: `--login` is fully independent from `--auth-type`. You can use it
-  on its own, or layer it on top of another auth method. When `--login`
-  is passed, `--upload`, `--delete`, and `--edit` are automatically
-  enabled (an authenticated operator should be able to manage files
-  without separately passing those flags).
-
 ## Admin Panel
 
 When `--login` is enabled, click the user avatar (top-right) → "管理面板"
-to open the full-screen admin panel. The panel has two tabs:
+to open the full-screen admin panel. The panel has three tabs:
 
 - **个人中心 (Profile)**: Shows the current user's username, auth
   provider, and version. Supports changing the username (requires the
   current password as re-authentication) and changing the password.
-- **参数设置 (Settings)**: Toggles the WebDAV server on/off and manages
-  WebDAV accounts.
+- **参数设置 (Settings)**: Toggles the WebDAV server on/off, URL display,
+  and WebDAV account management.
+- **内网穿透 (FRP)**: Configure frp client settings for NAT traversal.
 
 ## WebDAV Server
 
@@ -185,45 +156,34 @@ then create accounts:
 
 - **Remark** (required): a label so you can later identify which
   credential to revoke.
-- **Root path** (default `/`): the account is confined to
-  `<--root>/<root_path>`. Path traversal (`../`) is rejected.
-- **Username**: automatically bound to the current login user (cannot be
-  changed).
-- **Password**: a random 10-character string is generated and shown
-  exactly once. Use "reset password" in the account list to rotate it.
-- **Read-only** (advanced): rejects PUT/DELETE/MKCOL/MOVE/COPY/PROPPATCH
-  with 403.
-- **Protect system files** (advanced, default on): refuses writes to
-  `gohttpserver.db`, `.ghs.yml`, `favicon.ico`,
-  `favicon.png`, and any dotfile.
+- **Root path** (default `/`): click "Browse" to select a directory from
+  the file tree. The account is confined to `<--root>/<root_path>`.
+  Path traversal (`../`) is rejected.
+- **Advanced options** (collapsible):
+  - **Read-only mode**: when enabled, the account can only read files.
+    All write operations (PUT/DELETE/MKCOL/MOVE/COPY/PROPPATCH) return 403.
+  - **Protect system files** (default on): refuses writes to
+    `gohttpserver.db`, `.ghs.yml`, `favicon.ico`, `favicon.png`, and
+    any dotfile.
+  - **Quota**: limit the total bytes this account can write. Default
+    unit is GB. Leave empty or 0 for unlimited.
 
-WebDAV account state is persisted to `./webdav-accounts.json` in the
-working directory (NOT under `--root`). Use
-`--webdav-accounts /path/to/webdav-accounts.json` to override the
-location.
+**Username** is automatically bound to the current login user (cannot be
+changed). **Password** is a random 10-character string generated by
+`crypto/rand`, shown once at creation.
 
-### Disk capacity display (RFC 4331)
+### Account management
 
-`golang.org/x/net/webdav` does not implement RFC 4331 quota properties,
-so WebDAV clients (Windows Explorer, Cyberduck, rclone) connected but
-showed no disk capacity. gohttpserver injects
-`quota-available-bytes` / `quota-used-bytes` into PROPFIND 207 multistatus
-responses for collections (directories) via a response-interception
-middleware: it strips the underlying 404 quota propstat and appends a
-200 propstat with real values from a cross-platform disk-usage call
-(`syscall.Statfs` on Unix, `GetDiskFreeSpaceEx` on Windows). File
-responses are left untouched (404) — clients read capacity from the
-parent directory.
+In the account list:
 
-Example curl usage:
-
-```bash
-# PROPFIND the root
-curl -u admin:RANDOM_PASSWORD -X PROPFIND http://localhost:8000/dav/ -H "Depth: 1"
-
-# Upload a file
-curl -u admin:RANDOM_PASSWORD -T file.txt http://localhost:8000/dav/file.txt
-```
+- **Click any entry** to expand "Basic info", showing **link address,
+  username, password** (password is masked by default, click the 👁 icon
+  to show/hide, with a copy button).
+- The **three-dot menu** (⋮) on each row provides three actions:
+  - **Edit**: modify remark, root path, read-only, system file protection, quota
+  - **Reset password**: generate a new 10-character random password; the
+    old password is immediately invalidated
+  - **Delete**: revoke the account (idempotent)
 
 ### Connecting from Windows Explorer (map network drive)
 
@@ -255,6 +215,17 @@ handle:
    `http://192.168.120.141:8000/dav/`) as a network drive and enter
    the WebDAV account credentials when prompted. For production,
    prefer HTTPS — then the registry change is unnecessary.
+
+### Connecting from Linux file managers
+
+GNOME Files (Nautilus/gvfs) and other Linux file managers can connect
+via `dav://host:port/dav/` (or `davs://` for HTTPS). Enter the WebDAV
+account username and password when prompted.
+
+> Note: Some Linux clients probe the `/dav` path without a trailing
+> slash during discovery. gohttpserver handles this path for compatibility
+> and has added it to the login whitelist, so connections work with or
+> without the trailing slash — no more "HTTP Error: Unauthorized".
 
 ## Advanced Usage
 
@@ -434,30 +405,20 @@ Search follows Google-like universal format. Keywords are space-separated, and a
 
 ## Developer Guide
 
-Dependencies are managed via [govendor](https://github.com/kardianos/govendor).
+1. Build the project (recommended to use build scripts):
 
-1. First compile the frontend:
-
-   ```shell
-   cd frontend
-   npm run build
+   ```bash
+   ./build.sh
    ```
 
-2. Build a development binary. The **frontend/dist** directory must exist:
+2. Run the program:
 
-   ```shell
-   go build
-   ./gohttpserver
-   ```
+   ```bash
+   # Command format
+   ./dist/gohttpserver-win-amd64.exe -r <shared_folder> --addr <IP>:<port> --<flags>
 
-3. Build a single-binary release:
-
-   ```shell
-   # Build the project
-   go build
-
-   # Run
-   ./gohttpserver.exe -r ./testdata --addr 127.0.0.1:8000 --upload --delete --edit
+   # Example: run on Windows
+   ./dist/gohttpserver-win-amd64.exe -r ./testdata --addr 0.0.0.0:8000 --login
    ```
 
 ## Support

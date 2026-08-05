@@ -106,10 +106,11 @@ func safeNextURL(r *http.Request, next string) string {
 	if next == "" {
 		return "/"
 	}
-	// Relative paths (starting with "/" but not "//") are always safe.
-	// Also reject "/\" and "/\\": browsers treat these as protocol-relative.
+	// Relative paths ( starting with "/" but not "//") are always safe.
+	// Reject any path containing backslashes: browsers treat "/\evil.com",
+	// "/\\evil.com", etc. as protocol-relative URLs.
 	if strings.HasPrefix(next, "/") && !strings.HasPrefix(next, "//") {
-		if len(next) >= 2 && next[1] == '\\' {
+		if strings.Contains(next, "\\") {
 			return "/"
 		}
 		return next

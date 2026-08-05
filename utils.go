@@ -2,23 +2,22 @@ package main
 
 import (
 	"net"
-	"net/http"
 	"os"
+	"strings"
 )
 
-func getRealIP(req *http.Request) string {
-	xip := req.Header.Get("X-Real-IP")
-	if xip == "" {
-		// net.SplitHostPort handles both IPv4 ("1.2.3.4:5678") and
-		// IPv6 ("[::1]:8080") forms. The previous strings.Split on ":"
-		// returned "[" for IPv6, which corrupted access logs.
-		host, _, err := net.SplitHostPort(req.RemoteAddr)
-		if err != nil {
-			return req.RemoteAddr
+// sanitizeLogInput removes control characters (except space, tab, newline)
+// from user-controlled input before logging. Prevents log injection attacks
+// where attackers craft filenames/URLs containing newlines to inject fake
+// log entries.
+func sanitizeLogInput(s string) string {
+	// Remove control characters except \t \n \r (space is 0x20, printable)
+	return strings.Map(func(r rune) rune {
+		if r < 32 && r != '\t' && r != '\n' && r != '\r' {
+			return -1 // remove the character
 		}
-		xip = host
-	}
-	return xip
+		return r
+	}, s)
 }
 
 // getLocalIP returns the non loopback local IP of the host

@@ -129,7 +129,7 @@ func ExtractFromZip(zipFile, path string, w io.Writer) (err error) {
 		}
 		return
 	}
-	return fmt.Errorf("File %s not found", strconv.Quote(path))
+	return fmt.Errorf("file %s not found", strconv.Quote(path))
 }
 
 // unzipFile extracts the zip at filename into dest. If onProgress is non-nil,
@@ -139,6 +139,11 @@ func ExtractFromZip(zipFile, path string, w io.Writer) (err error) {
 // If ctx is cancelled, extraction stops and the cancellation error is
 // returned. Already-extracted files remain on disk (acceptable for an
 // upload-and-extract workflow where the user may have aborted).
+//
+// Zip bomb defence: checks the compression ratio of each entry. If the
+// uncompressed size exceeds maxZipExpansionRatio (100x) the compressed size,
+// extraction is rejected. Typical text/code compresses 3-10x; only highly
+// repetitive binary data achieves >100x, which is almost always malicious.
 func unzipFile(ctx context.Context, filename, dest string, onProgress func(idx, total int, name string)) error {
 	zr, err := zip.OpenReader(filename)
 	if err != nil {
@@ -158,6 +163,15 @@ func unzipFile(ctx context.Context, filename, dest string, onProgress func(idx, 
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
+		}
+
+		// Zip bomb defence: check compression ratio before extraction
+		if f.CompressedSize > 0 && f.UncompressedSize > 0 {
+			ratio := float64(f.UncompressedSize) / float64(f.CompressedSize)
+			if ratio > maxZipExpansionRatio {
+				return fmt.Errorf("zip entry %q has suspicious compression ratio %.1f:1 (max %d:1), possible zip bomb",
+					f.Name, ratio, maxZipExpansionRatio)
+			}
 		}
 
 		if err := extractZipEntry(f, dest, i+1, total, onProgress); err != nil {

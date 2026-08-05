@@ -150,11 +150,23 @@ fi
 # -----------------------------------------------------------------------------
 log_step "计算版本信息"
 
-VERSION=$(git describe --abbrev=0 --tags 2>/dev/null || cat VERSION 2>/dev/null || echo "v0.0.0")
-REVCNT=$(git rev-list --count HEAD 2>/dev/null || echo 0)
-DEVCNT=$(git rev-list --count "$VERSION" 2>/dev/null || echo 0)
-if [[ "$REVCNT" != "$DEVCNT" ]]; then
-    VERSION="$VERSION.dev$((REVCNT - DEVCNT))"
+# 优先从 git tag 获取版本，如果没有则从 VERSION 文件读取，最后使用默认值
+VERSION=""
+if git describe --abbrev=0 --tags >/dev/null 2>&1; then
+    VERSION=$(git describe --abbrev=0 --tags)
+elif [[ -f VERSION ]]; then
+    VERSION=$(cat VERSION)
+else
+    VERSION="v0.0.0"
+fi
+
+# 检查 VERSION 是否是有效的 git ref
+if git rev-parse "$VERSION" >/dev/null 2>&1; then
+    # VERSION 是有效的 git ref，计算从该版本到 HEAD 的提交数
+    DEVCNT=$(git rev-list --count "$VERSION"..HEAD 2>/dev/null || echo "0")
+    if [[ "$DEVCNT" -gt 0 ]]; then
+        VERSION="$VERSION.dev$DEVCNT"
+    fi
 fi
 echo "VER: $VERSION"
 

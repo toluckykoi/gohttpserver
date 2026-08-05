@@ -2,9 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -46,6 +52,107 @@ func NewFRPClient(db *sql.DB) *FRPClient {
 	}
 }
 
+// getOrCreateEncryptionKey loads or creates the FRP encryption key
+func (c *FRPClient) getOrCreateEncryptionKey() ([]byte, error) {
+	keyFile := "frp-encryption.key"
+	
+	// Try to load existing key
+	if data, err := os.ReadFile(keyFile); err == nil {
+		if len(data) == 32 {
+			return data, nil
+		}
+	}
+	
+	// Generate new 256-bit key
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, fmt.Errorf("generate encryption key: %w", err)
+	}
+	
+	// Save to file with restricted permissions
+	if err := os.WriteFile(keyFile, key, 0600); err != nil {
+		return nil, fmt.Errorf("save encryption key: %w", err)
+	}
+	
+	return key, nil
+}
+
+// encryptToken encrypts the auth token using AES-GCM
+func (c *FRPClient) encryptToken(plaintext string) (string, error) {
+	if plaintext == "" {
+		return "", nil
+	}
+	
+	key, err := c.getOrCreateEncryptionKey()
+	if err != nil {
+		return "", err
+	}
+	
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", fmt.Errorf("create cipher: %w", err)
+	}
+	
+	aesGCM, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("create GCM: %w", err)
+	}
+	
+	nonce := make([]byte, aesGCM.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", fmt.Errorf("generate nonce: %w", err)
+	}
+	
+	ciphertext := aesGCM.Seal(nonce, nonce, []byte(plaintext), nil)
+	return base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+// decryptToken decrypts the auth token using AES-GCM
+func (c *FRPClient) decryptToken(encoded string) (string, error) {
+	if encoded == "" {
+		return "", nil
+	}
+	
+	// If it doesn't look like base64-encoded ciphertext, treat as plaintext (legacy)
+	if len(encoded) < 32 {
+		return encoded, nil
+	}
+	
+	ciphertext, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		// Not valid base64, treat as plaintext (legacy)
+		return encoded, nil
+	}
+	
+	key, err := c.getOrCreateEncryptionKey()
+	if err != nil {
+		return "", err
+	}
+	
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", fmt.Errorf("create cipher: %w", err)
+	}
+	
+	aesGCM, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("create GCM: %w", err)
+	}
+	
+	nonceSize := aesGCM.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return encoded, nil // Too short, treat as plaintext
+	}
+	
+	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	plaintext, err := aesGCM.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return "", fmt.Errorf("decrypt: %w", err)
+	}
+	
+	return string(plaintext), nil
+}
+
 // LoadFromDB loads FRP configuration from database
 func (c *FRPClient) LoadFromDB() (*FRPConfig, bool, error) {
 	if c.db == nil {
@@ -54,11 +161,12 @@ func (c *FRPClient) LoadFromDB() (*FRPConfig, bool, error) {
 
 	var cfg FRPConfig
 	var enabled bool
+	var encryptedToken string
 	err := c.db.QueryRow(`
 		SELECT enabled, server_addr, server_port, auth_token, proxy_name, proxy_type, 
 		       local_ip, local_port, remote_port 
 		FROM frp_config WHERE id = 1
-	`).Scan(&enabled, &cfg.ServerAddr, &cfg.ServerPort, &cfg.AuthToken, 
+	`).Scan(&enabled, &cfg.ServerAddr, &cfg.ServerPort, &encryptedToken, 
 		&cfg.ProxyName, &cfg.ProxyType, &cfg.LocalIP, &cfg.LocalPort, &cfg.RemotePort)
 
 	if err == sql.ErrNoRows {
@@ -66,6 +174,21 @@ func (c *FRPClient) LoadFromDB() (*FRPConfig, bool, error) {
 	}
 	if err != nil {
 		return nil, false, err
+	}
+
+	// Decrypt auth token
+	cfg.AuthToken, err = c.decryptToken(encryptedToken)
+	if err != nil {
+		return nil, false, fmt.Errorf("decrypt auth token: %w", err)
+	}
+
+	// Migrate plaintext to encrypted if needed
+	if encryptedToken != "" && encryptedToken == cfg.AuthToken {
+		if err := c.SaveToDB(&cfg, enabled); err != nil {
+			log.Printf("frp: failed to migrate auth token to encrypted format: %v", err)
+		} else {
+			log.Printf("frp: migrated auth token to encrypted format")
+		}
 	}
 
 	return &cfg, enabled, nil
@@ -77,12 +200,18 @@ func (c *FRPClient) SaveToDB(cfg *FRPConfig, enabled bool) error {
 		return nil
 	}
 
-	_, err := c.db.Exec(`
+	// Encrypt auth token before saving
+	encryptedToken, err := c.encryptToken(cfg.AuthToken)
+	if err != nil {
+		return fmt.Errorf("encrypt auth token: %w", err)
+	}
+
+	_, err = c.db.Exec(`
 		INSERT OR REPLACE INTO frp_config 
 		(id, enabled, server_addr, server_port, auth_token, proxy_name, proxy_type, 
 		 local_ip, local_port, remote_port, updated_at)
 		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, enabled, cfg.ServerAddr, cfg.ServerPort, cfg.AuthToken, cfg.ProxyName, 
+	`, enabled, cfg.ServerAddr, cfg.ServerPort, encryptedToken, cfg.ProxyName, 
 		cfg.ProxyType, cfg.LocalIP, cfg.LocalPort, cfg.RemotePort, time.Now().Unix())
 
 	return err
@@ -223,7 +352,7 @@ func (c *FRPClient) Start() error {
 	}()
 
 	c.running = true
-	log.Printf("FRP client started")
+	log.Println("FRP client started")
 	return nil
 }
 
@@ -300,10 +429,16 @@ func (c *FRPClient) Status() map[string]interface{} {
 	}
 
 	if c.cfg != nil {
+		// Mask auth token to prevent credential leakage via API.
+		// Only show whether a token is configured, never its value.
+		tokenMasked := ""
+		if c.cfg.AuthToken != "" {
+			tokenMasked = "********"
+		}
 		status["config"] = map[string]interface{}{
 			"serverAddr": c.cfg.ServerAddr,
 			"serverPort": c.cfg.ServerPort,
-			"authToken":  c.cfg.AuthToken,
+			"authToken":  tokenMasked,
 			"proxyName":  c.cfg.ProxyName,
 			"proxyType":  c.cfg.ProxyType,
 			"localIP":    c.cfg.LocalIP,

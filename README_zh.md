@@ -44,15 +44,23 @@
 - [x] 管理面板（个人中心 + 参数设置），支持修改用户名/密码
 - [x] 内置 WebDAV 服务器（`/dav/`），支持按账号限制根目录、只读模式、系统文件保护、配额限制、RFC 4331 磁盘容量显示
 - [x] WebDAV 账号管理：点击查看基本信息（链接/用户名/密码）、在线编辑、重置密码、删除，兼容 Windows / macOS / Linux 客户端
+- [x] 登录失败速率限制（每 IP 15 分钟内最多 5 次失败）
 
 ## 安装
 
-### 一键安装（推荐，Linux）
+### 一键安装（推荐 Linux）
 
 运行官方安装脚本，自动下载二进制、配置 systemd 服务、引导设置端口和参数：
 
 ```bash
+# Linux 安装命令：
 curl -fsSL https://gitee.com/toluckykoi/gohttpserver/raw/main/install-gohttpserver.sh -o install-gohttpserver.sh && sudo bash install-gohttpserver.sh
+
+# Windows 安装命令（PowerShell）
+iwr -useb https://gitee.com/toluckykoi/gohttpserver/raw/main/install-gohttpserver.ps1 -o install-gohttpserver.ps1; .\install-gohttpserver.ps1
+
+# Windows 安装命令（CMD）
+curl -fsSL https://gitee.com/toluckykoi/gohttpserver/raw/main/install-gohttpserver.bat -o install-gohttpserver.bat && install-gohttpserver.bat
 ```
 
 脚本支持 TUI 交互（whiptail）、卸载询问、参数配置等，安装完成后即可通过 `systemctl start gohttpserver` 启动。
@@ -79,7 +87,13 @@ gohttpserver -r ./ --port 8000 --edit
 gohttpserver -r ./ --port 8000 --upload --delete --edit
 ```
 
-使用 `gohttpserver --help` 查看更多使用选项。
+启用登录功能：
+
+```bash
+gohttpserver -r ./ --port 8000 --login
+```
+
+使用 `gohttpserver --help` 查看更多使用选项，使用一键安装脚本可以不使用命令行启动。
 
 ## Docker 使用方法（开发中）
 
@@ -113,54 +127,15 @@ gohttpserver -r ./ --port 8000 --upload --delete --edit
   | X-Auth-Request-Fullname | 用户显示名称（URL 编码） |
   | X-Auth-Request-User | 用户昵称（通常是邮箱前缀） |
 
-- 启用上传功能：
-
-  ```bash
-  gohttpserver --upload
-  ```
-
-- 启用删除和创建文件夹功能：
-
-  ```bash
-  gohttpserver --delete
-  ```
-
-- 启用文件编辑功能：
-
-  ```bash
-  gohttpserver --edit
-  ```
-
-- 启用登录拦截（用户名 / 密码），未登录无法访问任何路径或文件：
-
-  ```bash
-  gohttpserver --login
-  ```
-
-  默认凭据为 `admin` / `admin`，未修改密码前不会在磁盘上生成任何文件，
-  默认凭据仅保留在内存中。登录后可在右上角用户菜单 → 「管理面板」→ 「个人中心」
-  中更新密码，新密码会持久化到当前工作目录下的 `./gohttpserver.db`（SQLite
-  数据库文件，不会放在 `--root` 目录下，避免被 HTTP 服务暴露）。如需自定义
-  数据库位置，可使用 `--db /path/to/gohttpserver.db`。
-
-  登录会话默认保留 12 小时（cookie 持久化，重启软件期间有效）。可通过
-  `--session-ttl` 调整（例如 `--session-ttl=24h`，或 `--session-ttl=0`
-  设为仅本浏览器会话有效——关闭浏览器即失效）。如需跨服务器重启保持登录
-  状态，还需设置环境变量 `GHS_SESSION_KEY`，否则每次重启会重新生成签名密钥，
-  旧的 cookie 全部失效。
-
-  注意：`--login` 与 `--auth-type` 完全独立，可单独使用或组合使用（同时叠加两种认证）。
-  当显式传入 `--login` 时，`--upload`、`--delete`、`--edit` 会自动启用（已认证的操作员
-  应当能够管理文件，无需单独传这些参数）。
-
 ## 管理面板
 
 启用 `--login` 后，点击右上角用户头像 → 「管理面板」即可打开全屏管理面板。
-面板包含两个 tab：
+面板包含三个 tab：
 
 - **个人中心**：展示当前登录用户的用户名、认证方式、版本号；支持修改用户名
   （需要输入当前密码二次验证）和修改密码
 - **参数设置**：WebDAV 服务的总开关、URL 展示、WebDAV 账号管理
+- **内网穿透**：支持设置 frp 内网穿透客户端设置
 
 ## WebDAV 服务器
 
@@ -196,38 +171,6 @@ Windows 资源管理器不共享浏览器 cookie，必须用 Basic Auth）。
   - **编辑**：修改备注、相对根目录、只读、系统文件保护、配额
   - **重置密码**：生成新的 10 位随机密码，旧密码立即失效
   - **删除**：吊销账号（幂等）
-
-> 说明：出于安全设计，后端只存密码的 SHA-256 哈希、明文仅在创建/重置时产生一次。
-> 为支持「基本信息」中随时查看密码，前端会把明文密码缓存到浏览器 `localStorage`
-> （按账号 id）。换浏览器或清除缓存后需通过「重置密码」重新生成才能再次查看。
-
-WebDAV 账号状态持久化到当前工作目录下的 `./webdav-accounts.json`
-（不会放在 `--root` 目录下）。如需自定义文件位置，可使用
-`--webdav-accounts /path/to/webdav-accounts.json`。
-
-服务端会记录 WebDAV 的**写操作**日志（上传 PUT / 删除 DELETE / 新建目录 MKCOL /
-移动 MOVE / 复制 COPY / 属性修改 PROPPATCH），以及认证失败，包含用户名、来源 IP
-和请求路径；浏览类请求（PROPFIND / OPTIONS / GET 等）不打印以避免刷屏。
-
-### 磁盘容量显示（RFC 4331）
-
-`golang.org/x/net/webdav` 原生不实现 RFC 4331 配额属性，导致 WebDAV 客户端
-（Windows 资源管理器、Cyberduck、rclone）连接后无法显示磁盘容量。gohttpserver
-通过响应拦截中间件在 PROPFIND 207 multistatus 响应中注入
-`quota-available-bytes` / `quota-used-bytes`：剥离底层返回的 404 quota propstat，
-追加 200 真实数值（跨平台磁盘查询：Unix 用 `syscall.Statfs`，Windows 用
-`GetDiskFreeSpaceEx`）。仅对 collection（目录）注入，文件响应保持 404 ——
-客户端从父目录读取容量值。
-
-curl 使用示例：
-
-```bash
-# 列出根目录
-curl -u admin:RANDOM_PASSWORD -X PROPFIND http://localhost:8000/dav/ -H "Depth: 1"
-
-# 上传文件
-curl -u admin:RANDOM_PASSWORD -T file.txt http://localhost:8000/dav/file.txt
-```
 
 ### 从 Windows 资源管理器映射网络驱动器
 
@@ -449,31 +392,21 @@ server {
 
 ## 开发者指南
 
-依赖通过 [govendor](https://github.com/kardianos/govendor) 管理
+1、构建项目（推荐使用使用构建脚本进行构建）
 
-1. 先编译前端
+```bash
+./build.sh
+```
 
-   ```shell
-   cd frontend
-   npm run build
-   ```
+2、运行程序
 
-2. 构建开发版本。**frontend/dist** 目录必须存在：
+```bash
+# 命令格式
+./dist/gohttpserver-win-amd64.exe -r 共享文件夹 --addr IP:端口 --启动参数
 
-   ```shell
-   go build
-   ./gohttpserver
-   ```
-
-3. 构建单二进制文件发布版：
-
-   ```shell
-   # 编译项目
-   go build
-   
-   # 运行
-   ./gohttpserver.exe -r ./testdata --addr 127.0.0.1:8000 --upload --delete --edit
-   ```
+# 例如 windows 中运行
+./dist/gohttpserver-win-amd64.exe -r ./testdata --addr 0.0.0.0:8000 --login
+```
 
 ## 支持
 

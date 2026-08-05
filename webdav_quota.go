@@ -92,6 +92,9 @@ func loadUsageStateAt(db *sql.DB, path string) *usageState {
 		}
 		s.used[id] = used
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("webdav-quota: error iterating storage_usage: %v", err)
+	}
 	log.Printf("webdav-quota: loaded usage for %d account(s)", len(s.used))
 	return s
 }

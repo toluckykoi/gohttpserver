@@ -84,7 +84,7 @@ func (s *webdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	acc, ok := s.accounts.verifyWebdav(user, pass)
 	if !ok {
 		log.Printf("webdav: auth failed for user=%q from %s (%s %s)",
-			user, getRealIP(r), r.Method, r.URL.Path)
+			user, getClientIP(r), r.Method, r.URL.Path)
 		writeBasicChallenge(w)
 		http.Error(w, "WebDAV authentication required", http.StatusUnauthorized)
 		return
@@ -98,7 +98,7 @@ func (s *webdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "PUT", "DELETE", "MKCOL", "MOVE", "COPY", "PROPPATCH":
 		log.Printf("webdav: %s %s by user=%q (remark=%q) from %s",
-			r.Method, r.URL.Path, acc.Username, acc.Remark, getRealIP(r))
+			r.Method, r.URL.Path, acc.Username, acc.Remark, getClientIP(r))
 	}
 
 	// Per-account chroot: mount the inner webdav.Dir at
