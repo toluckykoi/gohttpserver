@@ -2,6 +2,58 @@
 
 本文件记录 gohttpserver 各版本的发布说明。GitHub Actions 在打 tag 发版时会自动读取对应版本段落作为 Release 说明。
 
+## [v1.1.3] - 2026-08-05
+
+# gohttpserver v1.1.3 🔒
+
+安全加固与运维增强版本：集成 FRP 内网穿透、新增 Windows 一键安装脚本、全面修复安全漏洞并提升代码质量。
+
+## ✨ 新功能
+
+### 🌐 FRP 内网穿透
+- 集成 FRP 内网穿透功能，支持通过管理面板可视化配置
+- 配置持久化到 SQLite 数据库，重启后自动恢复
+- 支持自定义 FRP 服务器地址、端口、令牌及远程端口映射
+
+### 📦 Windows 一键安装脚本
+- 新增 PowerShell 版与 CMD 版一键安装脚本
+- 支持自动注册系统服务、配置防火墙规则
+
+### 🗑️ 卸载改进
+- 卸载时支持删除登录数据库
+- 不保留数据时自动清空安装目录
+
+## 🔒 安全加固
+
+### P0 严重
+- **CSP 策略收紧**：移除 Content-Security-Policy 中的 `unsafe-eval`，消除潜在 XSS 攻击面
+- **HTTP 安全响应头**：新增 `X-Content-Type-Options=nosniff`、`X-Frame-Options=DENY`、`Referrer-Policy=strict-origin-when-cross-origin`、`Permissions-Policy`（禁用摄像头/麦克风/地理位置）；TLS 启用时自动添加 `Strict-Transport-Security`
+- **上传大小限制**：限制单文件上传不超过 10 GiB，防止磁盘耗尽 DoS
+- **Zip 炸弹防护**：zip 解压强制 100:1 最大压缩比检查，超出即拒绝
+- **日志注入防护**：新增 `sanitizeLogInput` 函数，所有用户可控输入（路径、URL、IP）写入日志前进行清洗
+
+### P1 高危
+- **密码哈希升级**：密码存储从 SHA-256 迁移到 bcrypt，自动检测并迁移旧哈希
+- **登录限流**：每个 IP 15 分钟内最多 5 次登录失败，超出后拒绝请求
+- **默认凭据提醒**：使用默认 `admin/admin` 登录后提示修改密码
+
+## 🐛 Bug 修复
+
+- **systemd 服务**：`WorkingDirectory` 由数据文件夹改为程序安装目录，修复服务启动路径问题
+- **login.go 崩溃**：修复 `db` 为 nil 时调用 `db.QueryRow()` 导致的 panic
+- **build.sh 脚本**：添加 `set -euo pipefail` 确保错误时退出，版本获取逻辑优化为 if-elif-else 结构
+
+## 🛠 代码质量
+
+- 错误消息首字母统一大写
+- `log.Printf` 无格式化参数的调用替换为 `log.Println`
+- 清理注释掉的代码块
+- 修复语法错误（如 `contains` 改为 `contain`）
+
+## 📖 文档
+
+- README 增加 Linux 一键安装脚本命令
+
 ## [v1.1.2] - 2026-07-19
 
 # gohttpserver v1.1.2 🚀

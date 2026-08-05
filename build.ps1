@@ -1,7 +1,7 @@
 ﻿# @Author      ：幸运锦鲤
 # @Time        : 2026-07-11 19:18:52
 # @version     : powershell
-# @Update time :
+# @Update time : 2026-08-05
 # @Description : gohttpserver 一键构建脚本
 
 <#
@@ -162,21 +162,23 @@ if ($SkipFrontend) {
 Write-Step '计算版本信息'
 
 function Invoke-GitSafe {
-    param([string]$Args)
-    $output = git $Args.Split(' ') 2>$null
+    param([string]$GitArgs)
+    $output = git $GitArgs.Split(' ') 2>$null
     if ($LASTEXITCODE -eq 0) { return $output } else { return $null }
 }
 
+# 优先从 git tag 获取版本，如果没有则从 VERSION 文件读取，最后使用默认值
 $Version = Invoke-GitSafe 'describe --abbrev=0 --tags'
-if (-not $Version) { $Version = if (Test-Path 'VERSION') { (Get-Content VERSION).Trim() } else { 'v0.0.0' } }
+if (-not $Version) {
+    $Version = if (Test-Path 'VERSION') { (Get-Content VERSION).Trim() } else { 'v0.0.0' }
+}
 
-$RevCnt  = Invoke-GitSafe 'rev-list --count HEAD'
-$DevCnt  = Invoke-GitSafe "rev-list --count $Version"
-if (-not $RevCnt) { $RevCnt = '0' }
-if (-not $DevCnt) { $DevCnt = '0' }
-
-if ($RevCnt -ne $DevCnt) {
-    $Version = "$Version.dev$([int]$RevCnt - [int]$DevCnt)"
+# 检查 Version 是否是有效的 git ref，计算从该版本到 HEAD 的提交数
+if (Invoke-GitSafe "rev-parse $Version") {
+    $DevCnt = Invoke-GitSafe "rev-list --count $Version..HEAD"
+    if ($DevCnt -and [int]$DevCnt -gt 0) {
+        $Version = "$Version.dev$DevCnt"
+    }
 }
 Write-Host "VER: $Version"
 

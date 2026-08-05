@@ -3,7 +3,7 @@
 # @Author      ：幸运锦鲤
 # @Time        : 2026-07-11 19:18:52
 # @version     : bash
-# @Update time :
+# @Update time : 2026-08-05
 # @Description : gohttpserver 一键构建脚本
 
 # 用法:
