@@ -1,4 +1,4 @@
-package main
+package auth
 
 import (
 	"encoding/json"
@@ -24,7 +24,7 @@ import (
 // (or the operator explicitly opts in with --allow-public-oauth2),
 // because binding to a public interface lets any client forge these
 // headers and impersonate any user.
-func oauth2ProxyMiddleware(next http.Handler) http.Handler {
+func Oauth2ProxyMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Only stamp a session when the proxy actually sent an identity.
 		// Requests without the header (e.g. the proxy's own auth flow)
@@ -42,7 +42,7 @@ func oauth2ProxyMiddleware(next http.Handler) http.Handler {
 				Name:     fullName,
 				NickName: r.Header.Get("X-Auth-Request-User"),
 			}
-			session, err := store.Get(r, defaultSessionName)
+			session, err := Store.Get(r, DefaultSessionName)
 			if err == nil {
 				session.Values["user"] = user
 				// Best-effort save; if it fails the per-request identity
@@ -55,11 +55,11 @@ func oauth2ProxyMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func handleOauth2(router *mux.Router) {
+func HandleOauth2(router *mux.Router) {
 	router.HandleFunc("/-/user", func(w http.ResponseWriter, r *http.Request) {
 		// Identity now comes from the session (populated by the
 		// middleware), not directly from forgeable headers.
-		userInfo := userFromSession(r)
+		userInfo := UserFromSession(r)
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		data, _ := json.Marshal(userInfo)
 		w.Write(data)
@@ -69,7 +69,7 @@ func handleOauth2(router *mux.Router) {
 // isLoopbackAddr reports whether the given listen address (host:port or
 // :port form) binds to a loopback interface only. Used to guard
 // oauth2-proxy mode against public exposure.
-func isLoopbackAddr(addr string) bool {
+func IsLoopbackAddr(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		// Unparseable — be conservative, treat as non-loopback.

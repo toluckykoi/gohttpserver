@@ -1,4 +1,4 @@
-package main
+package auth
 
 import (
 	"crypto/sha256"
@@ -9,7 +9,6 @@ import (
 	"errors"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -18,6 +17,9 @@ import (
 
 	"github.com/gorilla/mux"
 	"golang.org/x/crypto/bcrypt"
+
+	storedb "github.com/codeskyblue/gohttpserver/internal/store"
+	"github.com/codeskyblue/gohttpserver/internal/util"
 )
 
 // loginProviderName is the discriminator used in session.Values["user"] to
@@ -62,11 +64,11 @@ const (
 	defaultPassword = "admin"
 )
 
-// loginState bundles the in-memory credentials with a mutex guarding
+// LoginState bundles the in-memory credentials with a mutex guarding
 // concurrent load/save. Loads are snapshot reads, saves are exclusive
 // writes — persistence is backed by the SQLite login_credentials table
 // (see db.go), replacing the previous auth-state.json file.
-type loginState struct {
+type LoginState struct {
 	mu     sync.RWMutex
 	creds  *loginCredentials
 	db     *sql.DB
@@ -97,15 +99,15 @@ type loginAttempt struct {
 // quick test) from persisting credentials. The row is created on the first
 // successful changePassword call, which is the moment the operator has
 // actually chosen a secret worth keeping.
-func loadLoginCredentials(db *sql.DB) *loginState {
-	return loadLoginCredentialsAt(db, "")
+func LoadLoginCredentials(db *sql.DB) *LoginState {
+	return LoadLoginCredentialsAt(db, "")
 }
 
-// loadLoginCredentialsAt is loadLoginCredentials with the database path
+// LoadLoginCredentialsAt is LoadLoginCredentials with the database path
 // recorded on the returned state. Tests use the path to reopen the same
 // DB to verify persistence.
-func loadLoginCredentialsAt(db *sql.DB, path string) *loginState {
-	st := &loginState{
+func LoadLoginCredentialsAt(db *sql.DB, path string) *LoginState {
+	st := &LoginState{
 		db:               db,
 		dbPath:           path,
 		loginAttempts:    make(map[string]*loginAttempt),
@@ -140,16 +142,16 @@ func loadLoginCredentialsAt(db *sql.DB, path string) *loginState {
 	return st
 }
 
-// loginFromDB opens the database at path and loads credentials. Used by
+// LoginFromDB opens the database at path and loads credentials. Used by
 // tests that need to verify the on-disk state was actually written (they
-// call loginFromDB after a changePassword to confirm the row persisted
+// call LoginFromDB after a changePassword to confirm the row persisted
 // across an SQLite reopen).
-func loginFromDB(path string) (*loginState, error) {
-	db, err := openDB(path)
+func LoginFromDB(path string) (*LoginState, error) {
+	db, err := storedb.OpenDB(path)
 	if err != nil {
 		return nil, err
 	}
-	return loadLoginCredentialsAt(db, path), nil
+	return LoadLoginCredentialsAt(db, path), nil
 }
 
 // defaultLoginCredentials returns admin/admin (bcrypt).
@@ -197,7 +199,7 @@ func sha256Hex(s string) string {
 // verify returns true iff username matches the stored username AND the
 // password matches the stored hash. Supports both bcrypt (new) and
 // SHA-256 (legacy) hashes for backward compatibility.
-func (s *loginState) verify(username, password string) bool {
+func (s *LoginState) verify(username, password string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.creds == nil {
@@ -230,7 +232,7 @@ func (s *loginState) verify(username, password string) bool {
 
 // upgradePasswordHash upgrades a legacy SHA-256 hash to bcrypt after successful login.
 // This runs in a goroutine to avoid blocking the login response.
-func (s *loginState) upgradePasswordHash(password string) {
+func (s *LoginState) upgradePasswordHash(password string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -255,7 +257,7 @@ func (s *loginState) upgradePasswordHash(password string) {
 }
 
 // isDefaultPassword checks if the current credentials are still the default admin/admin.
-func (s *loginState) isDefaultPassword() bool {
+func (s *LoginState) isDefaultPassword() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.creds == nil {
@@ -279,7 +281,7 @@ func (s *loginState) isDefaultPassword() bool {
 // stored hash with a bcrypt hash. Returns an error if old is wrong or if the file write
 // fails. The lock is held across saveLogin so two concurrent changes
 // can't race and lose one of the writes.
-func (s *loginState) changePassword(old, new string) error {
+func (s *LoginState) changePassword(old, new string) error {
 	if !s.verify(s.credsUsername(), old) {
 		return errors.New("invalid current password")
 	}
@@ -300,7 +302,7 @@ func (s *loginState) changePassword(old, new string) error {
 	return s.saveLocked()
 }
 
-// changeUsername updates the stored username after the caller has
+// ChangeUsername updates the stored username after the caller has
 // already verified the current password (the admin API handler
 // re-authenticates before calling this). We don't take the password
 // again here — the handler does the verify, then calls us under the
@@ -309,7 +311,7 @@ func (s *loginState) changePassword(old, new string) error {
 // oldName is passed in so we can assert we're renaming the right user
 // (defensive — if the session and the on-disk state have diverged, we
 // refuse rather than silently renaming the wrong account).
-func (s *loginState) changeUsername(oldName, newName string) error {
+func (s *LoginState) ChangeUsername(oldName, newName string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.creds == nil {
@@ -324,7 +326,7 @@ func (s *loginState) changeUsername(oldName, newName string) error {
 }
 
 // credsUsername returns the stored username under the read lock.
-func (s *loginState) credsUsername() string {
+func (s *LoginState) credsUsername() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.creds == nil {
@@ -336,7 +338,7 @@ func (s *loginState) credsUsername() string {
 // saveLocked upserts the singleton credentials row. Callers must hold
 // s.mu in write mode (via saveLocked) — the public save() helper below
 // does the right locking. SQLite gives us atomicity for free.
-func (s *loginState) saveLocked() error {
+func (s *LoginState) saveLocked() error {
 	if s.creds == nil {
 		return errors.New("login: no credentials loaded")
 	}
@@ -355,36 +357,9 @@ func (s *loginState) saveLocked() error {
 
 // ─── Rate Limiting ────────────────────────────────────────────────────────
 
-// getClientIP extracts the client IP address from the request.
-// It checks X-Forwarded-For and X-Real-IP headers first (for reverse proxy setups),
-// then falls back to RemoteAddr.
-func getClientIP(r *http.Request) string {
-	// Check X-Forwarded-For header (common for reverse proxies)
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// X-Forwarded-For can contain multiple IPs: client, proxy1, proxy2
-		// Take the first one (the original client)
-		if idx := strings.Index(xff, ","); idx != -1 {
-			return strings.TrimSpace(xff[:idx])
-		}
-		return strings.TrimSpace(xff)
-	}
-
-	// Check X-Real-IP header (nginx, etc.)
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return strings.TrimSpace(xri)
-	}
-
-	// Fall back to RemoteAddr
-	ip, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr // RemoteAddr might not have port
-	}
-	return ip
-}
-
 // checkRateLimit checks if the IP is currently locked out.
 // Returns true if login is allowed, false if locked out.
-func (s *loginState) checkRateLimit(ip string) bool {
+func (s *LoginState) checkRateLimit(ip string) bool {
 	if !s.rateLimitEnabled {
 		return true
 	}
@@ -413,7 +388,7 @@ func (s *loginState) checkRateLimit(ip string) bool {
 }
 
 // recordFailedLogin records a failed login attempt and potentially locks the IP.
-func (s *loginState) recordFailedLogin(ip string) {
+func (s *LoginState) recordFailedLogin(ip string) {
 	if !s.rateLimitEnabled {
 		return
 	}
@@ -442,7 +417,7 @@ func (s *loginState) recordFailedLogin(ip string) {
 }
 
 // recordSuccessfulLogin clears the rate limit counter for an IP after successful login.
-func (s *loginState) recordSuccessfulLogin(ip string) {
+func (s *LoginState) recordSuccessfulLogin(ip string) {
 	if !s.rateLimitEnabled {
 		return
 	}
@@ -454,7 +429,7 @@ func (s *loginState) recordSuccessfulLogin(ip string) {
 }
 
 // getRemainingAttempts returns how many login attempts remain before lockout.
-func (s *loginState) getRemainingAttempts(ip string) int {
+func (s *LoginState) getRemainingAttempts(ip string) int {
 	if !s.rateLimitEnabled {
 		return s.maxAttempts
 	}
@@ -564,17 +539,17 @@ func loginWantsJSON(r *http.Request) bool {
 // /). Putting this gate in front of hdlr means EVERY route — file
 // handler, /-/upload, /-/delete, /-/info, … — sees the same check,
 // instead of having to thread it into every handler individually.
-func loginAuthMiddleware(loginState *loginState, next http.Handler) http.Handler {
+func LoginAuthMiddleware(prefix string, state *LoginState, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Strip the configured URL prefix before comparing to the whitelist
 		// so that --prefix /foo doesn't accidentally re-gate /-/login.
-		checkPath := strings.TrimPrefix(r.URL.Path, gcfg.Prefix)
+		checkPath := strings.TrimPrefix(r.URL.Path, prefix)
 		if isLoginWhitelisted(checkPath) {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		if userFromLoginSession(r) != nil {
+		if UserFromLoginSession(r) != nil {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -598,14 +573,14 @@ func loginAuthMiddleware(loginState *loginState, next http.Handler) http.Handler
 	})
 }
 
-// userFromLoginSession pulls the *LoginUser out of the session cookie,
+// UserFromLoginSession pulls the *LoginUser out of the session cookie,
 // returning nil for unauthenticated / forged / foreign-session requests.
 // We deliberately do NOT widen the existing userFromSession helper
 // because that helper checks for *UserInfo (the OpenID type), and
 // treating both interchangeably would mean a session whose "user" was
 // set by OpenID would silently satisfy login-only routes.
-func userFromLoginSession(r *http.Request) *LoginUser {
-	// store.Get returns a usable session even when the existing cookie
+func UserFromLoginSession(r *http.Request) *LoginUser {
+	// Store.Get returns a usable session even when the existing cookie
 	// can't be decoded (e.g. stale cookie from a previous server run
 	// with a different session key). If the decode failed, the session
 	// simply has no values — so we fall through to the nil-check below
@@ -613,7 +588,7 @@ func userFromLoginSession(r *http.Request) *LoginUser {
 	// We must NOT return nil on the error itself, because the error
 	// doesn't mean "no session" — it means "couldn't read the old one",
 	// and the returned session is still safe to inspect.
-	session, _ := store.Get(r, defaultSessionName)
+	session, _ := Store.Get(r, DefaultSessionName)
 	val := session.Values["user"]
 	if val == nil {
 		return nil
@@ -638,11 +613,11 @@ func userFromLoginSession(r *http.Request) *LoginUser {
 // navigated to /-/login manually while signed in), redirect to "/"
 // instead of showing the login page again.
 func handleLoginUI(w http.ResponseWriter, r *http.Request) {
-	if userFromLoginSession(r) != nil {
+	if UserFromLoginSession(r) != nil {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
-	data, err := frontendDistFS.ReadFile("frontend/dist/index.html")
+	data, err := FrontendFS.ReadFile("frontend/dist/index.html")
 	if err != nil {
 		http.Error(w, "login page unavailable", http.StatusInternalServerError)
 		return
@@ -658,7 +633,7 @@ func handleLoginUI(w http.ResponseWriter, r *http.Request) {
 // Wrong credentials re-render the login form with an error rather than
 // 401, so the browser stays inside the login flow and the URL bar still
 // matches what the user expects.
-func handleLoginSubmit(state *loginState, w http.ResponseWriter, r *http.Request) {
+func handleLoginSubmit(state *LoginState, w http.ResponseWriter, r *http.Request) {
 	// ParseMultipartForm handles BOTH multipart/form-data (sent by the
 	// browser's FormData API, which the SPA's submitLogin uses) and
 	// application/x-www-form-urlencoded (sent by plain HTML forms). It
@@ -679,9 +654,9 @@ func handleLoginSubmit(state *loginState, w http.ResponseWriter, r *http.Request
 	}
 
 	// Check rate limit before attempting login
-	clientIP := getClientIP(r)
+	clientIP := util.GetClientIP(r)
 	if !state.checkRateLimit(clientIP) {
-		log.Printf("login: rate limit exceeded for IP %s", sanitizeLogInput(clientIP))
+		log.Printf("login: rate limit exceeded for IP %s", util.SanitizeLogInput(clientIP))
 		redirectToLoginWithError(w, r, next, "rate_limit_exceeded")
 		return
 	}
@@ -690,7 +665,7 @@ func handleLoginSubmit(state *loginState, w http.ResponseWriter, r *http.Request
 		// Record failed login attempt
 		state.recordFailedLogin(clientIP)
 		remaining := state.getRemainingAttempts(clientIP)
-		log.Printf("login: failed login attempt from %s (remaining attempts: %d)", sanitizeLogInput(clientIP), remaining)
+		log.Printf("login: failed login attempt from %s (remaining attempts: %d)", util.SanitizeLogInput(clientIP), remaining)
 		redirectToLoginWithError(w, r, next, "invalid_credentials")
 		return
 	}
@@ -698,14 +673,14 @@ func handleLoginSubmit(state *loginState, w http.ResponseWriter, r *http.Request
 	// Successful login - clear rate limit counter
 	state.recordSuccessfulLogin(clientIP)
 
-	// store.Get returns a usable (new, empty) session even when the
+	// Store.Get returns a usable (new, empty) session even when the
 	// existing cookie can't be decoded — e.g. after a server restart
 	// with a random session key, or a corrupted/tampered cookie. The
 	// returned error just means "I couldn't read the old session";
 	// the session itself is perfectly writable. Returning 500 here
 	// would lock users out whenever they carry a stale cookie, so we
 	// ignore the error and stamp the fresh session.
-	session, _ := store.Get(r, defaultSessionName)
+	session, _ := Store.Get(r, DefaultSessionName)
 	session.Values["user"] = &LoginUser{
 		Name:     username,
 		Provider: loginProviderName,
@@ -729,7 +704,7 @@ func redirectToLoginWithError(w http.ResponseWriter, r *http.Request, next, code
 // ?next= (or "/"). Idempotent: calling logout without an active
 // session is a no-op redirect.
 func handleLoginLogout(w http.ResponseWriter, r *http.Request) {
-	session, err := store.Get(r, defaultSessionName)
+	session, err := Store.Get(r, DefaultSessionName)
 	if err == nil {
 		delete(session.Values, "user")
 		session.Options.MaxAge = -1
@@ -748,10 +723,10 @@ func handleLoginLogout(w http.ResponseWriter, r *http.Request) {
 // from /-/user) so the SPA can tell the difference between "auth not
 // configured" and "auth configured but you're not signed in" — both
 // cases look the same (user == null) under /-/user alone.
-func handleAuthStatus(loginEnabled bool, state *loginState) http.Handler {
+func handleAuthStatus(loginEnabled bool, state *LoginState) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		user := userFromLoginSession(r)
+		user := UserFromLoginSession(r)
 		status := map[string]any{
 			"login_enabled": loginEnabled,
 		}
@@ -769,12 +744,12 @@ func handleAuthStatus(loginEnabled bool, state *loginState) http.Handler {
 	})
 }
 
-// handleChangePassword accepts JSON {old, new} and, if the caller is
+// HandleChangePassword accepts JSON {old, new} and, if the caller is
 // authenticated AND old matches, persists new. Authenticated here
-// means "logged in via --login" — we re-check via userFromLoginSession
+// means "logged in via --login" — we re-check via UserFromLoginSession
 // so an old OpenID cookie can't be used to rotate the local password.
-func handleChangePassword(state *loginState, w http.ResponseWriter, r *http.Request) {
-	if userFromLoginSession(r) == nil {
+func HandleChangePassword(state *LoginState, w http.ResponseWriter, r *http.Request) {
+	if UserFromLoginSession(r) == nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -799,16 +774,16 @@ func handleChangePassword(state *loginState, w http.ResponseWriter, r *http.Requ
 	_, _ = w.Write([]byte(`{"success":true}`))
 }
 
-// registerLoginRoutes wires the --login endpoints into a router. The
+// RegisterLoginRoutes wires the --login endpoints into a router. The
 // router passed in should be the post-prefix subrouter so --prefix works.
 // /-/login MUST be reachable *before* the loginAuthMiddleware, so
-// registerLoginRoutes also returns a flag set of internal paths the
+// RegisterLoginRoutes also returns a flag set of internal paths the
 // caller must NOT include in the gated handler chain.
 //
 // mux doesn't easily let you exclude paths from a handler, so the
 // caller must mount the gated handler on the / fallback route AFTER
 // these specific routes are registered.
-func registerLoginRoutes(router *mux.Router, state *loginState, loginEnabled bool) {
+func RegisterLoginRoutes(router *mux.Router, state *LoginState, loginEnabled bool) {
 	router.HandleFunc("/-/login", handleLoginUI).Methods("GET")
 	// Wrapper to bind state without dragging the parameter through
 	// every callsite.
@@ -819,6 +794,6 @@ func registerLoginRoutes(router *mux.Router, state *loginState, loginEnabled boo
 	router.HandleFunc("/-/logout", handleLoginLogout).Methods("GET")
 	router.HandleFunc("/-/api/auth/status", handleAuthStatus(loginEnabled, state).ServeHTTP).Methods("GET")
 	router.HandleFunc("/-/api/auth/password", func(w http.ResponseWriter, r *http.Request) {
-		handleChangePassword(state, w, r)
+		HandleChangePassword(state, w, r)
 	}).Methods("PUT")
 }

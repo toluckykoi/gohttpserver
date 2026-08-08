@@ -1,15 +1,30 @@
-FROM golang:1.16
-WORKDIR /appsrc/gohttpserver
-ADD . /appsrc/gohttpserver
-RUN GOOS=linux GOARCH=arm go build -ldflags '-X main.VERSION=docker' -o gohttpserver .
+# syntax=docker/dockerfile:1
 
-FROM multiarch/debian-debootstrap:armhf-stretch
+# ---------- Stage 1: build frontend ----------
+FROM node:20-alpine AS frontend
+WORKDIR /build
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+# ---------- Stage 2: build Go binary (armhf) ----------
+FROM golang:1.26-alpine AS build
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+COPY --from=frontend /build/dist ./frontend/dist
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -trimpath \
+    -ldflags '-s -w -X main.VERSION=docker' \
+    -o gohttpserver .
+
+# ---------- Stage 3: runtime ----------
+FROM arm32v7/alpine:3.21
+RUN apk add --no-cache ca-certificates
 WORKDIR /app
 RUN mkdir -p /app/public
-RUN apt-get update && apt-get install -y ca-certificates
 VOLUME /app/public
-ADD assets ./assets
-COPY --from=0 /appsrc/gohttpserver/gohttpserver .
+COPY --from=build /build/gohttpserver /usr/local/bin/gohttpserver
 EXPOSE 8000
-ENTRYPOINT [ "/app/gohttpserver", "--root=/app/public" ]
-CMD []
+ENTRYPOINT ["/usr/local/bin/gohttpserver", "--root=/app/public"]

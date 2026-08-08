@@ -25,6 +25,14 @@ import (
 	"github.com/goji/httpauth"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
+
+	"github.com/codeskyblue/gohttpserver/internal/admin"
+	"github.com/codeskyblue/gohttpserver/internal/auth"
+	"github.com/codeskyblue/gohttpserver/internal/frp"
+	"github.com/codeskyblue/gohttpserver/internal/server"
+	"github.com/codeskyblue/gohttpserver/internal/store"
+	"github.com/codeskyblue/gohttpserver/internal/util"
+	"github.com/codeskyblue/gohttpserver/internal/webdav"
 )
 
 type Configure struct {
@@ -285,7 +293,8 @@ func main() {
 		log.Printf("url prefix: %s", gcfg.Prefix)
 	}
 
-	ss := NewHTTPStaticServer(gcfg.Root, gcfg.NoIndex)
+	ss := server.NewHTTPStaticServer(gcfg.Root, gcfg.NoIndex)
+	ss.Assets = FrontendAssets
 	ss.Prefix = gcfg.Prefix
 	ss.Theme = gcfg.Theme
 	ss.Title = gcfg.Title
@@ -338,7 +347,7 @@ func main() {
 	}
 
 	// Parse local address for FRP auto-configuration
-	// When binding to 0.0.0.0 or ::, use getLocalIP() to get the real LAN IP
+	// When binding to 0.0.0.0 or ::, use util.GetLocalIP() to get the real LAN IP
 	// When binding to a specific IP, use that IP
 	localIP := "127.0.0.1"
 	localPort := gcfg.Port
@@ -346,7 +355,7 @@ func main() {
 		if host, portStr, err := net.SplitHostPort(gcfg.Addr); err == nil {
 			// If binding to all interfaces, get the real LAN IP
 			if host == "" || host == "0.0.0.0" || host == "::" {
-				if lanIP := getLocalIP(); lanIP != "" {
+				if lanIP := util.GetLocalIP(); lanIP != "" {
 					localIP = lanIP
 				}
 			} else {
@@ -372,14 +381,14 @@ func main() {
 	if dbPath == "" {
 		dbPath = "gohttpserver.db"
 	}
-	db, err := openDB(dbPath)
+	db, err := store.OpenDB(dbPath)
 	if err != nil {
 		log.Fatalf("open database %q: %v", dbPath, err)
 	}
 	defer db.Close()
 
 	// FRP client initialization with database for config persistence
-	frpClient := NewFRPClient(db)
+	frpClient := frp.NewFRPClient(db)
 
 	// Try to load FRP config from database first
 	dbFRPCfg, dbFRPEnabled, err := frpClient.LoadFromDB()
@@ -398,12 +407,12 @@ func main() {
 	}
 
 	// Determine which config to use: config file takes precedence over database
-	var frpCfg *FRPConfig
+	var frpCfg *frp.FRPConfig
 	var frpEnabled bool
 
 	if gcfg.FRP.Enabled || gcfg.FRP.ServerAddr != "" {
 		// Config file has FRP settings, use them
-		frpCfg = &FRPConfig{
+		frpCfg = &frp.FRPConfig{
 			ServerAddr: gcfg.FRP.ServerAddr,
 			ServerPort: gcfg.FRP.ServerPort,
 			AuthToken:  gcfg.FRP.AuthToken,
@@ -437,15 +446,16 @@ func main() {
 	// HTTP Basic / OpenID / oauth2-proxy switch so the gate covers those
 	// wrapped handlers too (a config like `--auth-type http --login`
 	// would otherwise only HTTP-basic-gate on top of an un-gated server).
-	var loginStateObj *loginState
+	var loginStateObj *auth.LoginState
 	if gcfg.Login {
-		loginStateObj = loadLoginCredentials(db)
+		auth.FrontendFS = frontendDistFS
+		loginStateObj = auth.LoadLoginCredentials(db)
 		// Routes must be registered BEFORE the catch-all router.PathPrefix("/").Handler(hdlr)
 		// below so mux routes /-/login specifically. Middleware is added to
 		// hdlr so the gate wraps everything (file handler, APIs) except
 		// the white-listed paths.
-		registerLoginRoutes(router, loginStateObj, true)
-		hdlr = loginAuthMiddleware(loginStateObj, hdlr)
+		auth.RegisterLoginRoutes(router, loginStateObj, true)
+		hdlr = auth.LoginAuthMiddleware(gcfg.Prefix, loginStateObj, hdlr)
 
 		// WebDAV server + admin API. Both depend on loginStateObj:
 		//   - webdav account usernames are bound to the login user
@@ -454,24 +464,24 @@ func main() {
 		// All three subsystems (login, webdav, usage) share the same
 		// SQLite handle — the database is the single source of truth
 		// for server-side state when --login is enabled.
-		webdavState := loadWebdavAccounts(db)
-		usageStateObj := loadUsageState(db)
+		webdavState := webdav.LoadWebdavAccounts(db)
+		usageStateObj := webdav.LoadUsageState(db)
 
 		// Startup recalculation: if the storage_usage table is empty but
 		// accounts exist (fresh DB with seeded accounts, or migration
 		// from a pre-quota build), seed the table by walking each
 		// account's chroot. Otherwise trust the cache — the operator
 		// can force a refresh via the admin endpoint.
-		if usageStateObj.isEmpty() {
-			for _, acc := range webdavState.list() {
+		if usageStateObj.IsEmpty() {
+			for _, acc := range webdavState.List() {
 				full := filepath.Join(gcfg.Root, acc.RootPath)
-				if err := usageStateObj.recalculate(full, acc.ID); err != nil {
+				if err := usageStateObj.Recalculate(full, acc.ID); err != nil {
 					log.Printf("webdav-quota: startup recalculate for %s failed: %v", acc.ID, err)
 				}
 			}
 		}
 
-		webdavSrv := newWebdavServer(gcfg.Root, webdavState, usageStateObj)
+		webdavSrv := webdav.NewWebdavServer(gcfg.Root, webdavState, usageStateObj)
 		// /dav/ is mounted on a subrouter so PROPFIND/PUT/DELETE/etc.
 		// all funnel through the same handler. PathPrefix matches the
 		// leading "/dav/" and the trailing wildcard is implicit.
@@ -484,21 +494,23 @@ func main() {
 		// Admin API sits behind the login gate (it's not in
 		// loginWhitelist), so an unauthenticated request is redirected
 		// to /-/login rather than reaching the handlers.
-		registerAdminRoutes(router, &adminAPI{
-			login:     loginStateObj,
-			webdav:    webdavState,
-			usage:     usageStateObj,
-			root:      gcfg.Root,
-			localAddr: gcfg.Addr,
-			frp:       frpClient,
-		})
+		admin.RegisterRoutes(router, &admin.API{
+		Login:     loginStateObj,
+		Webdav:    webdavState,
+		Usage:     usageStateObj,
+		Root:      gcfg.Root,
+		LocalAddr: gcfg.Addr,
+		FRP:       frpClient,
+		Version:   VERSION,
+	})
 	} else {
 		// When login is disabled, still register FRP routes but without
 		// authentication. This allows FRP management if needed.
-		registerAdminRoutes(router, &adminAPI{
-			localAddr: gcfg.Addr,
-			frp:       frpClient,
-		})
+		admin.RegisterRoutes(router, &admin.API{
+		LocalAddr: gcfg.Addr,
+		FRP:       frpClient,
+		Version:   VERSION,
+	})
 	}
 
 	// HTTP Basic Authentication
@@ -507,7 +519,7 @@ func main() {
 	case "http":
 		hdlr = multiBasicAuth(gcfg.Auth.HTTP)(hdlr)
 	case "openid":
-		handleOpenID(router, gcfg.Auth.OpenID, false) // FIXME(ssx): set secure default to false
+		auth.HandleOpenID(router, gcfg.Auth.OpenID, false) // FIXME(ssx): set secure default to false
 		userHandlerRegistered = true
 		// case "github":
 		// 	handleOAuth2ID(router, gcfg.Auth.Type, gcfg.Auth.ID, gcfg.Auth.Secret) // FIXME(ssx): set secure default to false
@@ -517,8 +529,8 @@ func main() {
 		// checks read it. Without this the per-user rules in .ghs.yml
 		// never matched, because canDelete/canUpload/canEdit only look
 		// at the session.
-		hdlr = oauth2ProxyMiddleware(hdlr)
-		handleOauth2(router)
+		hdlr = auth.Oauth2ProxyMiddleware(hdlr)
+		auth.HandleOauth2(router)
 		userHandlerRegistered = true
 	}
 
@@ -529,7 +541,7 @@ func main() {
 	if !userHandlerRegistered {
 		router.HandleFunc("/-/user", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			if u := userFromLoginSession(r); u != nil {
+			if u := auth.UserFromLoginSession(r); u != nil {
 				data, _ := json.Marshal(map[string]any{
 					"name":     u.Name,
 					"provider": u.Provider,
@@ -564,12 +576,12 @@ func main() {
 	// client can forge if the server is reachable without going through
 	// the proxy. Refuse to start on a non-loopback bind unless the
 	// operator explicitly acknowledges the risk with --allow-public-oauth2.
-	if gcfg.Auth.Type == "oauth2-proxy" && !gcfg.AllowPublicOauth2 && !isLoopbackAddr(gcfg.Addr) {
+	if gcfg.Auth.Type == "oauth2-proxy" && !gcfg.AllowPublicOauth2 && !auth.IsLoopbackAddr(gcfg.Addr) {
 		log.Fatalf("Refusing to start: auth-type=oauth2-proxy on non-loopback %s is insecure " +
 			"(clients can forge X-Auth-Request-* headers). Bind to 127.0.0.1:%s or use --allow-public-oauth2 " +
 			"only if a proxy in front strips those headers.", gcfg.Addr, port)
 	}
-	log.Printf("listening on %s, local address http://%s:%s\n", strconv.Quote(gcfg.Addr), getLocalIP(), port)
+	log.Printf("listening on %s, local address http://%s:%s\n", strconv.Quote(gcfg.Addr), util.GetLocalIP(), port)
 
 	srv := &http.Server{
 		Handler: mainRouter,
@@ -592,16 +604,16 @@ func main() {
 	// operator set GHS_SESSION_KEY (otherwise each restart mints a new
 	// signing key, invalidating all existing cookies).
 	if gcfg.SessionTTL > 0 {
-		store.Options.MaxAge = int(gcfg.SessionTTL.Seconds())
+		auth.Store.Options.MaxAge = int(gcfg.SessionTTL.Seconds())
 	} else {
-		store.Options.MaxAge = 0
+		auth.Store.Options.MaxAge = 0
 	}
 	log.Printf("session cookie ttl: %s", gcfg.SessionTTL)
 
 	// When serving over TLS, mark the session cookie Secure so browsers
 	// never send it over a plain-HTTP connection (downgrade sniffing).
 	if gcfg.Key != "" && gcfg.Cert != "" {
-		store.Options.Secure = true
+		auth.Store.Options.Secure = true
 	}
 
 	if gcfg.Key != "" && gcfg.Cert != "" {

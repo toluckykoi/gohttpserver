@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"database/sql"
@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS frp_config (
 // verify path; a single open connection sidesteps "database is locked"
 // contention on writes (write volume here is tiny — a password change or a
 // quota delta, never a hot loop).
-func openDB(path string) (*sql.DB, error) {
+func OpenDB(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", path, err)

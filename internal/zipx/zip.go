@@ -1,4 +1,4 @@
-package main
+package zipx
 
 import (
 	"archive/zip"
@@ -16,6 +16,12 @@ import (
 	dkignore "github.com/codeskyblue/dockerignore"
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
+
+// maxZipExpansionRatio rejects zip files whose uncompressed size exceeds
+// this multiple of the compressed size. A ratio > 100:1 is almost always
+// a zip bomb (typical text/code compresses ~3-10x; only highly repetitive
+// binary data achieves >100x).
+const maxZipExpansionRatio = 100
 
 type Zip struct {
 	*zip.Writer
@@ -92,7 +98,7 @@ func CompressToZip(w http.ResponseWriter, rootDir string) {
 
 	filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
 		zipPath := path[len(rootDir):]
-		if info.Name() == YAMLCONF { // ignore .ghs.yml for security
+		if info.Name() == ".ghs.yml" { // ignore .ghs.yml for security
 			return nil
 		}
 		return zw.Add(zipPath, path)
@@ -144,7 +150,7 @@ func ExtractFromZip(zipFile, path string, w io.Writer) (err error) {
 // uncompressed size exceeds maxZipExpansionRatio (100x) the compressed size,
 // extraction is rejected. Typical text/code compresses 3-10x; only highly
 // repetitive binary data achieves >100x, which is almost always malicious.
-func unzipFile(ctx context.Context, filename, dest string, onProgress func(idx, total int, name string)) error {
+func UnzipFile(ctx context.Context, filename, dest string, onProgress func(idx, total int, name string)) error {
 	zr, err := zip.OpenReader(filename)
 	if err != nil {
 		return err
