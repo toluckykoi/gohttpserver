@@ -466,28 +466,37 @@ func (api *API) handleFRPUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		ServerAddr string `json:"serverAddr"`
-		ServerPort int    `json:"serverPort"`
-		AuthToken  string `json:"authToken"`
-		ProxyName  string `json:"proxyName"`
-		ProxyType  string `json:"proxyType"`
-		LocalIP    string `json:"localIP"`
-		LocalPort  int    `json:"localPort"`
-		RemotePort int    `json:"remotePort"`
+		ServerAddr           string `json:"serverAddr"`
+		ServerPort           int    `json:"serverPort"`
+		AuthToken            string `json:"authToken"`
+		ProxyName            string `json:"proxyName"`
+		ProxyType            string `json:"proxyType"`
+		LocalIP              string `json:"localIP"`
+		LocalPort            int    `json:"localPort"`
+		RemotePort           int    `json:"remotePort"`
+		ProxyProtocolVersion string `json:"proxyProtocolVersion"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
+	// Validate proxyProtocolVersion
+	if req.ProxyProtocolVersion != "" &&
+		req.ProxyProtocolVersion != "v1" &&
+		req.ProxyProtocolVersion != "v2" {
+		http.Error(w, "Invalid proxyProtocolVersion, must be v1 or v2", http.StatusBadRequest)
+		return
+	}
 	cfg := &frp.FRPConfig{
-		ServerAddr: req.ServerAddr,
-		ServerPort: req.ServerPort,
-		AuthToken:  req.AuthToken,
-		ProxyName:  req.ProxyName,
-		ProxyType:  req.ProxyType,
-		LocalIP:    req.LocalIP,
-		LocalPort:  req.LocalPort,
-		RemotePort: req.RemotePort,
+		ServerAddr:           req.ServerAddr,
+		ServerPort:           req.ServerPort,
+		AuthToken:            req.AuthToken,
+		ProxyName:            req.ProxyName,
+		ProxyType:            req.ProxyType,
+		LocalIP:              req.LocalIP,
+		LocalPort:            req.LocalPort,
+		RemotePort:           req.RemotePort,
+		ProxyProtocolVersion: req.ProxyProtocolVersion,
 	}
 	// Auto-fill local address from program's listening address if not specified
 	if cfg.LocalIP == "" || cfg.LocalIP == "127.0.0.1" {

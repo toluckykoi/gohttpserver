@@ -83,6 +83,16 @@
               <el-option label="HTTPS" value="https" />
             </el-select>
           </el-form-item>
+          <el-form-item label="Proxy Protocol">
+            <el-select v-model="form.proxyProtocolVersion" style="width: 100%">
+              <el-option label="Disabled" value="" />
+              <el-option label="v1" value="v1" />
+              <el-option label="v2" value="v2" />
+            </el-select>
+            <div class="form-item-hint">
+              Enable Proxy Protocol to pass real client IP through FRP. Requires FRP server to support Proxy Protocol.
+            </div>
+          </el-form-item>
         </div>
 
         <!-- Local settings (auto-detected, read-only) -->
@@ -177,6 +187,7 @@ const form = reactive({
   localIP: '127.0.0.1',
   localPort: 8000,
   remotePort: 30000,
+  proxyProtocolVersion: '',
 })
 
 // Load config from store when status changes
@@ -192,6 +203,7 @@ watch(
       form.localIP = config.localIP || '127.0.0.1'
       form.localPort = config.localPort || 8000
       form.remotePort = config.remotePort || 30000
+      form.proxyProtocolVersion = config.proxyProtocolVersion || ''
     }
   },
   { immediate: true, deep: true }
@@ -243,6 +255,7 @@ async function handleSaveConfig() {
       localIP: form.localIP,
       localPort: form.localPort,
       remotePort: form.remotePort,
+      proxyProtocolVersion: form.proxyProtocolVersion,
     })
     if (res.ok) {
       ElMessage.success('Configuration saved')

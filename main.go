@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -25,6 +26,7 @@ import (
 	"github.com/goji/httpauth"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
+	proxyproto "github.com/pires/go-proxyproto"
 
 	"github.com/codeskyblue/gohttpserver/internal/admin"
 	"github.com/codeskyblue/gohttpserver/internal/auth"
@@ -83,7 +85,34 @@ type Configure struct {
 type httpLogger struct{}
 
 func (l httpLogger) Log(record accesslog.LogRecord) {
-	log.Printf("%s - %s %d %s", record.Ip, record.Method, record.Status, record.Uri)
+	// 判断访问来源：FRP 或本地
+	// 通过判断 IP 地址是否为内网地址来区分
+	accessType := "LOCAL"
+	ip := net.ParseIP(record.Ip)
+	if ip != nil && !isPrivateIP(ip) {
+		// 公网 IP 说明是通过 FRP 访问
+		accessType = "FRP"
+	}
+	log.Printf("[%s] %s - %s %d %s", accessType, record.Ip, record.Method, record.Status, record.Uri)
+}
+
+// isPrivateIP 判断 IP 是否为内网地址
+func isPrivateIP(ip net.IP) bool {
+	privateRanges := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"127.0.0.0/8",
+		"::1/128",
+		"fc00::/7",
+	}
+	for _, cidr := range privateRanges {
+		_, network, _ := net.ParseCIDR(cidr)
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 var (
@@ -616,10 +645,31 @@ func main() {
 		auth.Store.Options.Secure = true
 	}
 
+	// Create listener and wrap with proxyproto for FRP real IP support
+	ln, err := net.Listen("tcp", gcfg.Addr)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Wrap listener with proxyproto to support HAProxy PROXY protocol
+	// This allows FRP to pass real client IP when ProxyProtocol is enabled
+	proxyLn := &proxyproto.Listener{
+		Listener:          ln,
+		Policy:            func(upstream net.Addr) (proxyproto.Policy, error) { return proxyproto.USE, nil },
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	defer proxyLn.Close()
+
+	// For TLS, wrap the proxyproto listener with TLS
 	if gcfg.Key != "" && gcfg.Cert != "" {
-		err = srv.ListenAndServeTLS(gcfg.Cert, gcfg.Key)
+		tlsConfig := &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		}
+		tlsLn := tls.NewListener(proxyLn, tlsConfig)
+		defer tlsLn.Close()
+		err = srv.Serve(tlsLn)
 	} else {
-		err = srv.ListenAndServe()
+		err = srv.Serve(proxyLn)
 	}
 	log.Fatal(err)
 }
