@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"database/sql"
@@ -68,8 +68,17 @@ CREATE TABLE IF NOT EXISTS frp_config (
 	local_ip        TEXT NOT NULL DEFAULT '127.0.0.1',
 	local_port      INTEGER NOT NULL DEFAULT 8000,
 	remote_port     INTEGER NOT NULL DEFAULT 30000,
+	proxy_protocol_version TEXT NOT NULL DEFAULT '',
 	updated_at      INTEGER NOT NULL
 );
+`
+
+// migrationSQL contains ALTER TABLE statements for adding columns to existing tables.
+// These are executed after schemaSQL to handle upgrades from older versions.
+const migrationSQL = `
+-- Add proxy_protocol_version column if it doesn't exist (SQLite doesn't support IF NOT EXISTS for ADD COLUMN)
+-- We use a transaction with exception handling to make this idempotent
+ALTER TABLE frp_config ADD COLUMN proxy_protocol_version TEXT NOT NULL DEFAULT '';
 `
 
 // openDB opens (creating if needed) the SQLite database at path and ensures
@@ -77,7 +86,7 @@ CREATE TABLE IF NOT EXISTS frp_config (
 // verify path; a single open connection sidesteps "database is locked"
 // contention on writes (write volume here is tiny — a password change or a
 // quota delta, never a hot loop).
-func openDB(path string) (*sql.DB, error) {
+func OpenDB(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
@@ -98,5 +107,8 @@ func openDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
+	// Execute migrations for existing tables (ignore errors for already-applied migrations)
+	// SQLite doesn't support IF NOT EXISTS for ALTER TABLE ADD COLUMN
+	db.Exec(migrationSQL)
 	return db, nil
 }

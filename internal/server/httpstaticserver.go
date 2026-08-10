@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"archive/zip"
@@ -33,6 +33,11 @@ import (
 	"github.com/go-yaml/yaml"
 	"github.com/gorilla/mux"
 	"github.com/shogo82148/androidbinary/apk"
+
+	"github.com/codeskyblue/gohttpserver/internal/auth"
+	"github.com/codeskyblue/gohttpserver/internal/ipa"
+	"github.com/codeskyblue/gohttpserver/internal/util"
+	"github.com/codeskyblue/gohttpserver/internal/zipx"
 )
 
 const YAMLCONF = ".ghs.yml"
@@ -48,6 +53,10 @@ const maxUploadSize int64 = 10 * 1024 * 1024 * 1024
 // a zip bomb (typical text/code compresses ~3-10x; only highly repetitive
 // binary data achieves >100x).
 const maxZipExpansionRatio = 100
+
+// defaultPlistProxy is the fallback plist proxy used when s.PlistProxy is
+// empty. Kept here so the server package is self-contained.
+const defaultPlistProxy = "https://plistproxy.herokuapp.com/plist"
 
 type ApkInfo struct {
 	PackageName  string `json:"packageName"`
@@ -81,6 +90,8 @@ type HTTPStaticServer struct {
 	AuthType         string
 	DeepPathMaxDepth int
 	NoIndex          bool
+	// Assets is the embedded frontend filesystem, set by main at startup.
+	Assets http.FileSystem
 
 	// indexes is read by findIndex (HTTP goroutines) and overwritten by
 	// the background makeIndex loop. Stored as an atomic pointer so
@@ -228,14 +239,14 @@ func (s *HTTPStaticServer) hIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Println("GET", sanitizeLogInput(path), sanitizeLogInput(realPath))
-	if r.FormValue("raw") == "false" || isDir(realPath) {
+	log.Println("GET", util.SanitizeLogInput(path), util.SanitizeLogInput(realPath))
+	if r.FormValue("raw") == "false" || util.IsDir(realPath) {
 		if r.Method == "HEAD" {
 			return
 		}
 		// Serve the Vue 3 frontend for directory listings
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		f, err := FrontendAssets.Open("index.html")
+		f, err := s.Assets.Open("index.html")
 		if err != nil {
 			http.Error(w, "Frontend not built", http.StatusNotFound)
 			return
@@ -279,7 +290,7 @@ func (s *HTTPStaticServer) hDelete(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		// Log the detailed error internally; return a generic message so
 		// the response body doesn't leak the server's absolute path.
-		log.Printf("delete %q failed: %v", sanitizeLogInput(realPath), err)
+		log.Printf("delete %q failed: %v", util.SanitizeLogInput(realPath), err)
 		http.Error(w, "Delete failed", http.StatusInternalServerError)
 		return
 	}
@@ -302,7 +313,7 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 
 	if _, err := os.Stat(dirpath); os.IsNotExist(err) {
 		if err := os.MkdirAll(dirpath, os.ModePerm); err != nil {
-			log.Printf("mkdir %q: %v", sanitizeLogInput(dirpath), err)
+			log.Printf("mkdir %q: %v", util.SanitizeLogInput(dirpath), err)
 			http.Error(w, "Directory create failed", http.StatusInternalServerError)
 			return
 		}
@@ -369,7 +380,7 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 		// create "MyFolder/" and "MyFolder/sub/" too.
 		if parent := filepath.Dir(dstPath); parent != dirpath {
 			if err := os.MkdirAll(parent, os.ModePerm); err != nil {
-				log.Printf("mkdir parent %q: %v", sanitizeLogInput(parent), err)
+				log.Printf("mkdir parent %q: %v", util.SanitizeLogInput(parent), err)
 				http.Error(w, "Directory create failed", http.StatusInternalServerError)
 				return
 			}
@@ -389,7 +400,7 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 	var copyErr error
 	dst, err := os.Create(dstPath)
 	if err != nil {
-		log.Printf("create file %q: %v", sanitizeLogInput(dstPath), err)
+		log.Printf("create file %q: %v", util.SanitizeLogInput(dstPath), err)
 		http.Error(w, "File create failed", http.StatusInternalServerError)
 		return
 	}
@@ -399,7 +410,7 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 	_, copyErr = io.CopyBuffer(dst, file, buf)
 	dst.Close()
 	if copyErr != nil {
-		log.Printf("upload copy %q: %v", sanitizeLogInput(dstPath), copyErr)
+		log.Printf("upload copy %q: %v", util.SanitizeLogInput(dstPath), copyErr)
 		http.Error(w, "Upload failed", http.StatusInternalServerError)
 		return
 	}
@@ -431,7 +442,7 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 			}
 		}
 
-		err = unzipFile(req.Context(), dstPath, dirpath, func(idx, total int, name string) {
+		err = zipx.UnzipFile(req.Context(), dstPath, dirpath, func(idx, total int, name string) {
 			// Best-effort JSON-encode the file name; invalid UTF-8
 			// sequences are replaced rather than aborting extraction.
 			encoded, _ := json.Marshal(name)
@@ -502,7 +513,7 @@ func (s *HTTPStaticServer) hEdit(w http.ResponseWriter, req *http.Request) {
 		if os.IsNotExist(err) {
 			http.Error(w, "File not found", http.StatusNotFound)
 		} else {
-			log.Printf("edit stat %q: %v", sanitizeLogInput(dstPath), err)
+			log.Printf("edit stat %q: %v", util.SanitizeLogInput(dstPath), err)
 			http.Error(w, "Stat failed", http.StatusInternalServerError)
 		}
 		return
@@ -546,7 +557,7 @@ func (s *HTTPStaticServer) hEdit(w http.ResponseWriter, req *http.Request) {
 
 	dst, err := os.Create(dstPath)
 	if err != nil {
-		log.Printf("edit create %q: %v", sanitizeLogInput(dstPath), err)
+		log.Printf("edit create %q: %v", util.SanitizeLogInput(dstPath), err)
 		http.Error(w, "File create failed", http.StatusInternalServerError)
 		return
 	}
@@ -562,7 +573,7 @@ func (s *HTTPStaticServer) hEdit(w http.ResponseWriter, req *http.Request) {
 		if cerr := dst.Close(); cerr == nil {
 			os.Truncate(dstPath, fi.Size())
 		}
-		log.Printf("edit copy %q: %v", sanitizeLogInput(dstPath), copyErr)
+		log.Printf("edit copy %q: %v", util.SanitizeLogInput(dstPath), copyErr)
 		http.Error(w, "Edit failed", http.StatusInternalServerError)
 		return
 	}
@@ -736,7 +747,7 @@ func (s *HTTPStaticServer) hFetch(w http.ResponseWriter, req *http.Request) {
 	// Make sure the parent dir exists (mirrors hUploadOrMkdir).
 	if _, err := os.Stat(dirpath); os.IsNotExist(err) {
 		if err := os.MkdirAll(dirpath, os.ModePerm); err != nil {
-			log.Printf("fetch mkdir %q: %v", sanitizeLogInput(dirpath), err)
+			log.Printf("fetch mkdir %q: %v", util.SanitizeLogInput(dirpath), err)
 			http.Error(w, "Directory create failed", http.StatusInternalServerError)
 			return
 		}
@@ -760,7 +771,7 @@ func (s *HTTPStaticServer) hFetch(w http.ResponseWriter, req *http.Request) {
 	httpReq, _ := http.NewRequestWithContext(req.Context(), "GET", parsed.String(), nil)
 	httpResp, err := client.Do(httpReq)
 	if err != nil {
-		log.Printf("fetch %q: %v", sanitizeLogInput(parsed.String()), err)
+		log.Printf("fetch %q: %v", util.SanitizeLogInput(parsed.String()), err)
 		http.Error(w, "Fetch failed", http.StatusBadGateway)
 		return
 	}
@@ -773,7 +784,7 @@ func (s *HTTPStaticServer) hFetch(w http.ResponseWriter, req *http.Request) {
 
 	dst, err := os.Create(dstPath)
 	if err != nil {
-		log.Printf("fetch create %q: %v", sanitizeLogInput(dstPath), err)
+		log.Printf("fetch create %q: %v", util.SanitizeLogInput(dstPath), err)
 		http.Error(w, "File create failed", http.StatusInternalServerError)
 		return
 	}
@@ -785,7 +796,7 @@ func (s *HTTPStaticServer) hFetch(w http.ResponseWriter, req *http.Request) {
 	if copyErr != nil {
 		// Roll back: drop the partial file. The user can re-trigger.
 		os.Remove(dstPath)
-		log.Printf("fetch copy %q: %v", sanitizeLogInput(dstPath), copyErr)
+		log.Printf("fetch copy %q: %v", util.SanitizeLogInput(dstPath), copyErr)
 		http.Error(w, "Fetch copy failed", http.StatusBadGateway)
 		return
 	}
@@ -886,7 +897,7 @@ func (s *HTTPStaticServer) hInfo(w http.ResponseWriter, r *http.Request) {
 		if os.IsNotExist(err) {
 			http.Error(w, "File not found", http.StatusNotFound)
 		} else {
-			log.Printf("info stat %q: %v", sanitizeLogInput(relPath), err)
+			log.Printf("info stat %q: %v", util.SanitizeLogInput(relPath), err)
 			http.Error(w, "Stat failed", http.StatusInternalServerError)
 		}
 		return
@@ -912,7 +923,7 @@ func (s *HTTPStaticServer) hInfo(w http.ResponseWriter, r *http.Request) {
 		// returns nil + an error if the file isn't a valid IPA;
 		// we degrade to type:"text" rather than 500-ing.
 		fji.Type = "ipa"
-		if plinfo, perr := parseIPA(relPath); perr == nil && plinfo != nil {
+		if plinfo, perr := ipa.ParseIPA(relPath); perr == nil && plinfo != nil {
 			fji.Extra = plinfo
 		} else {
 			fji.Extra = nil
@@ -937,7 +948,7 @@ func (s *HTTPStaticServer) hInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *HTTPStaticServer) hZip(w http.ResponseWriter, r *http.Request) {
-	CompressToZip(w, s.getRealPath(r))
+	zipx.CompressToZip(w, s.getRealPath(r))
 }
 
 // zipMultiRequest is the body shape posted by the frontend's multi-select
@@ -975,19 +986,19 @@ func (s *HTTPStaticServer) hZipMulti(w http.ResponseWriter, r *http.Request) {
 	// immediately rather than being held by an intermediate proxy.
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	zw := &Zip{Writer: zip.NewWriter(w)}
+	zw := &zipx.Zip{Writer: zip.NewWriter(w)}
 	defer zw.Close()
 
 	for _, p := range req.Paths {
 		realPath := s.resolvePath(p)
 		// Verify the resolved path is under root to prevent path traversal
 		if !isUnderRoot(realPath, s.Root) {
-			log.Printf("zip-multi path traversal blocked: %q", sanitizeLogInput(realPath))
+			log.Printf("zip-multi path traversal blocked: %q", util.SanitizeLogInput(realPath))
 			continue
 		}
 		info, err := os.Stat(realPath)
 		if err != nil {
-			log.Printf("zip-multi skip %q: %v", sanitizeLogInput(realPath), err)
+			log.Printf("zip-multi skip %q: %v", util.SanitizeLogInput(realPath), err)
 			continue
 		}
 
@@ -1002,7 +1013,7 @@ func (s *HTTPStaticServer) hZipMulti(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					// Skip entries we can't read rather than aborting
 					// the whole archive.
-					log.Printf("zip-multi walk skip %q: %v", sanitizeLogInput(path), err)
+					log.Printf("zip-multi walk skip %q: %v", util.SanitizeLogInput(path), err)
 					return nil
 				}
 				if fi.Name() == YAMLCONF {
@@ -1019,13 +1030,13 @@ func (s *HTTPStaticServer) hZipMulti(w http.ResponseWriter, r *http.Request) {
 				return zw.Add(zipPath, path)
 			})
 			if walkErr != nil {
-				log.Printf("zip-multi walk %q: %v", sanitizeLogInput(realPath), walkErr)
+				log.Printf("zip-multi walk %q: %v", util.SanitizeLogInput(realPath), walkErr)
 			}
 			continue
 		}
 
 		if err := zw.Add(entryName, realPath); err != nil {
-			log.Printf("zip-multi add %q: %v", sanitizeLogInput(realPath), err)
+			log.Printf("zip-multi add %q: %v", util.SanitizeLogInput(realPath), err)
 		}
 	}
 }
@@ -1047,11 +1058,11 @@ func (s *HTTPStaticServer) hUnzip(w http.ResponseWriter, r *http.Request) {
 	if ctype != "" {
 		w.Header().Set("Content-Type", ctype)
 	}
-	err := ExtractFromZip(absZip, path, w)
+	err := zipx.ExtractFromZip(absZip, path, w)
 	if err != nil {
 		// Log the detailed error (may contain the absolute archive path);
 		// return a generic message so the response body doesn't leak it.
-		log.Printf("unzip %q: %v", sanitizeLogInput(absZip), err)
+		log.Printf("unzip %q: %v", util.SanitizeLogInput(absZip), err)
 		http.Error(w, "Extract failed", http.StatusInternalServerError)
 		return
 	}
@@ -1073,11 +1084,11 @@ func (s *HTTPStaticServer) hPlist(w http.ResponseWriter, r *http.Request) {
 	}
 
 	relPath := s.getRealPath(r)
-	plinfo, err := parseIPA(relPath)
+	plinfo, err := ipa.ParseIPA(relPath)
 	if err != nil {
 		// parseIPA opens the zip on disk; its error may contain the
 		// absolute server path (e.g. "open /srv/foo.ipa: ...").
-		log.Printf("plist parse %q: %v", sanitizeLogInput(relPath), err)
+		log.Printf("plist parse %q: %v", util.SanitizeLogInput(relPath), err)
 		http.Error(w, "Failed to parse IPA", http.StatusInternalServerError)
 		return
 	}
@@ -1090,7 +1101,7 @@ func (s *HTTPStaticServer) hPlist(w http.ResponseWriter, r *http.Request) {
 		Scheme: scheme,
 		Host:   r.Host,
 	}
-	data, err := generateDownloadPlist(baseURL, path, plinfo)
+	data, err := ipa.GenerateDownloadPlist(baseURL, path, plinfo)
 	if err != nil {
 		log.Printf("plist gen: %v", err)
 		http.Error(w, "Failed to generate plist", http.StatusInternalServerError)
@@ -1243,31 +1254,8 @@ func (c *AccessConf) canAccess(fileName string) bool {
 	return true
 }
 
-// userFromSession extracts the logged-in user from the session cookie.
-// Returns nil when there is no session, the value is absent, or —
-// crucially — when the stored value is not an *UserInfo. The previous
-// code used a panic-style type assertion (val.(*UserInfo)); a crafted
-// or legacy cookie whose "user" value deserialised to a different type
-// would crash the request goroutine. The comma-ok form degrades
-// gracefully to "not logged in" instead.
-func userFromSession(r *http.Request) *UserInfo {
-	session, err := store.Get(r, defaultSessionName)
-	if err != nil {
-		return nil
-	}
-	val := session.Values["user"]
-	if val == nil {
-		return nil
-	}
-	userInfo, ok := val.(*UserInfo)
-	if !ok {
-		return nil
-	}
-	return userInfo
-}
-
 func (c *AccessConf) canDelete(r *http.Request) bool {
-	userInfo := userFromSession(r)
+	userInfo := auth.UserFromSession(r)
 	if userInfo == nil {
 		return c.Delete
 	}
@@ -1306,7 +1294,7 @@ func (c *AccessConf) canEditByToken(token string) bool {
 }
 
 func (c *AccessConf) canEditSession(r *http.Request) bool {
-	userInfo := userFromSession(r)
+	userInfo := auth.UserFromSession(r)
 	if userInfo == nil {
 		return c.Edit
 	}
@@ -1319,7 +1307,7 @@ func (c *AccessConf) canEditSession(r *http.Request) bool {
 }
 
 func (c *AccessConf) canUploadSession(r *http.Request) bool {
-	userInfo := userFromSession(r)
+	userInfo := auth.UserFromSession(r)
 	if userInfo == nil {
 		return c.Upload
 	}
@@ -1336,7 +1324,7 @@ func (c *AccessConf) canEdit(r *http.Request) bool {
 	if token != "" {
 		return c.canEditByToken(token)
 	}
-	userInfo := userFromSession(r)
+	userInfo := auth.UserFromSession(r)
 	if userInfo == nil {
 		return c.Edit
 	}
@@ -1353,7 +1341,7 @@ func (c *AccessConf) canUpload(r *http.Request) bool {
 	if token != "" {
 		return c.canUploadByToken(token)
 	}
-	userInfo := userFromSession(r)
+	userInfo := auth.UserFromSession(r)
 	if userInfo == nil {
 		return c.Upload
 	}
@@ -1403,7 +1391,7 @@ func (s *HTTPStaticServer) hJSONList(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			// err contains the absolute server path; log it internally
 			// and return a generic message to the client.
-			log.Printf("readdir %q: %v", sanitizeLogInput(realPath), err)
+			log.Printf("readdir %q: %v", util.SanitizeLogInput(realPath), err)
 			http.Error(w, "Failed to list directory", http.StatusInternalServerError)
 			return
 		}
@@ -1597,7 +1585,7 @@ func (s *HTTPStaticServer) readAccessConf(realPath string) (ac AccessConf) {
 		parentPath := filepath.Dir(realPath)
 		ac = s.readAccessConf(parentPath)
 	}
-	if isFile(realPath) {
+	if util.IsFile(realPath) {
 		realPath = filepath.Dir(realPath)
 	}
 	cfgFile := filepath.Join(realPath, YAMLCONF)

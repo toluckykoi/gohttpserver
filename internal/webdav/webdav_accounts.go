@@ -1,7 +1,8 @@
-package main
+package webdav
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
@@ -14,9 +15,11 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+
+	storedb "github.com/codeskyblue/gohttpserver/internal/store"
 )
 
-// webdavAccount is a single WebDAV credential entry. The username is
+// WebdavAccount is a single WebDAV credential entry. The username is
 // always the current login user's name (bound at creation); the password
 // is an independent random 10-char string so a leaked WebDAV password
 // doesn't compromise the login password.
@@ -24,7 +27,7 @@ import (
 // The on-disk representation never stores the plaintext password — only
 // the SHA-256 hash. Plaintext is returned to the caller exactly once, at
 // creation / reset time, and is never recoverable afterwards.
-type webdavAccount struct {
+type WebdavAccount struct {
 	ID                 string `json:"id"`
 	Remark             string `json:"remark"`
 	Username           string `json:"username"`
@@ -41,22 +44,22 @@ type webdavAccount struct {
 	UpdatedAtUnix int64 `json:"updated_at"`
 }
 
-// webdavAccountsFile is the in-memory shape of the WebDAV account state.
+// WebdavAccountsFile is the in-memory shape of the WebDAV account state.
 // The top-level "enabled" flag lets the operator turn the whole WebDAV
 // server off without deleting configured accounts. It is persisted to the
 // webdav_meta table (key="enabled") and the webdav_accounts table.
-type webdavAccountsFile struct {
+type WebdavAccountsFile struct {
 	Enabled  bool            `json:"enabled"`
-	Accounts []webdavAccount `json:"accounts"`
+	Accounts []WebdavAccount `json:"accounts"`
 }
 
-// webdavAccountState is the in-memory state, guarded by a RWMutex.
+// WebdavAccountState is the in-memory state, guarded by a RWMutex.
 // Persistence is backed by SQLite (webdav_accounts + webdav_meta tables),
 // replacing the previous webdav-accounts.json file. Snapshot reads under
 // the read lock, transactional writes under the write lock.
-type webdavAccountState struct {
+type WebdavAccountState struct {
 	mu     sync.RWMutex
-	data   *webdavAccountsFile
+	data   *WebdavAccountsFile
 	db     *sql.DB
 	dbPath string // kept so tests can reopen the same DB to verify persistence
 }
@@ -77,23 +80,23 @@ var systemFileNames = map[string]bool{
 	"favicon.png":          true,
 }
 
-// loadWebdavAccounts reads the WebDAV account state from SQLite (or returns
+// LoadWebdavAccounts reads the WebDAV account state from SQLite (or returns
 // an empty, disabled state if nothing is stored yet). Errors during read
 // are logged but non-fatal — the server falls back to an empty state
 // rather than refusing to start.
-func loadWebdavAccounts(db *sql.DB) *webdavAccountState {
-	return loadWebdavAccountsAt(db, "")
+func LoadWebdavAccounts(db *sql.DB) *WebdavAccountState {
+	return LoadWebdavAccountsAt(db, "")
 }
 
-// loadWebdavAccountsAt is loadWebdavAccounts with the database path
+// LoadWebdavAccountsAt is LoadWebdavAccounts with the database path
 // recorded on the returned state. Tests use the path to reopen the same
 // DB to verify persistence. Production callers (main.go) use the
 // parameter-less variant and ignore the empty path.
-func loadWebdavAccountsAt(db *sql.DB, path string) *webdavAccountState {
-	st := &webdavAccountState{
+func LoadWebdavAccountsAt(db *sql.DB, path string) *WebdavAccountState {
+	st := &WebdavAccountState{
 		db:     db,
 		dbPath: path,
-		data:   &webdavAccountsFile{Enabled: false},
+		data:   &WebdavAccountsFile{Enabled: false},
 	}
 
 	// Read the enabled flag from webdav_meta.
@@ -115,7 +118,7 @@ func loadWebdavAccountsAt(db *sql.DB, path string) *webdavAccountState {
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var a webdavAccount
+		var a WebdavAccount
 		if scanErr := rows.Scan(
 			&a.ID, &a.Remark, &a.Username, &a.PasswordSHA, &a.RootPath,
 			&a.ReadOnly, &a.ProtectSystemFiles, &a.QuotaBytes,
@@ -133,16 +136,16 @@ func loadWebdavAccountsAt(db *sql.DB, path string) *webdavAccountState {
 	return st
 }
 
-// webdavAccountsFromDB opens the database at path and loads the WebDAV
+// WebdavAccountsFromDB opens the database at path and loads the WebDAV
 // account state. Test-only convenience for re-opening the same DB to
 // verify persistence. Cleanup of the new handle is the caller's
 // responsibility (close the state.db or register a t.Cleanup).
-func webdavAccountsFromDB(path string) (*webdavAccountState, error) {
-	db, err := openDB(path)
+func WebdavAccountsFromDB(path string) (*WebdavAccountState, error) {
+	db, err := storedb.OpenDB(path)
 	if err != nil {
 		return nil, err
 	}
-	return loadWebdavAccountsAt(db, path), nil
+	return LoadWebdavAccountsAt(db, path), nil
 }
 
 // generateWebdavPassword returns a random 10-character alphanumeric
@@ -172,15 +175,15 @@ func generateWebdavID() (string, error) {
 	return "wd_" + hex.EncodeToString(b[:]), nil
 }
 
-// isEnabled returns whether the WebDAV server should accept connections.
-func (s *webdavAccountState) isEnabled() bool {
+// IsEnabled returns whether the WebDAV server should accept connections.
+func (s *WebdavAccountState) IsEnabled() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.data.Enabled
 }
 
-// setEnabled flips the master switch and persists to disk.
-func (s *webdavAccountState) setEnabled(on bool) error {
+// SetEnabled flips the master switch and persists to disk.
+func (s *WebdavAccountState) SetEnabled(on bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.data.Enabled = on
@@ -188,18 +191,18 @@ func (s *webdavAccountState) setEnabled(on bool) error {
 }
 
 // list returns a copy of all accounts.
-func (s *webdavAccountState) list() []webdavAccount {
+func (s *WebdavAccountState) List() []WebdavAccount {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]webdavAccount, len(s.data.Accounts))
+	out := make([]WebdavAccount, len(s.data.Accounts))
 	copy(out, s.data.Accounts)
 	return out
 }
 
-// createAccountRequest is the JSON body accepted by POST
+// CreateAccountRequest is the JSON body accepted by POST
 // /-/api/admin/webdav/accounts. Password is NOT accepted — the server
 // generates it and returns the plaintext in the response.
-type createAccountRequest struct {
+type CreateAccountRequest struct {
 	Remark             string `json:"remark"`
 	RootPath           string `json:"root_path"`
 	ReadOnly           bool   `json:"readonly"`
@@ -208,33 +211,33 @@ type createAccountRequest struct {
 	QuotaBytes int64 `json:"quota_bytes"`
 }
 
-// createAccount validates the request, generates a random password, and
+// CreateAccount validates the request, generates a random password, and
 // persists the new entry. Returns the created account plus the plaintext
 // password — the caller returns the plaintext in the HTTP response
 // exactly once.
-func (s *webdavAccountState) createAccount(req createAccountRequest, loginUsername string) (webdavAccount, string, error) {
+func (s *WebdavAccountState) CreateAccount(req CreateAccountRequest, loginUsername string) (WebdavAccount, string, error) {
 	if req.Remark == "" {
-		return webdavAccount{}, "", errors.New("remark is required")
+		return WebdavAccount{}, "", errors.New("remark is required")
 	}
 	root, err := normaliseWebdavRoot(req.RootPath)
 	if err != nil {
-		return webdavAccount{}, "", err
+		return WebdavAccount{}, "", err
 	}
 	id, err := generateWebdavID()
 	if err != nil {
-		return webdavAccount{}, "", fmt.Errorf("generate id: %w", err)
+		return WebdavAccount{}, "", fmt.Errorf("generate id: %w", err)
 	}
 	pw, err := generateWebdavPassword()
 	if err != nil {
-		return webdavAccount{}, "", fmt.Errorf("generate password: %w", err)
+		return WebdavAccount{}, "", fmt.Errorf("generate password: %w", err)
 	}
 	// Use bcrypt for password hashing
 	hash, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
 	if err != nil {
-		return webdavAccount{}, "", fmt.Errorf("hash password: %w", err)
+		return WebdavAccount{}, "", fmt.Errorf("hash password: %w", err)
 	}
 	now := time.Now().Unix()
-	acc := webdavAccount{
+	acc := WebdavAccount{
 		ID:                 id,
 		Remark:             req.Remark,
 		Username:           loginUsername,
@@ -253,16 +256,16 @@ func (s *webdavAccountState) createAccount(req createAccountRequest, loginUserna
 		// Roll back the in-memory append so list() doesn't return an
 		// account whose persistence failed.
 		s.data.Accounts = s.data.Accounts[:len(s.data.Accounts)-1]
-		return webdavAccount{}, "", err
+		return WebdavAccount{}, "", err
 	}
 	return acc, pw, nil
 }
 
-// updateAccountRequest is the JSON body for PUT
+// UpdateAccountRequest is the JSON body for PUT
 // /-/api/admin/webdav/accounts/{id}. Password and Username are
 // intentionally NOT accepted: username is bound to the login user, and
 // password rotation goes through the dedicated reset endpoint.
-type updateAccountRequest struct {
+type UpdateAccountRequest struct {
 	Remark             *string `json:"remark,omitempty"`
 	RootPath           *string `json:"root_path,omitempty"`
 	ReadOnly           *bool   `json:"readonly,omitempty"`
@@ -273,9 +276,9 @@ type updateAccountRequest struct {
 	QuotaBytes *int64 `json:"quota_bytes,omitempty"`
 }
 
-// updateAccount applies a partial update to an existing account. Fields
+// UpdateAccount applies a partial update to an existing account. Fields
 // not present in the request are left untouched.
-func (s *webdavAccountState) updateAccount(id string, req updateAccountRequest) error {
+func (s *WebdavAccountState) UpdateAccount(id string, req UpdateAccountRequest) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	idx := -1
@@ -318,9 +321,9 @@ func (s *webdavAccountState) updateAccount(id string, req updateAccountRequest) 
 	return s.saveLocked()
 }
 
-// resetPassword generates a new random password for the account and
+// ResetPassword generates a new random password for the account and
 // returns the plaintext.
-func (s *webdavAccountState) resetPassword(id string) (string, error) {
+func (s *WebdavAccountState) ResetPassword(id string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	idx := -1
@@ -350,9 +353,9 @@ func (s *webdavAccountState) resetPassword(id string) (string, error) {
 	return pw, nil
 }
 
-// deleteAccount removes the account with the given ID. Deleting a
+// DeleteAccount removes the account with the given ID. Deleting a
 // non-existent ID is a no-op so the API can be idempotent.
-func (s *webdavAccountState) deleteAccount(id string) error {
+func (s *WebdavAccountState) DeleteAccount(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	idx := -1
@@ -369,7 +372,7 @@ func (s *webdavAccountState) deleteAccount(id string) error {
 	return s.saveLocked()
 }
 
-// syncUsernamesTo renames every webdav account bound to oldName to
+// SyncUsernamesTo renames every webdav account bound to oldName to
 // newName. Returns the number of accounts that were updated.
 //
 // This closes a footgun: webdav accounts are bound to the LOGIN
@@ -383,7 +386,7 @@ func (s *webdavAccountState) deleteAccount(id string) error {
 // Called from admin_api.handleChangeUsername after the rename
 // succeeds, so webdav-bound clients immediately work with the new
 // name. No-op when nothing matches — leaves un-bound accounts alone.
-func (s *webdavAccountState) syncUsernamesTo(oldName, newName string) (int, error) {
+func (s *WebdavAccountState) SyncUsernamesTo(oldName, newName string) (int, error) {
 	if oldName == newName {
 		return 0, nil
 	}
@@ -422,7 +425,7 @@ func (s *webdavAccountState) syncUsernamesTo(oldName, newName string) (int, erro
 	return len(renames), nil
 }
 
-// verifyWebdav looks up an account by username and checks the password.
+// VerifyWebdav looks up an account by username and checks the password.
 // Returns the matching account (copied, safe for caller to mutate) and
 // true on success, or zero-value + false on any failure.
 // Supports both bcrypt (new) and SHA-256 (legacy) password hashes.
@@ -436,10 +439,10 @@ func (s *webdavAccountState) syncUsernamesTo(oldName, newName string) (int, erro
 // behaviour would reject the login even though B's password is correct.
 // We also avoid early return on hash mismatch so the timing doesn't
 // leak which username exists (a non-match walks the whole list).
-func (s *webdavAccountState) verifyWebdav(username, password string) (webdavAccount, bool) {
+func (s *WebdavAccountState) VerifyWebdav(username, password string) (WebdavAccount, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var matched webdavAccount
+	var matched WebdavAccount
 	found := false
 	userMatched := 0
 	for _, acc := range s.data.Accounts {
@@ -486,7 +489,7 @@ func (s *webdavAccountState) verifyWebdav(username, password string) (webdavAcco
 
 // upgradeWebdavPasswordHash upgrades a legacy SHA-256 hash to bcrypt after
 // successful WebDAV login. Runs in a goroutine to avoid blocking the response.
-func (s *webdavAccountState) upgradeWebdavPasswordHash(accountID, password string) {
+func (s *WebdavAccountState) upgradeWebdavPasswordHash(accountID, password string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -553,7 +556,7 @@ func normaliseWebdavRoot(input string) (string, error) {
 // webdav_accounts (delete-all + reinsert, mirroring the previous
 // whole-file-rewrite semantics). The transaction gives atomicity — a
 // failed commit rolls back cleanly. Caller must hold s.mu in write mode.
-func (s *webdavAccountState) saveLocked() error {
+func (s *WebdavAccountState) saveLocked() error {
 	if s.data == nil {
 		return errors.New("webdav: no state loaded")
 	}
@@ -607,4 +610,30 @@ func isProtectedFilename(name string) bool {
 	// (showHidden is false by default) and prevents accidentally
 	// exposing or clobbering configuration.
 	return strings.HasPrefix(name, ".")
+}
+
+// isBcryptHash reports whether the stored hash is a bcrypt hash.
+// bcrypt hashes start with "$2a$", "$2b$", or "$2y$".
+func isBcryptHash(hash string) bool {
+	return strings.HasPrefix(hash, "$2a$") || strings.HasPrefix(hash, "$2b$") || strings.HasPrefix(hash, "$2y$")
+}
+
+// isLegacySHA256Hash reports whether the stored hash is a legacy SHA-256 hex digest.
+// SHA-256 hex digests are 64 characters long and contain only hex characters.
+func isLegacySHA256Hash(hash string) bool {
+	if len(hash) != 64 {
+		return false
+	}
+	for _, c := range hash {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+// sha256Hex returns the hex-encoded SHA-256 of s (kept for legacy hash verification).
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
 }

@@ -1,4 +1,4 @@
-package main
+package webdav
 
 import (
 	"errors"
@@ -8,14 +8,15 @@ import (
 	"path/filepath"
 	"strings"
 
-	"golang.org/x/net/webdav"
+	"github.com/codeskyblue/gohttpserver/internal/util"
+	gdav "golang.org/x/net/webdav"
 )
 
-// webdavServer wraps the standard golang.org/x/net/webdav handler with
+// WebdavServer wraps the standard golang.org/x/net/webdav handler with
 // HTTP Basic Auth, a master enable switch, per-account chroot, and
 // per-account quota enforcement.
 //
-// The upstream webdav.Handler is responsible for OPTIONS / PROPFIND /
+// The upstream gdav.Handler is responsible for OPTIONS / PROPFIND /
 // PUT / DELETE / MKCOL / MOVE / COPY / PROPPATCH / LOCK / UNLOCK per
 // RFC 4918. We extend it in three places:
 //
@@ -24,46 +25,46 @@ import (
 //      DAV:quota-available-bytes (RFC 4331). All other PROPFIND
 //      requests pass through to upstream.
 //   2. quotaFileSystem (webdav_quota.go) — replaces the bare
-//      webdav.Dir so writes are intercepted for quota enforcement
+//      gdav.Dir so writes are intercepted for quota enforcement
 //      and byte-level accounting.
 //   3. preflightQuota check in ServeHTTP — fast rejection of
 //      over-quota PUTs based on Content-Length before delegating to
 //      upstream.
-type webdavServer struct {
+type WebdavServer struct {
 	root     string
-	accounts *webdavAccountState
-	usage    *usageState
+	accounts *WebdavAccountState
+	usage    *UsageState
 }
 
-// newWebdavServer constructs the server. The returned handler is safe
+// NewWebdavServer constructs the server. The returned handler is safe
 // to register on a router immediately; it reads the enabled flag and
 // account list from `accounts` lazily on every request.
 //
 // `root` is the --root filesystem root; the per-account chroot is
 // applied at the file-system layer by joining onto RootPath.
-func newWebdavServer(root string, accounts *webdavAccountState, usage *usageState) *webdavServer {
-	return &webdavServer{
+func NewWebdavServer(root string, accounts *WebdavAccountState, usage *UsageState) *WebdavServer {
+	return &WebdavServer{
 		root:     root,
 		accounts: accounts,
 		usage:    usage,
 	}
 }
 
-// ServeHTTP gates the upstream webdav.Handler behind HTTP Basic Auth
+// ServeHTTP gates the upstream gdav.Handler behind HTTP Basic Auth
 // and per-account quota enforcement.
 //
 // The first account whose username + password matches the
 // Authorization header is used; if no match is found we return 401
 // with a Basic challenge so the client prompts for credentials. The
-// upstream webdav.Handler takes care of OPTIONS / PROPFIND / PUT /
+// upstream gdav.Handler takes care of OPTIONS / PROPFIND / PUT /
 // DELETE / MKCOL / MOVE / COPY / PROPPATCH / LOCK / UNLOCK per
 // RFC 4918, except:
 //
 //   - Top-level PROPFIND is intercepted to inject quota properties.
 //   - PUTs that exceed the per-account quota return 507.
 //   - Per-account chroot is applied via quotaFileSystem.
-func (s *webdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !s.accounts.isEnabled() {
+func (s *WebdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !s.accounts.IsEnabled() {
 		http.Error(w, "WebDAV is disabled", http.StatusServiceUnavailable)
 		return
 	}
@@ -81,10 +82,10 @@ func (s *webdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "WebDAV authentication required", http.StatusUnauthorized)
 		return
 	}
-	acc, ok := s.accounts.verifyWebdav(user, pass)
+	acc, ok := s.accounts.VerifyWebdav(user, pass)
 	if !ok {
 		log.Printf("webdav: auth failed for user=%q from %s (%s %s)",
-			user, getClientIP(r), r.Method, r.URL.Path)
+			user, util.GetClientIP(r), r.Method, r.URL.Path)
 		writeBasicChallenge(w)
 		http.Error(w, "WebDAV authentication required", http.StatusUnauthorized)
 		return
@@ -98,10 +99,10 @@ func (s *webdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "PUT", "DELETE", "MKCOL", "MOVE", "COPY", "PROPPATCH":
 		log.Printf("webdav: %s %s by user=%q (remark=%q) from %s",
-			r.Method, r.URL.Path, acc.Username, acc.Remark, getClientIP(r))
+			r.Method, r.URL.Path, acc.Username, acc.Remark, util.GetClientIP(r))
 	}
 
-	// Per-account chroot: mount the inner webdav.Dir at
+	// Per-account chroot: mount the inner gdav.Dir at
 	//   filepath.Join(s.root, acc.RootPath)
 	// so all subsequent file operations are confined to the account's
 	// root_path. The upstream handler still strips the configured
@@ -145,7 +146,7 @@ func (s *webdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Build a request-scoped handler with the account's chroot and
 	// quota wrapper. The handler is constructed per request because
 	// the FileSystem closure needs the matched account's id + quota.
-	inner := webdav.Dir(accountRoot)
+	inner := gdav.Dir(accountRoot)
 	qfs := &quotaFileSystem{
 		inner:      inner,
 		state:      s.usage,
@@ -154,10 +155,10 @@ func (s *webdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		root:       accountRoot,
 		readOnly:   acc.ReadOnly,
 	}
-	handler := &webdav.Handler{
+	handler := &gdav.Handler{
 		Prefix:     "/dav/",
 		FileSystem: qfs,
-		LockSystem: webdav.NewMemLS(),
+		LockSystem: gdav.NewMemLS(),
 	}
 	handler.ServeHTTP(w, r)
 }
@@ -165,11 +166,11 @@ func (s *webdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // preflightPut runs a fast quota check using the request's
 // Content-Length. The FileSystem wrapper handles the post-write
 // accounting; this is just to fail-fast on declared sizes.
-func (s *webdavServer) preflightPut(r *http.Request, acc webdavAccount, accountRoot string) error {
+func (s *WebdavServer) preflightPut(r *http.Request, acc WebdavAccount, accountRoot string) error {
 	if s.usage == nil || r.ContentLength < 0 {
 		return nil
 	}
-	used := s.usage.get(acc.ID)
+	used := s.usage.Get(acc.ID)
 	// Look up the old file size so overwriting a 2GB file with 1KB
 	// doesn't get rejected as +2GB.
 	var oldSize int64
@@ -190,7 +191,7 @@ func writeBasicChallenge(w http.ResponseWriter) {
 
 // urlPathClean strips the /dav/ prefix from p and runs filepath.Clean
 // on the remainder, producing a safe relative path for the inner
-// webdav.Dir. Empty result means "the chroot root itself".
+// gdav.Dir. Empty result means "the chroot root itself".
 func urlPathClean(p string) string {
 	const prefix = "/dav/"
 	switch {

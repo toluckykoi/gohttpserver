@@ -1,4 +1,4 @@
-package main
+package admin
 
 import (
 	"encoding/json"
@@ -10,34 +10,41 @@ import (
 	"strings"
 
 	"github.com/gorilla/mux"
+
+	"github.com/codeskyblue/gohttpserver/internal/auth"
+	"github.com/codeskyblue/gohttpserver/internal/frp"
+	"github.com/codeskyblue/gohttpserver/internal/util"
+	"github.com/codeskyblue/gohttpserver/internal/webdav"
 )
 
-// adminAPI bundles the state every /-/api/admin/* handler needs. We
+// API bundles the state every /-/api/admin/* handler needs. We
 // pass this single struct around rather than threading the loginState
 // and webdavAccountState through every handler signature.
-type adminAPI struct {
-	login  *loginState
-	webdav *webdavAccountState
-	// usage is the per-account byte counter; nil-safe — handlers
-	// degrade to reporting quota_bytes only when usage is unset.
-	usage *usageState
-	// root is the --root filesystem path; needed by the recalculate
+type API struct {
+	Login  *auth.LoginState
+	Webdav *webdav.WebdavAccountState
+	// Usage is the per-account byte counter; nil-safe — handlers
+	// degrade to reporting quota_bytes only when Usage is unset.
+	Usage *webdav.UsageState
+	// Root is the --root filesystem path; needed by the recalculate
 	// endpoint to walk each account's chroot.
-	root string
-	// localAddr is the program's listening address (IP:port)
-	localAddr string
-	// frp is the FRP client manager; nil-safe — handlers degrade to
-	// returning disabled status when frp is unset.
-	frp *FRPClient
+	Root string
+	// LocalAddr is the program's listening address (IP:port)
+	LocalAddr string
+	// FRP is the FRP client manager; nil-safe — handlers degrade to
+	// returning disabled status when FRP is unset.
+	FRP *frp.FRPClient
+	// Version is the build version string, reported by /-/api/admin/profile.
+	Version string
 }
 
-// registerAdminRoutes wires every /-/api/admin/* endpoint onto the
+// RegisterRoutes wires every /-/api/admin/* endpoint onto the
 // provided router. The router MUST be the post-prefix subrouter so
 // --prefix works transparently. All admin endpoints sit behind the
 // login middleware (registered in main.go before this is called), so
 // by the time any handler here runs the caller is already authenticated
 // via userFromLoginSession.
-func registerAdminRoutes(router *mux.Router, api *adminAPI) {
+func RegisterRoutes(router *mux.Router, api *API) {
 	router.HandleFunc("/-/api/admin/profile", api.handleProfile).Methods("GET")
 	router.HandleFunc("/-/api/admin/profile/username", api.handleChangeUsername).Methods("PUT")
 	// Password change is exposed under both the legacy path (already
@@ -46,7 +53,7 @@ func registerAdminRoutes(router *mux.Router, api *adminAPI) {
 	// (and the SPA's old useFileApi.changePassword) don't break, but
 	// route new UI traffic through the admin namespace.
 	router.HandleFunc("/-/api/admin/profile/password", func(w http.ResponseWriter, r *http.Request) {
-		handleChangePassword(api.login, w, r)
+		auth.HandleChangePassword(api.Login, w, r)
 	}).Methods("PUT")
 
 	router.HandleFunc("/-/api/admin/webdav/status", api.handleWebdavStatus).Methods("GET")
@@ -68,8 +75,8 @@ func registerAdminRoutes(router *mux.Router, api *adminAPI) {
 // frontend uses this to render the "个人中心" tab. We include the
 // username, auth provider, and version (so the UI doesn't need a
 // separate /-/sysinfo round-trip).
-func (api *adminAPI) handleProfile(w http.ResponseWriter, r *http.Request) {
-	user := userFromLoginSession(r)
+func (api *API) handleProfile(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromLoginSession(r)
 	if user == nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -78,7 +85,7 @@ func (api *adminAPI) handleProfile(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"username": user.Name,
 		"provider": user.Provider,
-		"version":  VERSION,
+		"version":  api.Version,
 	})
 }
 
@@ -90,8 +97,8 @@ func (api *adminAPI) handleProfile(w http.ResponseWriter, r *http.Request) {
 // current password is required. Renaming is reversible and visible in
 // the UI, so the operational convenience outweighs the marginal risk
 // of a stolen session cookie being used to rename the account.
-func (api *adminAPI) handleChangeUsername(w http.ResponseWriter, r *http.Request) {
-	user := userFromLoginSession(r)
+func (api *API) handleChangeUsername(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromLoginSession(r)
 	if user == nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -121,7 +128,7 @@ func (api *adminAPI) handleChangeUsername(w http.ResponseWriter, r *http.Request
 		http.Error(w, "new_username is the same as the current one", http.StatusBadRequest)
 		return
 	}
-	if err := api.login.changeUsername(user.Name, newUsername); err != nil {
+	if err := api.Login.ChangeUsername(user.Name, newUsername); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -132,7 +139,7 @@ func (api *adminAPI) handleChangeUsername(w http.ResponseWriter, r *http.Request
 	// connect with the new username would see a silent 401 and
 	// surface "Unauthorized". Sync the username across all bound
 	// webdav accounts so the rename is consistent everywhere.
-	if synced, syncErr := api.webdav.syncUsernamesTo(user.Name, newUsername); syncErr != nil {
+	if synced, syncErr := api.Webdav.SyncUsernamesTo(user.Name, newUsername); syncErr != nil {
 		// Username rename already persisted; the webdav sync is a
 		// best-effort follow-up. Log and continue — the operator can
 		// re-create webdav accounts manually if needed.
@@ -142,8 +149,8 @@ func (api *adminAPI) handleChangeUsername(w http.ResponseWriter, r *http.Request
 	}
 	// Re-stamp the session so the SPA's user object picks up the new
 	// name without requiring a sign-out / sign-in cycle.
-	session, _ := store.Get(r, defaultSessionName)
-	session.Values["user"] = &LoginUser{
+	session, _ := auth.Store.Get(r, auth.DefaultSessionName)
+	session.Values["user"] = &auth.LoginUser{
 		Name:     newUsername,
 		Provider: user.Provider,
 	}
@@ -164,21 +171,21 @@ func (api *adminAPI) handleChangeUsername(w http.ResponseWriter, r *http.Request
 // handleWebdavStatus returns the master enable flag plus the full
 // account list. The frontend uses this to render the WebDAV panel in
 // one round-trip rather than polling two endpoints.
-func (api *adminAPI) handleWebdavStatus(w http.ResponseWriter, r *http.Request) {
-	if userFromLoginSession(r) == nil {
+func (api *API) handleWebdavStatus(w http.ResponseWriter, r *http.Request) {
+	if auth.UserFromLoginSession(r) == nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 	// Strip password hashes from the response — the UI only needs to
 	// show that a password exists, not what it hashes to.
-	accounts := api.webdav.list()
+	accounts := api.Webdav.List()
 	public := make([]map[string]any, 0, len(accounts))
 	for _, a := range accounts {
 		public = append(public, api.webdavAccountPublic(a))
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"enabled":   api.webdav.isEnabled(),
+		"enabled":   api.Webdav.IsEnabled(),
 		"accounts":  public,
 		"webdav_url": "/dav/",
 	})
@@ -186,8 +193,8 @@ func (api *adminAPI) handleWebdavStatus(w http.ResponseWriter, r *http.Request) 
 
 // handleWebdavSetEnabled toggles the WebDAV server on/off. Body:
 // {"enabled": true|false}.
-func (api *adminAPI) handleWebdavSetEnabled(w http.ResponseWriter, r *http.Request) {
-	if userFromLoginSession(r) == nil {
+func (api *API) handleWebdavSetEnabled(w http.ResponseWriter, r *http.Request) {
+	if auth.UserFromLoginSession(r) == nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -203,7 +210,7 @@ func (api *adminAPI) handleWebdavSetEnabled(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
-	if err := api.webdav.setEnabled(req.Enabled); err != nil {
+	if err := api.Webdav.SetEnabled(req.Enabled); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -214,12 +221,12 @@ func (api *adminAPI) handleWebdavSetEnabled(w http.ResponseWriter, r *http.Reque
 // handleWebdavList returns just the accounts (without the enabled flag).
 // Kept as a separate endpoint from /status for clients that poll only
 // the account list after a mutation.
-func (api *adminAPI) handleWebdavList(w http.ResponseWriter, r *http.Request) {
-	if userFromLoginSession(r) == nil {
+func (api *API) handleWebdavList(w http.ResponseWriter, r *http.Request) {
+	if auth.UserFromLoginSession(r) == nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	accounts := api.webdav.list()
+	accounts := api.Webdav.List()
 	public := make([]map[string]any, 0, len(accounts))
 	for _, a := range accounts {
 		public = append(public, api.webdavAccountPublic(a))
@@ -231,8 +238,8 @@ func (api *adminAPI) handleWebdavList(w http.ResponseWriter, r *http.Request) {
 // handleWebdavCreate accepts the create request and returns the new
 // account PLUS the plaintext password. The frontend is expected to
 // display the password exactly once and prompt the user to copy it.
-func (api *adminAPI) handleWebdavCreate(w http.ResponseWriter, r *http.Request) {
-	user := userFromLoginSession(r)
+func (api *API) handleWebdavCreate(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromLoginSession(r)
 	if user == nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -242,7 +249,7 @@ func (api *adminAPI) handleWebdavCreate(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "Body too large or unreadable", http.StatusBadRequest)
 		return
 	}
-	var req createAccountRequest
+	var req webdav.CreateAccountRequest
 	// Default: system files protected, root path "/", not read-only.
 	// The frontend supplies these explicitly, but we keep the defaults
 	// here too so a curl without the fields still produces a sensible
@@ -253,7 +260,7 @@ func (api *adminAPI) handleWebdavCreate(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
-	acc, plaintext, err := api.webdav.createAccount(req, user.Name)
+	acc, plaintext, err := api.Webdav.CreateAccount(req, user.Name)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -269,8 +276,8 @@ func (api *adminAPI) handleWebdavCreate(w http.ResponseWriter, r *http.Request) 
 
 // handleWebdavUpdate applies a partial update. See updateAccountRequest
 // for the accepted fields.
-func (api *adminAPI) handleWebdavUpdate(w http.ResponseWriter, r *http.Request) {
-	if userFromLoginSession(r) == nil {
+func (api *API) handleWebdavUpdate(w http.ResponseWriter, r *http.Request) {
+	if auth.UserFromLoginSession(r) == nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -284,12 +291,12 @@ func (api *adminAPI) handleWebdavUpdate(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "Body too large or unreadable", http.StatusBadRequest)
 		return
 	}
-	var req updateAccountRequest
+	var req webdav.UpdateAccountRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
-	if err := api.webdav.updateAccount(id, req); err != nil {
+	if err := api.Webdav.UpdateAccount(id, req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -299,8 +306,8 @@ func (api *adminAPI) handleWebdavUpdate(w http.ResponseWriter, r *http.Request) 
 
 // handleWebdavDelete removes an account. Idempotent — deleting a
 // non-existent ID returns 200.
-func (api *adminAPI) handleWebdavDelete(w http.ResponseWriter, r *http.Request) {
-	if userFromLoginSession(r) == nil {
+func (api *API) handleWebdavDelete(w http.ResponseWriter, r *http.Request) {
+	if auth.UserFromLoginSession(r) == nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -309,7 +316,7 @@ func (api *adminAPI) handleWebdavDelete(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "missing id", http.StatusBadRequest)
 		return
 	}
-	if err := api.webdav.deleteAccount(id); err != nil {
+	if err := api.Webdav.DeleteAccount(id); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -319,8 +326,8 @@ func (api *adminAPI) handleWebdavDelete(w http.ResponseWriter, r *http.Request) 
 
 // handleWebdavResetPassword generates a new random password and returns
 // the plaintext. Same "shown once" contract as the create endpoint.
-func (api *adminAPI) handleWebdavResetPassword(w http.ResponseWriter, r *http.Request) {
-	if userFromLoginSession(r) == nil {
+func (api *API) handleWebdavResetPassword(w http.ResponseWriter, r *http.Request) {
+	if auth.UserFromLoginSession(r) == nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -329,7 +336,7 @@ func (api *adminAPI) handleWebdavResetPassword(w http.ResponseWriter, r *http.Re
 		http.Error(w, "missing id", http.StatusBadRequest)
 		return
 	}
-	plaintext, err := api.webdav.resetPassword(id)
+	plaintext, err := api.Webdav.ResetPassword(id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -348,17 +355,17 @@ func (api *adminAPI) handleWebdavResetPassword(w http.ResponseWriter, r *http.Re
 //
 // Mirrors Cloudreve's admin "calibrate storage" button
 // (inventory/user.go:326-361).
-func (api *adminAPI) handleWebdavRecalculateUsage(w http.ResponseWriter, r *http.Request) {
-	if userFromLoginSession(r) == nil {
+func (api *API) handleWebdavRecalculateUsage(w http.ResponseWriter, r *http.Request) {
+	if auth.UserFromLoginSession(r) == nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if api.usage == nil {
+	if api.Usage == nil {
 		http.Error(w, "usage tracking not configured", http.StatusServiceUnavailable)
 		return
 	}
-	accounts := api.webdav.list()
-	results := api.usage.recalculateAll(accounts, api.root)
+	accounts := api.Webdav.List()
+	results := api.Usage.RecalculateAll(accounts, api.Root)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"success": true,
@@ -373,10 +380,10 @@ func (api *adminAPI) handleWebdavRecalculateUsage(w http.ResponseWriter, r *http
 //
 // password_sha256 is deliberately omitted (sensitive); quota_bytes +
 // used_bytes are derived live so the frontend always shows fresh data.
-func (api *adminAPI) webdavAccountPublic(a webdavAccount) map[string]any {
+func (api *API) webdavAccountPublic(a webdav.WebdavAccount) map[string]any {
 	used := int64(0)
-	if api.usage != nil {
-		used = api.usage.get(a.ID)
+	if api.Usage != nil {
+		used = api.Usage.Get(a.ID)
 	}
 	return map[string]any{
 		"id":                   a.ID,
@@ -394,12 +401,12 @@ func (api *adminAPI) webdavAccountPublic(a webdavAccount) map[string]any {
 
 // handleFRPStatus returns the current FRP client status including
 // enabled state, running state, and configuration.
-func (api *adminAPI) handleFRPStatus(w http.ResponseWriter, r *http.Request) {
-	if userFromLoginSession(r) == nil {
+func (api *API) handleFRPStatus(w http.ResponseWriter, r *http.Request) {
+	if auth.UserFromLoginSession(r) == nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if api.frp == nil {
+	if api.FRP == nil {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"enabled": false,
@@ -408,17 +415,17 @@ func (api *adminAPI) handleFRPStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_ = json.NewEncoder(w).Encode(api.frp.Status())
+	_ = json.NewEncoder(w).Encode(api.FRP.Status())
 }
 
 // handleFRPSetEnabled toggles the FRP client on/off. Body:
 // {"enabled": true|false}.
-func (api *adminAPI) handleFRPSetEnabled(w http.ResponseWriter, r *http.Request) {
-	if userFromLoginSession(r) == nil {
+func (api *API) handleFRPSetEnabled(w http.ResponseWriter, r *http.Request) {
+	if auth.UserFromLoginSession(r) == nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if api.frp == nil {
+	if api.FRP == nil {
 		http.Error(w, "FRP client not initialized", http.StatusServiceUnavailable)
 		return
 	}
@@ -434,7 +441,7 @@ func (api *adminAPI) handleFRPSetEnabled(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
-	if err := api.frp.SetEnabled(req.Enabled); err != nil {
+	if err := api.FRP.SetEnabled(req.Enabled); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -444,12 +451,12 @@ func (api *adminAPI) handleFRPSetEnabled(w http.ResponseWriter, r *http.Request)
 
 // handleFRPUpdateConfig updates the FRP client configuration and
 // restarts the client if needed. Body: JSON with FRP configuration fields.
-func (api *adminAPI) handleFRPUpdateConfig(w http.ResponseWriter, r *http.Request) {
-	if userFromLoginSession(r) == nil {
+func (api *API) handleFRPUpdateConfig(w http.ResponseWriter, r *http.Request) {
+	if auth.UserFromLoginSession(r) == nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if api.frp == nil {
+	if api.FRP == nil {
 		http.Error(w, "FRP client not initialized", http.StatusServiceUnavailable)
 		return
 	}
@@ -459,36 +466,45 @@ func (api *adminAPI) handleFRPUpdateConfig(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var req struct {
-		ServerAddr string `json:"serverAddr"`
-		ServerPort int    `json:"serverPort"`
-		AuthToken  string `json:"authToken"`
-		ProxyName  string `json:"proxyName"`
-		ProxyType  string `json:"proxyType"`
-		LocalIP    string `json:"localIP"`
-		LocalPort  int    `json:"localPort"`
-		RemotePort int    `json:"remotePort"`
+		ServerAddr           string `json:"serverAddr"`
+		ServerPort           int    `json:"serverPort"`
+		AuthToken            string `json:"authToken"`
+		ProxyName            string `json:"proxyName"`
+		ProxyType            string `json:"proxyType"`
+		LocalIP              string `json:"localIP"`
+		LocalPort            int    `json:"localPort"`
+		RemotePort           int    `json:"remotePort"`
+		ProxyProtocolVersion string `json:"proxyProtocolVersion"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
-	cfg := &FRPConfig{
-		ServerAddr: req.ServerAddr,
-		ServerPort: req.ServerPort,
-		AuthToken:  req.AuthToken,
-		ProxyName:  req.ProxyName,
-		ProxyType:  req.ProxyType,
-		LocalIP:    req.LocalIP,
-		LocalPort:  req.LocalPort,
-		RemotePort: req.RemotePort,
+	// Validate proxyProtocolVersion
+	if req.ProxyProtocolVersion != "" &&
+		req.ProxyProtocolVersion != "v1" &&
+		req.ProxyProtocolVersion != "v2" {
+		http.Error(w, "Invalid proxyProtocolVersion, must be v1 or v2", http.StatusBadRequest)
+		return
+	}
+	cfg := &frp.FRPConfig{
+		ServerAddr:           req.ServerAddr,
+		ServerPort:           req.ServerPort,
+		AuthToken:            req.AuthToken,
+		ProxyName:            req.ProxyName,
+		ProxyType:            req.ProxyType,
+		LocalIP:              req.LocalIP,
+		LocalPort:            req.LocalPort,
+		RemotePort:           req.RemotePort,
+		ProxyProtocolVersion: req.ProxyProtocolVersion,
 	}
 	// Auto-fill local address from program's listening address if not specified
 	if cfg.LocalIP == "" || cfg.LocalIP == "127.0.0.1" {
-		if api.localAddr != "" {
-			if host, portStr, err := net.SplitHostPort(api.localAddr); err == nil {
+		if api.LocalAddr != "" {
+			if host, portStr, err := net.SplitHostPort(api.LocalAddr); err == nil {
 				if host != "" && host != "0.0.0.0" && host != "::" {
 					cfg.LocalIP = host
-				} else if lanIP := getLocalIP(); lanIP != "" {
+				} else if lanIP := util.GetLocalIP(); lanIP != "" {
 					cfg.LocalIP = lanIP
 				}
 				if p, err := strconv.Atoi(portStr); err == nil && cfg.LocalPort == 0 {
@@ -497,7 +513,7 @@ func (api *adminAPI) handleFRPUpdateConfig(w http.ResponseWriter, r *http.Reques
 			}
 		}
 	}
-	if err := api.frp.UpdateConfig(cfg); err != nil {
+	if err := api.FRP.UpdateConfig(cfg); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

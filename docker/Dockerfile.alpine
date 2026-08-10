@@ -1,19 +1,32 @@
-FROM golang:1.16.0-alpine as build
+# syntax=docker/dockerfile:1
 
-WORKDIR /app
-COPY go.mod .
-COPY go.sum .
-RUN go mod download
-# Binary Compression
+# ---------- Stage 1: build frontend ----------
+FROM node:20-alpine AS frontend
+WORKDIR /build
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+# ---------- Stage 2: build Go binary (with upx compression) ----------
+FROM golang:1.26-alpine AS build
 RUN apk add upx --no-cache
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+COPY --from=frontend /build/dist ./frontend/dist
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+    -ldflags '-s -w -X main.VERSION=docker' \
+    -o gohttpserver . \
+    && upx gohttpserver
 
-# Build app and pack using upx
-ADD . /app
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags '-s -w -X main.VERSION=docker' -o gohttpserver && upx gohttpserver
-
-FROM alpine:3
+# ---------- Stage 3: runtime ----------
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates
 WORKDIR /app
-ADD assets /usr/local/bin/assets
-COPY --from=build /app/gohttpserver /usr/local/bin/gohttpserver
+RUN mkdir -p /app/public
+VOLUME /app/public
+COPY --from=build /build/gohttpserver /usr/local/bin/gohttpserver
 EXPOSE 8000
-ENTRYPOINT [ "/usr/local/bin/gohttpserver" ]
+ENTRYPOINT ["/usr/local/bin/gohttpserver", "--root=/app/public"]

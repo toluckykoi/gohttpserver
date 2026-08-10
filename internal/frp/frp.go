@@ -1,4 +1,4 @@
-package main
+package frp
 
 import (
 	"context"
@@ -33,14 +33,15 @@ type FRPClient struct {
 
 // FRPConfig holds the FRP client configuration
 type FRPConfig struct {
-	ServerAddr string
-	ServerPort int
-	AuthToken  string
-	ProxyName  string
-	ProxyType  string
-	LocalIP    string
-	LocalPort  int
-	RemotePort int
+	ServerAddr          string
+	ServerPort          int
+	AuthToken           string
+	ProxyName           string
+	ProxyType           string
+	LocalIP             string
+	LocalPort           int
+	RemotePort          int
+	ProxyProtocolVersion string // v1 or v2, empty means disabled
 }
 
 // NewFRPClient creates a new FRP client manager
@@ -163,11 +164,12 @@ func (c *FRPClient) LoadFromDB() (*FRPConfig, bool, error) {
 	var enabled bool
 	var encryptedToken string
 	err := c.db.QueryRow(`
-		SELECT enabled, server_addr, server_port, auth_token, proxy_name, proxy_type, 
-		       local_ip, local_port, remote_port 
+		SELECT enabled, server_addr, server_port, auth_token, proxy_name, proxy_type,
+		       local_ip, local_port, remote_port, proxy_protocol_version
 		FROM frp_config WHERE id = 1
-	`).Scan(&enabled, &cfg.ServerAddr, &cfg.ServerPort, &encryptedToken, 
-		&cfg.ProxyName, &cfg.ProxyType, &cfg.LocalIP, &cfg.LocalPort, &cfg.RemotePort)
+	`).Scan(&enabled, &cfg.ServerAddr, &cfg.ServerPort, &encryptedToken,
+		&cfg.ProxyName, &cfg.ProxyType, &cfg.LocalIP, &cfg.LocalPort, &cfg.RemotePort,
+		&cfg.ProxyProtocolVersion)
 
 	if err == sql.ErrNoRows {
 		return nil, false, nil
@@ -207,12 +209,12 @@ func (c *FRPClient) SaveToDB(cfg *FRPConfig, enabled bool) error {
 	}
 
 	_, err = c.db.Exec(`
-		INSERT OR REPLACE INTO frp_config 
-		(id, enabled, server_addr, server_port, auth_token, proxy_name, proxy_type, 
-		 local_ip, local_port, remote_port, updated_at)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, enabled, cfg.ServerAddr, cfg.ServerPort, encryptedToken, cfg.ProxyName, 
-		cfg.ProxyType, cfg.LocalIP, cfg.LocalPort, cfg.RemotePort, time.Now().Unix())
+		INSERT OR REPLACE INTO frp_config
+		(id, enabled, server_addr, server_port, auth_token, proxy_name, proxy_type,
+		 local_ip, local_port, remote_port, proxy_protocol_version, updated_at)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, enabled, cfg.ServerAddr, cfg.ServerPort, encryptedToken, cfg.ProxyName,
+		cfg.ProxyType, cfg.LocalIP, cfg.LocalPort, cfg.RemotePort, cfg.ProxyProtocolVersion, time.Now().Unix())
 
 	return err
 }
@@ -290,6 +292,9 @@ func (c *FRPClient) Start() error {
 		ProxyBaseConfig: v1.ProxyBaseConfig{
 			Name: c.cfg.ProxyName,
 			Type: c.cfg.ProxyType,
+			Transport: v1.ProxyTransport{
+				ProxyProtocolVersion: c.cfg.ProxyProtocolVersion,
+			},
 		},
 		RemotePort: c.cfg.RemotePort,
 	}
@@ -436,14 +441,15 @@ func (c *FRPClient) Status() map[string]interface{} {
 			tokenMasked = "********"
 		}
 		status["config"] = map[string]interface{}{
-			"serverAddr": c.cfg.ServerAddr,
-			"serverPort": c.cfg.ServerPort,
-			"authToken":  tokenMasked,
-			"proxyName":  c.cfg.ProxyName,
-			"proxyType":  c.cfg.ProxyType,
-			"localIP":    c.cfg.LocalIP,
-			"localPort":  c.cfg.LocalPort,
-			"remotePort": c.cfg.RemotePort,
+			"serverAddr":           c.cfg.ServerAddr,
+			"serverPort":           c.cfg.ServerPort,
+			"authToken":            tokenMasked,
+			"proxyName":            c.cfg.ProxyName,
+			"proxyType":            c.cfg.ProxyType,
+			"localIP":              c.cfg.LocalIP,
+			"localPort":            c.cfg.LocalPort,
+			"remotePort":           c.cfg.RemotePort,
+			"proxyProtocolVersion": c.cfg.ProxyProtocolVersion,
 		}
 	}
 

@@ -1,4 +1,4 @@
-package main
+package ipa
 
 import (
 	"archive/zip"
@@ -21,7 +21,7 @@ import (
 // any read happened.
 const maxPlistSize = 16 * 1024 * 1024 // 16 MiB
 
-func parseIpaIcon(path string) (data []byte, err error) {
+func ParseIpaIcon(path string) (data []byte, err error) {
 	iconPattern := regexp.MustCompile(`(?i)^Payload/[^/]*/icon\.png$`)
 	r, err := zip.OpenReader(path)
 	if err != nil {
@@ -48,7 +48,7 @@ func parseIpaIcon(path string) (data []byte, err error) {
 	return io.ReadAll(plreader)
 }
 
-func parseIPA(path string) (plinfo *plistBundle, err error) {
+func ParseIPA(path string) (plinfo *PlistBundle, err error) {
 	plistre := regexp.MustCompile(`^Payload/[^/]*/Info\.plist$`)
 	r, err := zip.OpenReader(path)
 	if err != nil {
@@ -86,12 +86,12 @@ func parseIPA(path string) (plinfo *plistBundle, err error) {
 		return
 	}
 	dec := goplist.NewDecoder(bytes.NewReader(buf))
-	plinfo = new(plistBundle)
+	plinfo = new(PlistBundle)
 	err = dec.Decode(plinfo)
 	return
 }
 
-type plistBundle struct {
+type PlistBundle struct {
 	CFBundleIdentifier  string `plist:"CFBundleIdentifier"`
 	CFBundleVersion     string `plist:"CFBundleVersion"`
 	CFBundleDisplayName string `plist:"CFBundleDisplayName"`
@@ -124,7 +124,7 @@ type downloadPlist struct {
 	Items []*plItem `plist:"items"`
 }
 
-func generateDownloadPlist(baseURL *url.URL, ipaPath string, plinfo *plistBundle) ([]byte, error) {
+func GenerateDownloadPlist(baseURL *url.URL, ipaPath string, plinfo *PlistBundle) ([]byte, error) {
 	dp := new(downloadPlist)
 	item := new(plItem)
 	baseURL.Path = ipaPath

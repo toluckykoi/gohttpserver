@@ -1,4 +1,4 @@
-package main
+package auth
 
 import (
 	"crypto/rand"
@@ -19,8 +19,8 @@ import (
 var (
 	nonceStore         = openid.NewSimpleNonceStore()
 	discoveryCache     = openid.NewSimpleDiscoveryCache()
-	store              *sessions.CookieStore
-	defaultSessionName = "ghs-session"
+	Store              *sessions.CookieStore
+	DefaultSessionName = "ghs-session"
 )
 
 // sessionKeyLen is the length (in bytes) of the random session signing
@@ -37,7 +37,7 @@ func init() {
 	// for not shipping a secret in the binary. Operators who need sticky
 	// sessions across restarts should set GHS_SESSION_KEY explicitly.
 	if key := os.Getenv("GHS_SESSION_KEY"); key != "" {
-		store = sessions.NewCookieStore([]byte(key))
+		Store = sessions.NewCookieStore([]byte(key))
 	} else {
 		buf := make([]byte, sessionKeyLen)
 		if _, err := rand.Read(buf); err != nil {
@@ -45,7 +45,7 @@ func init() {
 		}
 		log.Println("WARNING: GHS_SESSION_KEY not set; using a random session key. " +
 			"Sessions will not survive a restart. Set GHS_SESSION_KEY for production.")
-		store = sessions.NewCookieStore(buf)
+		Store = sessions.NewCookieStore(buf)
 	}
 	// Harden the session cookie by default: HttpOnly prevents JS from
 	// reading it (mitigates XSS token theft), SameSite=Lax blocks most
@@ -57,10 +57,10 @@ func init() {
 	// Path="/" ensures the cookie is sent on all requests, not just
 	// the login path — without this, some browsers won't send the
 	// cookie after the post-login redirect, causing a login loop.
-	store.Options.HttpOnly = true
-	store.Options.SameSite = http.SameSiteLaxMode
-	store.Options.Secure = false
-	store.Options.Path = "/"
+	Store.Options.HttpOnly = true
+	Store.Options.SameSite = http.SameSiteLaxMode
+	Store.Options.Secure = false
+	Store.Options.Path = "/"
 }
 
 type UserInfo struct {
@@ -124,7 +124,7 @@ func safeNextURL(r *http.Request, next string) string {
 	return "/"
 }
 
-func handleOpenID(router *mux.Router, loginUrl string, secure bool) {
+func HandleOpenID(router *mux.Router, loginUrl string, secure bool) {
 	router.HandleFunc("/-/login", func(w http.ResponseWriter, r *http.Request) {
 		nextUrl := r.FormValue("next")
 		referer := r.Referer()
@@ -151,7 +151,7 @@ func handleOpenID(router *mux.Router, loginUrl string, secure bool) {
 			io.WriteString(w, "Authentication check failed.")
 			return
 		}
-		session, err := store.Get(r, defaultSessionName)
+		session, err := Store.Get(r, DefaultSessionName)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -172,7 +172,7 @@ func handleOpenID(router *mux.Router, loginUrl string, secure bool) {
 	}).Methods("GET")
 
 	router.HandleFunc("/-/user", func(w http.ResponseWriter, r *http.Request) {
-		session, err := store.Get(r, defaultSessionName)
+		session, err := Store.Get(r, DefaultSessionName)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -184,7 +184,7 @@ func handleOpenID(router *mux.Router, loginUrl string, secure bool) {
 	}).Methods("GET")
 
 	router.HandleFunc("/-/logout", func(w http.ResponseWriter, r *http.Request) {
-		session, err := store.Get(r, defaultSessionName)
+		session, err := Store.Get(r, DefaultSessionName)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

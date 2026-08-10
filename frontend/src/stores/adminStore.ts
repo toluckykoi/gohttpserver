@@ -31,6 +31,7 @@ export const useAdminStore = defineStore('admin', () => {
       localIP: string
       localPort: number
       remotePort: number
+      proxyProtocolVersion?: string
     }
   } | null>(null)
   const frpLoaded = ref(false)
@@ -256,6 +257,7 @@ export const useAdminStore = defineStore('admin', () => {
     localIP: string
     localPort: number
     remotePort: number
+    proxyProtocolVersion?: string
   }) {
     const res = await api.updateFRPConfig(req)
     if (res.ok && frpStatus.value) {

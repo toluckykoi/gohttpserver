@@ -1,4 +1,4 @@
-package main
+package webdav
 
 import (
 	"context"
@@ -17,7 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/net/webdav"
+	storedb "github.com/codeskyblue/gohttpserver/internal/store"
+	gdav "golang.org/x/net/webdav"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -45,7 +46,7 @@ var ErrInsufficientCapacity = errors.New("webdav: insufficient storage capacity"
 
 // ─── usageState ─────────────────────────────────────────────────────────────
 
-// usageState persists the per-account byte totals for the WebDAV server.
+// UsageState persists the per-account byte totals for the WebDAV server.
 //
 // Persistence is backed by the SQLite storage_usage table (account_id →
 // used_bytes), replacing the previous storage-usage.json file.
@@ -54,25 +55,25 @@ var ErrInsufficientCapacity = errors.New("webdav: insufficient storage capacity"
 // write lock and persists on every call. recalculate takes the write
 // lock once, walks the filesystem, replaces the entry, and persists.
 // Both are O(1) for the lock holder but block other writers briefly.
-type usageState struct {
+type UsageState struct {
 	mu     sync.RWMutex
 	used   map[string]int64
 	db     *sql.DB
 	dbPath string // kept so tests can reopen the same DB to verify persistence
 }
 
-// loadUsageState reads the storage_usage table. A read error is logged and
+// LoadUsageState reads the storage_usage table. A read error is logged and
 // falls back to an empty state (the operator can re-trigger recalculation
 // via the admin endpoint to repopulate).
-func loadUsageState(db *sql.DB) *usageState {
+func LoadUsageState(db *sql.DB) *UsageState {
 	return loadUsageStateAt(db, "")
 }
 
-// loadUsageStateAt is loadUsageState with the database path recorded on
+// loadUsageStateAt is LoadUsageState with the database path recorded on
 // the returned state. Tests use the path to reopen the same DB to verify
 // persistence.
-func loadUsageStateAt(db *sql.DB, path string) *usageState {
-	s := &usageState{
+func loadUsageStateAt(db *sql.DB, path string) *UsageState {
+	s := &UsageState{
 		db:     db,
 		dbPath: path,
 		used:   make(map[string]int64),
@@ -101,28 +102,28 @@ func loadUsageStateAt(db *sql.DB, path string) *usageState {
 
 // usageStateFromDB opens the database at path and loads the usage table.
 // Test-only convenience for re-opening the same DB to verify persistence.
-func usageStateFromDB(path string) (*usageState, error) {
-	db, err := openDB(path)
+func usageStateFromDB(path string) (*UsageState, error) {
+	db, err := storedb.OpenDB(path)
 	if err != nil {
 		return nil, err
 	}
 	return loadUsageStateAt(db, path), nil
 }
 
-// get returns the cached byte count for an account. Zero is a valid
+// Get returns the cached byte count for an account. Zero is a valid
 // answer (newly created account with no files yet) so the caller must
 // not distinguish "missing" from "zero" — same value, same meaning.
-func (s *usageState) get(accountID string) int64 {
+func (s *UsageState) Get(accountID string) int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.used[accountID]
 }
 
-// isEmpty reports whether the usage map is empty. Used at startup to
+// IsEmpty reports whether the usage map is empty. Used at startup to
 // decide whether a fresh DB needs the per-account chroot walk to seed
 // initial byte totals (a brand-new DB is empty even if accounts are
 // present).
-func (s *usageState) isEmpty() bool {
+func (s *UsageState) IsEmpty() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.used) == 0
@@ -133,7 +134,7 @@ func (s *usageState) isEmpty() bool {
 // the operator manually deleted files outside the WebDAV handler; we
 // clamp at zero defensively so the PROPFIND report never goes
 // negative.
-func (s *usageState) addDelta(accountID string, delta int64) error {
+func (s *UsageState) addDelta(accountID string, delta int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	next := s.used[accountID] + delta
@@ -147,13 +148,13 @@ func (s *usageState) addDelta(accountID string, delta int64) error {
 	return s.saveLocked()
 }
 
-// recalculate walks rootPath and replaces the cached byte count for
+// Recalculate walks rootPath and replaces the cached byte count for
 // accountID with the actual on-disk total. Use this to recover from a
 // counter drift (e.g. operator manually rm-ed files, or initial
 // migration from a pre-quota install). Errors during the walk are
 // non-fatal — the counter is still updated with the partial sum so
 // the operator gets a usable starting point.
-func (s *usageState) recalculate(rootPath string, accountID string) error {
+func (s *UsageState) Recalculate(rootPath string, accountID string) error {
 	total, walkErr := walkSize(rootPath)
 	if walkErr != nil {
 		log.Printf("webdav-quota: recalculate(%s, %s) walk error: %v (using partial sum %d)",
@@ -171,9 +172,9 @@ func (s *usageState) recalculate(rootPath string, accountID string) error {
 	return nil
 }
 
-// recalculateAll walks every (rootPath, accountID) pair and refreshes
+// RecalculateAll walks every (rootPath, accountID) pair and refreshes
 // the cache. Returns per-account results for the admin endpoint.
-func (s *usageState) recalculateAll(accounts []webdavAccount, root string) []map[string]any {
+func (s *UsageState) RecalculateAll(accounts []WebdavAccount, root string) []map[string]any {
 	out := make([]map[string]any, 0, len(accounts))
 	for _, acc := range accounts {
 		full := filepath.Join(root, acc.RootPath)
@@ -187,7 +188,7 @@ func (s *usageState) recalculateAll(accounts []webdavAccount, root string) []map
 			})
 			continue
 		}
-		_ = s.addDelta(acc.ID, total-s.get(acc.ID)) // bounded delta; safe to use
+		_ = s.addDelta(acc.ID, total-s.Get(acc.ID)) // bounded delta; safe to use
 		out = append(out, map[string]any{
 			"id":         acc.ID,
 			"ok":         true,
@@ -201,7 +202,7 @@ func (s *usageState) recalculateAll(accounts []webdavAccount, root string) []map
 // Only positive totals are stored (matching the previous JSON behaviour);
 // accounts at zero are deleted so the table stays sparse. The whole update
 // runs in one transaction for atomicity. Caller must hold s.mu in write mode.
-func (s *usageState) saveLocked() error {
+func (s *UsageState) saveLocked() error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -291,8 +292,8 @@ func walkSize(root string) (int64, error) {
 // doesn't carry Content-Length. The hard guarantee comes from the
 // post-check + the admin recalculate endpoint.
 type quotaFileSystem struct {
-	inner      webdav.FileSystem
-	state      *usageState
+	inner      gdav.FileSystem
+	state      *UsageState
 	accountID  string
 	quotaBytes int64 // 0 = unlimited
 	root       string
@@ -325,7 +326,7 @@ func (q *quotaFileSystem) Mkdir(ctx context.Context, name string, perm os.FileMo
 // quota is configured, so the admin UI can show used_bytes for
 // unlimited accounts too. The post-check overshoot warning only fires
 // when quotaBytes > 0.
-func (q *quotaFileSystem) OpenFile(ctx context.Context, name string, flag int, perm os.FileMode) (webdav.File, error) {
+func (q *quotaFileSystem) OpenFile(ctx context.Context, name string, flag int, perm os.FileMode) (gdav.File, error) {
 	isWrite := flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE|os.O_TRUNC|os.O_APPEND) != 0
 
 	if isWrite && q.readOnly {
@@ -380,9 +381,9 @@ func (q *quotaFileSystem) OpenFile(ctx context.Context, name string, flag int, p
 			// Post-check: if the write overshot the quota, log a warning
 			// but accept the file. Cloudreve does the same. Future PUT
 			// requests will be rejected until usage drops below the cap.
-			if preflight > 0 && stateRef.get(acct)+delta > preflight {
-				log.Printf("webdav-quota: account %s overshot quota by %d bytes (post-check); accepting file",
-					acct, stateRef.get(acct)+delta-preflight)
+			if preflight > 0 && stateRef.Get(acct)+delta > preflight {
+			log.Printf("webdav-quota: account %s overshot quota by %d bytes (post-check); accepting file",
+				acct, stateRef.Get(acct)+delta-preflight)
 			}
 			return stateRef.addDelta(acct, delta)
 		},
@@ -429,7 +430,7 @@ func (q *quotaFileSystem) Stat(ctx context.Context, name string) (os.FileInfo, e
 // quotaFile wraps a webdav.File so Close() can reconcile the byte delta
 // via usageState.addDelta.
 type quotaFile struct {
-	webdav.File
+	gdav.File
 	absPath string
 	oldSize int64
 	onClose func() error
@@ -503,7 +504,7 @@ func getQuotaContext(r *http.Request) quotaContext {
 
 // davHref returns the canonical WebDAV href for use in PROPFIND
 // responses. Always ends with a slash per RFC 4918 § 8.3.
-func (s *webdavServer) davHref() string {
+func (s *WebdavServer) davHref() string {
 	return "/dav/"
 }
 
@@ -520,7 +521,7 @@ func (s *webdavServer) davHref() string {
 // empty bodies, and both should succeed. We respond with the union of
 // all commonly-requested live properties so the client gets a usable
 // view no matter what it asked for.
-func (s *webdavServer) handlePropfindRoot(w http.ResponseWriter, r *http.Request) {
+func (s *WebdavServer) handlePropfindRoot(w http.ResponseWriter, r *http.Request) {
 	depth := parseDepthHeader(r.Header.Get("Depth"))
 	if depth > 1 {
 		depth = 1 // RFC 4918 forbids infinity on a collection without children-infinity
@@ -530,7 +531,7 @@ func (s *webdavServer) handlePropfindRoot(w http.ResponseWriter, r *http.Request
 
 	used := int64(0)
 	if s.usage != nil {
-		used = s.usage.get(qctx.accountID)
+		used = s.usage.Get(qctx.accountID)
 	}
 	quota := qctx.quotaBytes
 	root := qctx.root
