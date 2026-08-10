@@ -1,9 +1,25 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import type { FileItem, AuthInfo, UserInfo } from '@/types'
 import { useFileApi } from '@/composables/useFileApi'
 import { useTheme } from '@/composables/useTheme'
 import { ElMessage } from 'element-plus'
+
+const SORT_STORAGE_KEY = 'gohttpserver_sort'
+
+function loadSortPreference(): { prop: string; order: 'ascending' | 'descending' } {
+  try {
+    const raw = localStorage.getItem(SORT_STORAGE_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (['name', 'size', 'mtime'].includes(parsed.prop) &&
+        (parsed.order === 'ascending' || parsed.order === 'descending')) {
+        return parsed
+      }
+    }
+  } catch { /* ignore */ }
+  return { prop: 'name', order: 'ascending' }
+}
 
 export const useFileStore = defineStore('file', () => {
   const { currentTheme } = useTheme()
@@ -18,8 +34,9 @@ export const useFileStore = defineStore('file', () => {
   const loading = ref(false)
   const showHidden = ref(false)
   const searchQuery = ref('')
-  const sortProp = ref('mtime')
-  const sortOrder = ref<'ascending' | 'descending'>('descending')
+  const savedSort = loadSortPreference()
+  const sortProp = ref(savedSort.prop)
+  const sortOrder = ref<'ascending' | 'descending'>(savedSort.order)
   // Multi-select state. Keyed by FileItem.path (URL-encoded).
   // Selection is cleared automatically on navigation (see loadFiles).
   const selectedFiles = ref<Set<string>>(new Set())
@@ -261,10 +278,20 @@ export const useFileStore = defineStore('file', () => {
       sortOrder.value = order
     } else {
       // Reset to default sort
-      sortProp.value = 'mtime'
-      sortOrder.value = 'descending'
+      sortProp.value = 'name'
+      sortOrder.value = 'ascending'
     }
   }
+
+  // Persist sort preference to localStorage so it survives page refresh
+  watch([sortProp, sortOrder], () => {
+    try {
+      localStorage.setItem(SORT_STORAGE_KEY, JSON.stringify({
+        prop: sortProp.value,
+        order: sortOrder.value,
+      }))
+    } catch { /* ignore */ }
+  })
 
   // Multi-select actions. The Set is replaced wholesale on every change so
   // Vue's reactivity reliably picks up the new contents.

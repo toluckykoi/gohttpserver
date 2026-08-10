@@ -153,7 +153,7 @@
       :data="sortedFiles"
       v-loading="loading"
       style="width: 100%"
-      :default-sort="{ prop: 'mtime', order: 'descending' }"
+      :default-sort="defaultSort"
       :row-class-name="rowClassName"
       :tooltip-effect="'dark'"
       row-key="path"
@@ -491,7 +491,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount, defineAsyncComponent } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, defineAsyncComponent, nextTick, watch } from 'vue'
 import { useFileStore } from '@/stores/fileStore'
 import { useFileApi } from '@/composables/useFileApi'
 import type { FileItem as FileItemType } from '@/types'
@@ -575,6 +575,7 @@ const loading = computed(() => fileStore.loading)
 const showHidden = computed(() => fileStore.showHidden)
 const selectedCount = computed(() => fileStore.selectedCount)
 const isAllSelected = computed(() => fileStore.isAllSelected)
+const defaultSort = computed(() => ({ prop: fileStore.sortProp, order: fileStore.sortOrder }))
 
 /** Image siblings for the prev/next carousel inside ImagePreviewModal. */
 const imageSiblings = computed(() =>
@@ -640,6 +641,21 @@ onMounted(() => {
   window.addEventListener('keydown', onAltChange)
   window.addEventListener('keyup', onAltChange)
   window.addEventListener('blur', onWindowBlur)
+  // Apply saved sort order after component is mounted
+  nextTick(() => {
+    if (elTableRef.value && fileStore.files.length > 0) {
+      elTableRef.value.sort(fileStore.sortProp, fileStore.sortOrder)
+    }
+  })
+})
+
+// Restore saved sort order when files change (navigation, refresh, etc.)
+watch(() => fileStore.files, (newFiles) => {
+  if (newFiles.length > 0 && elTableRef.value) {
+    nextTick(() => {
+      elTableRef.value?.sort(fileStore.sortProp, fileStore.sortOrder)
+    })
+  }
 })
 
 onBeforeUnmount(() => {
