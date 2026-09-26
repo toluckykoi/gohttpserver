@@ -26,7 +26,9 @@ export const useAdminStore = defineStore('admin', () => {
       serverAddr: string
       serverPort: number
       authToken: string
+      authTokenSet?: boolean
       proxyName: string
+      registeredProxyName?: string
       proxyType: string
       localIP: string
       localPort: number
@@ -111,7 +113,10 @@ export const useAdminStore = defineStore('admin', () => {
     const res = await api.fetchWebdavStatus()
     if (res.ok) {
       webdavStatus.value = res.data
-    } else {
+    } else if (!webdavStatus.value) {
+      // Only blank on first-load failure; later poll failures keep the
+      // last good list so a transient network blip doesn't wipe the
+      // panel mid-viewing (the WebdavAccountList polls every 10s).
       webdavStatus.value = null
     }
     webdavLoaded.value = true
@@ -261,12 +266,39 @@ export const useAdminStore = defineStore('admin', () => {
   }) {
     const res = await api.updateFRPConfig(req)
     if (res.ok && frpStatus.value) {
+      // Optimistically mirror the editable fields, but never echo the
+      // submitted authToken back into the store. The status API treats
+      // the token as write-only (returns "" + authTokenSet), so copying
+      // req.authToken here would either leak the just-typed secret into
+      // the form or wipe the authTokenSet flag when the field is blank.
+      // FrpSection reloads status right after save, which is authoritative.
+      const prev = frpStatus.value.config
       frpStatus.value = {
         ...frpStatus.value,
-        config: { ...req },
+        config: {
+          ...(prev || {}),
+          serverAddr: req.serverAddr,
+          serverPort: req.serverPort,
+          proxyName: req.proxyName,
+          proxyType: req.proxyType,
+          localIP: req.localIP,
+          localPort: req.localPort,
+          remotePort: req.remotePort,
+          proxyProtocolVersion: req.proxyProtocolVersion ?? prev?.proxyProtocolVersion ?? '',
+          authToken: '',
+          authTokenSet: req.authToken !== '' ? true : (prev?.authTokenSet ?? false),
+        },
       }
     }
     return res
+  }
+
+  /** Pull the plaintext auth token from the server on demand. Backs
+   *  the "显示" button next to the password field — the status poll
+   *  never carries the secret, so this is the only way to see what's
+   *  currently stored (e.g. when FRP auth fails after a restart). */
+  async function revealFRPAuthToken() {
+    return await api.fetchFRPAuthToken()
   }
 
   // ─── Computed convenience accessors ───────────────────────────────
@@ -305,5 +337,6 @@ export const useAdminStore = defineStore('admin', () => {
     loadFRPStatus,
     setFRPEnabled,
     updateFRPConfig,
+    revealFRPAuthToken,
   }
 })

@@ -1,5 +1,17 @@
 <template>
   <div class="webdav-list">
+    <!-- Toolbar: manual refresh for the used-bytes counters. The
+         server updates usage live on every WebDAV write, but this SPA
+         only reads it on load — so after a client uploads files the
+         quota bars here stay stale until a reload. The button (plus the
+         visibility-change auto-refresh below) keeps the numbers fresh. -->
+    <div class="list-toolbar" v-if="store.webdavAccounts.length > 0">
+      <span class="toolbar-hint">已用容量随上传自动更新</span>
+      <el-button text size="small" :loading="refreshing" @click="handleRefresh">
+        <el-icon><Refresh /></el-icon>
+        <span>刷新</span>
+      </el-button>
+    </div>
     <!-- Empty state: shown when the operator has just enabled WebDAV
          but hasn't created any accounts yet. Encourages them to make
          one, since /dav/ returns 401 for every request without an
@@ -262,7 +274,7 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  CopyDocument, FolderOpened, MoreFilled, Edit, Delete, Key, View, Hide,
+  CopyDocument, FolderOpened, MoreFilled, Edit, Delete, Key, View, Hide, Refresh,
 } from '@element-plus/icons-vue'
 import { useAdminStore } from '@/stores/adminStore'
 import { copyText as copyToClipboard } from '@/utils/clipboard'
@@ -286,6 +298,49 @@ const expandedMobile = ref<Set<string>>(new Set())
 
 // Which accounts currently have their password revealed (eye toggle).
 const revealed = ref<Set<string>>(new Set())
+
+// Manual refresh + auto-poll state for the used-bytes counters. The
+// server tracks usage live (every PUT/DELETE updates an in-memory
+// counter), but this SPA only reads it on load — so after a WebDAV
+// client uploads, the quota bars here go stale until we re-fetch.
+const refreshing = ref(false)
+let pollTimer: ReturnType<typeof setInterval> | undefined
+
+// Re-fetch account list (carrying fresh used_bytes) from the server.
+// Cheap: the server reads an in-memory counter, no filesystem walk.
+async function handleRefresh() {
+  refreshing.value = true
+  try {
+    await store.loadWebdavStatus()
+  } finally {
+    refreshing.value = false
+  }
+}
+
+// Poll usage while the tab is visible so quota bars stay in sync with
+// ongoing WebDAV uploads without the operator having to click refresh.
+function startPolling() {
+  stopPolling()
+  pollTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') {
+      store.loadWebdavStatus()
+    }
+  }, 10000)
+}
+function stopPolling() {
+  if (pollTimer !== undefined) {
+    clearInterval(pollTimer)
+    pollTimer = undefined
+  }
+}
+
+// Refresh immediately when the user switches back to this tab — the
+// common case is "upload via client, switch to admin to check".
+function handleVisibility() {
+  if (document.visibilityState === 'visible') {
+    store.loadWebdavStatus()
+  }
+}
 function toggleReveal(id: string) {
   const next = new Set(revealed.value)
   if (next.has(id)) next.delete(id)
@@ -476,15 +531,31 @@ async function copyConnectUrl() {
 
 onMounted(() => {
   window.addEventListener('resize', handleResize)
+  window.addEventListener('visibilitychange', handleVisibility)
+  startPolling()
 })
 onBeforeUnmount(() => {
   window.removeEventListener('resize', handleResize)
+  window.removeEventListener('visibilitychange', handleVisibility)
+  stopPolling()
 })
 </script>
 
 <style scoped>
 .webdav-list {
   margin-top: 8px;
+}
+
+.list-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.toolbar-hint {
+  font-size: 11px;
+  color: #94a3b8;
 }
 
 .empty-state {

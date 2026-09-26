@@ -21,14 +21,15 @@ import (
 
 // FRPClient manages the FRP client lifecycle
 type FRPClient struct {
-	mu      sync.Mutex
-	enabled bool
-	cfg     *FRPConfig
-	running bool
-	cancel  context.CancelFunc
-	service *client.Service
-	stopCh  chan struct{}
-	db      *sql.DB
+	mu         sync.Mutex
+	enabled    bool
+	cfg        *FRPConfig
+	running    bool
+	cancel     context.CancelFunc
+	service    *client.Service
+	stopCh     chan struct{}
+	db         *sql.DB
+	nameSuffix string // random per-process suffix for proxy name uniqueness
 }
 
 // FRPConfig holds the FRP client configuration
@@ -47,10 +48,49 @@ type FRPConfig struct {
 // NewFRPClient creates a new FRP client manager
 func NewFRPClient(db *sql.DB) *FRPClient {
 	return &FRPClient{
-		enabled: false,
-		running: false,
-		db:      db,
+		enabled:    false,
+		running:    false,
+		db:         db,
+		nameSuffix: randomProxySuffix(),
 	}
+}
+
+// randomProxySuffix returns a 3-char random alphanumeric string (e.g.
+// "a3f"). FRP requires proxy names to be globally unique on a server,
+// so two gohttpserver instances using the default "gohttpserver"
+// against the same frps collide with "proxy [...] already exists".
+// The suffix is generated once per process and reused for the life of
+// that process: re-saves within one run keep the same name (so frps
+// doesn't accumulate stale proxies), while a restart picks a new one
+// (so a stale proxy from the previous run can't collide).
+func randomProxySuffix() string {
+	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
+	var b [3]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand failing is unrealistic; a fixed fallback keeps
+		// the proxy name valid instead of blocking FRP startup.
+		return "xxx"
+	}
+	for i := range b {
+		b[i] = charset[int(b[i])%len(charset)]
+	}
+	return string(b[:])
+}
+
+// registeredProxyName returns the proxy name actually sent to the FRP
+// server: the configured base name plus the per-process random suffix.
+// The configured ProxyName is preserved as-is for display/editing; only
+// the value registered with frps is suffixed, so re-saves never
+// accumulate extra suffixes.
+func (c *FRPClient) registeredProxyName() string {
+	if c.cfg == nil {
+		return ""
+	}
+	name := c.cfg.ProxyName
+	if name == "" {
+		name = "gohttpserver"
+	}
+	return name + "-" + c.nameSuffix
 }
 
 // getOrCreateEncryptionKey loads or creates the FRP encryption key
@@ -287,10 +327,12 @@ func (c *FRPClient) Start() error {
 	}
 	clientCfg.Complete()
 
-	// Build proxy configuration
+	// Build proxy configuration. The name sent to frps is suffixed with
+	// hostname + port so multiple gohttpserver instances can share one
+	// frps without "proxy already exists" collisions.
 	proxyCfg := &v1.TCPProxyConfig{
 		ProxyBaseConfig: v1.ProxyBaseConfig{
-			Name: c.cfg.ProxyName,
+			Name: c.registeredProxyName(),
 			Type: c.cfg.ProxyType,
 			Transport: v1.ProxyTransport{
 				ProxyProtocolVersion: c.cfg.ProxyProtocolVersion,
@@ -346,9 +388,9 @@ func (c *FRPClient) Start() error {
 			}
 		}()
 
-		log.Printf("FRP client starting: %s:%d -> %s:%d",
+		log.Printf("FRP client starting: %s:%d -> %s:%d (proxy: %s)",
 			c.cfg.LocalIP, c.cfg.LocalPort,
-			c.cfg.ServerAddr, c.cfg.RemotePort)
+			c.cfg.ServerAddr, c.cfg.RemotePort, c.registeredProxyName())
 
 		// Run FRP service
 		if err := svc.Run(ctx); err != nil {
@@ -434,17 +476,20 @@ func (c *FRPClient) Status() map[string]interface{} {
 	}
 
 	if c.cfg != nil {
-		// Mask auth token to prevent credential leakage via API.
-		// Only show whether a token is configured, never its value.
-		tokenMasked := ""
-		if c.cfg.AuthToken != "" {
-			tokenMasked = "********"
-		}
+		// Never expose the auth token's value over the API — only
+		// report whether one is configured. Returning a placeholder
+		// such as "********" is unsafe: the SPA echoes the config back
+		// on save, so a masked value would be re-encrypted and persisted
+		// as the real token, breaking FRP authentication after a
+		// restart. authTokenSet lets the UI show "configured, leave
+		// blank to keep" without ever holding the secret client-side.
 		status["config"] = map[string]interface{}{
 			"serverAddr":           c.cfg.ServerAddr,
 			"serverPort":           c.cfg.ServerPort,
-			"authToken":            tokenMasked,
+			"authToken":            "",
+			"authTokenSet":         c.cfg.AuthToken != "",
 			"proxyName":            c.cfg.ProxyName,
+			"registeredProxyName":  c.registeredProxyName(),
 			"proxyType":            c.cfg.ProxyType,
 			"localIP":              c.cfg.LocalIP,
 			"localPort":            c.cfg.LocalPort,

@@ -69,6 +69,7 @@ func RegisterRoutes(router *mux.Router, api *API) {
 	router.HandleFunc("/-/api/admin/frp/status", api.handleFRPStatus).Methods("GET")
 	router.HandleFunc("/-/api/admin/frp/enabled", api.handleFRPSetEnabled).Methods("PUT")
 	router.HandleFunc("/-/api/admin/frp/config", api.handleFRPUpdateConfig).Methods("PUT")
+	router.HandleFunc("/-/api/admin/frp/auth-token", api.handleFRPRevealToken).Methods("GET")
 }
 
 // handleProfile returns the current user's profile information. The
@@ -487,10 +488,24 @@ func (api *API) handleFRPUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid proxyProtocolVersion, must be v1 or v2", http.StatusBadRequest)
 		return
 	}
+	// The status endpoint never returns the real auth token (only
+	// whether one is set), so a re-save — especially right after a
+	// restart — always arrives with an empty authToken. If the client
+	// left it blank, preserve the existing token from the database
+	// instead of wiping it; otherwise FRP would reconnect with an
+	// empty token and fail authentication against a token-protected
+	// server.
+	authToken := req.AuthToken
+	if authToken == "" {
+		if existing, _, err := api.FRP.LoadFromDB(); err == nil && existing != nil {
+			authToken = existing.AuthToken
+		}
+	}
+
 	cfg := &frp.FRPConfig{
 		ServerAddr:           req.ServerAddr,
 		ServerPort:           req.ServerPort,
-		AuthToken:            req.AuthToken,
+		AuthToken:            authToken,
 		ProxyName:            req.ProxyName,
 		ProxyType:            req.ProxyType,
 		LocalIP:              req.LocalIP,
@@ -519,4 +534,39 @@ func (api *API) handleFRPUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+}
+
+// handleFRPRevealToken returns the plaintext FRP auth token. The status
+// endpoint only reports whether a token is configured (authTokenSet),
+// never its value; this handler is the explicit, on-demand "show me
+// the stored secret" call backing the reveal button next to the
+// password field. It sits behind the same admin login middleware as
+// the other FRP endpoints, and is only hit on an explicit click — so
+// the token is not leaked on every status poll.
+func (api *API) handleFRPRevealToken(w http.ResponseWriter, r *http.Request) {
+	if auth.UserFromLoginSession(r) == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if api.FRP == nil {
+		http.Error(w, "FRP client not initialized", http.StatusServiceUnavailable)
+		return
+	}
+	// Load from DB (the source of truth) and decrypt. We don't read
+	// c.cfg directly so the revealed value reflects what is actually
+	// persisted, even before the client has been started.
+	cfg, _, err := api.FRP.LoadFromDB()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	token := ""
+	if cfg != nil {
+		token = cfg.AuthToken
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"authToken":    token,
+		"authTokenSet": token != "",
+	})
 }

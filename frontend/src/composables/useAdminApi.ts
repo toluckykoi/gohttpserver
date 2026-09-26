@@ -192,17 +192,32 @@ export function useAdminApi() {
       serverAddr: string
       serverPort: number
       authToken: string
+      authTokenSet: boolean
       proxyName: string
+      registeredProxyName?: string
       proxyType: string
       localIP: string
       localPort: number
       remotePort: number
+      proxyProtocolVersion: string
     }
   }>> {
     return send(
       '/-/api/admin/frp/status',
       { method: 'GET' },
       async (res) => await res.json() as any,
+    )
+  }
+
+  /** Fetch the plaintext FRP auth token on demand. The status endpoint
+   *  only reports whether a token is set (authTokenSet); this is the
+   *  explicit "show me the stored secret" call backing the reveal
+   *  button next to the password field. */
+  async function fetchFRPAuthToken(): Promise<ApiResult<{ authToken: string; authTokenSet: boolean }>> {
+    return send(
+      '/-/api/admin/frp/auth-token',
+      { method: 'GET' },
+      async (res) => await res.json() as { authToken: string; authTokenSet: boolean },
     )
   }
 
@@ -251,6 +266,7 @@ export function useAdminApi() {
     resetWebdavPassword,
     recalculateWebdavUsage,
     fetchFRPStatus,
+    fetchFRPAuthToken,
     setFRPEnabled,
     updateFRPConfig,
   }

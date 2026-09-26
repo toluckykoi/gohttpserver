@@ -58,11 +58,18 @@
           <el-form-item label="Auth Token">
             <el-input
               v-model="form.authToken"
-              type="password"
-              show-password
-              placeholder="FRP server authentication token"
+              :type="passwordVisible ? 'text' : 'password'"
+              :placeholder="authTokenPlaceholder"
               clearable
-            />
+            >
+              <template #suffix>
+                <el-icon class="token-eye" @click="handleToggleTokenVisible">
+                  <Loading v-if="revealingToken" />
+                  <View v-else-if="passwordVisible" />
+                  <Hide v-else />
+                </el-icon>
+              </template>
+            </el-input>
           </el-form-item>
         </div>
 
@@ -75,6 +82,9 @@
               placeholder="gohttpserver"
               clearable
             />
+            <div class="form-item-hint" v-if="store.frpStatus?.config?.registeredProxyName">
+              Actual name registered on the FRP server: <code>{{ store.frpStatus.config.registeredProxyName }}</code> (a 3-char random suffix is appended per process to keep proxy names unique across instances)
+            </div>
           </el-form-item>
           <el-form-item label="Proxy Type">
             <el-select v-model="form.proxyType" style="width: 100%">
@@ -168,15 +178,17 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, watch } from 'vue'
+import { ref, reactive, onMounted, watch, computed } from 'vue'
 import { ElMessage } from 'element-plus'
-import { CopyDocument, InfoFilled } from '@element-plus/icons-vue'
+import { CopyDocument, InfoFilled, View, Hide, Loading } from '@element-plus/icons-vue'
 import { useAdminStore } from '@/stores/adminStore'
 import { copyText } from '@/utils/clipboard'
 
 const store = useAdminStore()
 const togglingEnabled = ref(false)
 const saving = ref(false)
+const revealingToken = ref(false)
+const passwordVisible = ref(false)
 
 const form = reactive({
   serverAddr: '',
@@ -190,6 +202,18 @@ const form = reactive({
   proxyProtocolVersion: '',
 })
 
+// The status API treats the auth token as write-only: it returns an
+// empty authToken plus an authTokenSet flag. Never echo a value back
+// into the password field — that's what caused a masked "********" to
+// be re-saved as the real token and break FRP authentication after a
+// restart. The placeholder tells the operator whether a token is
+// already stored so they know to leave the field blank to keep it.
+const authTokenPlaceholder = computed(() =>
+  store.frpStatus?.config?.authTokenSet
+    ? 'Token configured — leave blank to keep, or enter a new one'
+    : 'FRP server authentication token',
+)
+
 // Load config from store when status changes
 watch(
   () => store.frpStatus?.config,
@@ -197,7 +221,7 @@ watch(
     if (config) {
       form.serverAddr = config.serverAddr || ''
       form.serverPort = config.serverPort || 7000
-      form.authToken = config.authToken || ''
+      form.authToken = ''
       form.proxyName = config.proxyName || 'gohttpserver'
       form.proxyType = config.proxyType || 'tcp'
       form.localIP = config.localIP || '127.0.0.1'
@@ -269,6 +293,33 @@ async function handleSaveConfig() {
   }
 }
 
+/** Eye-toggle for the auth token. When revealing an empty field that
+ *  has a token stored server-side, pull the plaintext down first so
+ *  the eye actually shows the saved secret — not a blank box. If the
+ *  operator is typing a new token, the eye just toggles visibility. */
+async function handleToggleTokenVisible() {
+  // About to reveal + field empty + a token is stored -> fetch it.
+  if (!passwordVisible.value && !form.authToken && store.frpStatus?.config?.authTokenSet) {
+    revealingToken.value = true
+    try {
+      const res = await store.revealFRPAuthToken()
+      if (res.ok) {
+        form.authToken = res.data.authToken || ''
+        if (!form.authToken) {
+          ElMessage.info('当前未配置 token')
+          return
+        }
+      } else {
+        ElMessage.error(res.error || '获取 token 失败')
+        return
+      }
+    } finally {
+      revealingToken.value = false
+    }
+  }
+  passwordVisible.value = !passwordVisible.value
+}
+
 async function copyAddress() {
   const address = `${form.serverAddr}:${form.remotePort}`
   if (await copyText(address)) {
@@ -335,6 +386,10 @@ onMounted(async () => {
 .status-label {
   font-size: 12px;
   color: #475569;
+}
+
+.token-eye {
+  cursor: pointer;
 }
 
 .frp-form {
