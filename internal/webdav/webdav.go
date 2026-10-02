@@ -34,6 +34,16 @@ type WebdavServer struct {
 	root     string
 	accounts *WebdavAccountState
 	usage    *UsageState
+	// lockSys is the shared in-memory WebDAV lock system.
+	//
+	// LOGIC FIX: Previously gdav.NewMemLS() was called inside
+	// ServeHTTP, creating a fresh empty lock table for EVERY request.
+	// This meant WebDAV locking was completely broken — a LOCK from
+	// client A was invisible to the subsequent PUT from client A
+	// (different request, new map), and concurrent writers were never
+	// blocked. The fix is to create ONE lock system at construction
+	// time and share it across all requests.
+	lockSys gdav.LockSystem
 }
 
 // NewWebdavServer constructs the server. The returned handler is safe
@@ -47,6 +57,7 @@ func NewWebdavServer(root string, accounts *WebdavAccountState, usage *UsageStat
 		root:     root,
 		accounts: accounts,
 		usage:    usage,
+		lockSys:  gdav.NewMemLS(),
 	}
 }
 
@@ -146,6 +157,8 @@ func (s *WebdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Build a request-scoped handler with the account's chroot and
 	// quota wrapper. The handler is constructed per request because
 	// the FileSystem closure needs the matched account's id + quota.
+	// The LockSystem is shared across requests (s.lockSys) so that
+	// WebDAV locks actually prevent concurrent writes.
 	inner := gdav.Dir(accountRoot)
 	qfs := &quotaFileSystem{
 		inner:      inner,
@@ -158,7 +171,7 @@ func (s *WebdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	handler := &gdav.Handler{
 		Prefix:     "/dav/",
 		FileSystem: qfs,
-		LockSystem: gdav.NewMemLS(),
+		LockSystem: s.lockSys,
 	}
 	handler.ServeHTTP(w, r)
 }

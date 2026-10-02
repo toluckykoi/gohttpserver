@@ -115,6 +115,11 @@ func LoadLoginCredentialsAt(db *sql.DB, path string) *LoginState {
 		maxAttempts:      5,
 		lockoutDuration:  15 * time.Minute,
 	}
+	// Start background cleanup for loginAttempts map.
+	// SECURITY FIX: Without this, the map grows unboundedly. Combined
+	// with forged X-Forwarded-For headers (when not behind a proxy),
+	// attackers can create unlimited entries, causing memory exhaustion.
+	st.startCleanupLoop()
 	// Guard against nil db to prevent panic
 	if db == nil {
 		st.creds = defaultLoginCredentials()
@@ -447,6 +452,40 @@ func (s *LoginState) getRemainingAttempts(ip string) int {
 		remaining = 0
 	}
 	return remaining
+}
+
+// startCleanupLoop runs a background goroutine that periodically removes
+// expired or stale entries from the loginAttempts map. This prevents
+// unbounded memory growth from attackers who can vary their apparent IP
+// (e.g. via forged X-Forwarded-For when the server is not behind a proxy).
+//
+// Entries are removed when:
+//   - The lockout period has expired AND the last failure was > 1 hour ago
+//   - The last failure was > 2 hours ago (regardless of lockout state)
+//
+// The goroutine runs for the lifetime of the LoginState, which is the
+// lifetime of the process.
+func (s *LoginState) startCleanupLoop() {
+	go func() {
+		ticker := time.NewTicker(15 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			s.rateLimitMu.Lock()
+			now := time.Now()
+			for ip, attempt := range s.loginAttempts {
+				// Remove if lockout expired and no recent activity
+				if !attempt.lockedUntil.IsZero() && now.After(attempt.lockedUntil) {
+					delete(s.loginAttempts, ip)
+					continue
+				}
+				// Remove stale entries (no activity for 2 hours)
+				if now.Sub(attempt.lastFail) > 2*time.Hour {
+					delete(s.loginAttempts, ip)
+				}
+			}
+			s.rateLimitMu.Unlock()
+		}
+	}()
 }
 
 // ─── Routes / middleware ────────────────────────────────────────────────

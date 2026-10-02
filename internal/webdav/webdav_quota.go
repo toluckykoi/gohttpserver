@@ -148,6 +148,23 @@ func (s *UsageState) addDelta(accountID string, delta int64) error {
 	return s.saveLocked()
 }
 
+// setUsage atomically replaces the cached byte count for accountID and
+// persists. Use this when you have the absolute total (e.g. after a
+// filesystem walk) and need to set it without a TOCTOU window between
+// Get() and addDelta().
+//
+// LOGIC FIX: RecalculateAll previously did
+//   s.addDelta(acc.ID, total - s.Get(acc.ID))
+// which spans two separate lock acquisitions — another goroutine can
+// modify the counter between Get and addDelta, producing a wrong delta.
+// setUsage does the read+replace in a single critical section.
+func (s *UsageState) setUsage(accountID string, total int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.used[accountID] = total
+	return s.saveLocked()
+}
+
 // Recalculate walks rootPath and replaces the cached byte count for
 // accountID with the actual on-disk total. Use this to recover from a
 // counter drift (e.g. operator manually rm-ed files, or initial
@@ -188,7 +205,10 @@ func (s *UsageState) RecalculateAll(accounts []WebdavAccount, root string) []map
 			})
 			continue
 		}
-		_ = s.addDelta(acc.ID, total-s.Get(acc.ID)) // bounded delta; safe to use
+		// LOGIC FIX: Use setUsage (single lock) instead of
+		// addDelta(total - Get()) which spans two locks and races
+		// with concurrent WebDAV writes.
+		_ = s.setUsage(acc.ID, total)
 		out = append(out, map[string]any{
 			"id":         acc.ID,
 			"ok":         true,
@@ -477,29 +497,37 @@ type quotaContext struct {
 	root       string // absolute filesystem path of the account's chroot
 }
 
-// quotaRequestContext is a package-level map from *http.Request to
-// the quotaContext for that request. We use a map (instead of passing
-// the context through the http.Handler signature, which is fixed) by
-// keying on the request pointer; entries are inserted by ServeHTTP and
-// removed on return via defer. *http.Request pointers are unique per
-// request, so this is safe even under high concurrency.
-var quotaRequestContext = make(map[*http.Request]quotaContext)
+// quotaRequestContext is a package-level concurrent-safe map from
+// *http.Request to the quotaContext for that request. We key on the
+// request pointer (unique per request) because the http.Handler
+// signature is fixed and we can't pass the context through it.
+//
+// SECURITY FIX: Previously this was a plain map[*http.Request]quotaContext
+// with no locking. Go maps are NOT safe for concurrent use — concurrent
+// writes (even to different keys) trigger a fatal runtime panic that
+// crashes the entire process. Under high WebDAV concurrency this was
+// virtually guaranteed. Switched to sync.Map which is safe.
+var quotaRequestContext sync.Map
 
 // setQuotaContext installs the quota context for r. Caller must defer
 // clearQuotaContext(r) to avoid leaking.
 func setQuotaContext(r *http.Request, ctx quotaContext) {
-	quotaRequestContext[r] = ctx
+	quotaRequestContext.Store(r, ctx)
 }
 
 // clearQuotaContext removes the quota context for r. Idempotent.
 func clearQuotaContext(r *http.Request) {
-	delete(quotaRequestContext, r)
+	quotaRequestContext.Delete(r)
 }
 
 // getQuotaContext returns the quota context for r. Zero value if none
 // has been set (caller is responsible for handling that case).
 func getQuotaContext(r *http.Request) quotaContext {
-	return quotaRequestContext[r]
+	v, ok := quotaRequestContext.Load(r)
+	if !ok {
+		return quotaContext{}
+	}
+	return v.(quotaContext)
 }
 
 // davHref returns the canonical WebDAV href for use in PROPFIND

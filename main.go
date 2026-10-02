@@ -355,6 +355,11 @@ func main() {
 
 	if gcfg.XHeaders {
 		hdlr = handlers.ProxyHeaders(hdlr)
+		// Only trust proxy-forwarded IP headers when --xheaders is
+		// enabled. This prevents attackers from forging X-Forwarded-For
+		// to bypass login rate limiting when the server is directly
+		// exposed.
+		util.SetTrustProxyHeaders(true)
 	}
 
 	mainRouter := mux.NewRouter()
@@ -533,13 +538,18 @@ func main() {
 		Version:   VERSION,
 	})
 	} else {
-		// When login is disabled, still register FRP routes but without
-		// authentication. This allows FRP management if needed.
-		admin.RegisterRoutes(router, &admin.API{
-		LocalAddr: gcfg.Addr,
-		FRP:       frpClient,
-		Version:   VERSION,
-	})
+		// SECURITY FIX: When --login is disabled, do NOT register the
+		// admin API routes. Previously the routes were registered with
+		// a nil Login field, and every handler checked
+		// `UserFromLoginSession(r) == nil` and returned 401. While not
+		// directly exploitable (all handlers reject unauthenticated
+		// requests), the routes were still discoverable (returns 401
+		// instead of 404), exposing the API surface. Worse, in OpenID
+		// or oauth2-proxy mode a valid session would satisfy the
+		// `UserFromLoginSession(r)` check — the admin handlers would
+		// proceed despite api.Login being nil, causing nil-pointer
+		// panics on api.Login.ChangeUsername() etc. Not registering
+		// the routes at all is the clean fix.
 	}
 
 	// HTTP Basic Authentication
@@ -652,10 +662,25 @@ func main() {
 	}
 
 	// Wrap listener with proxyproto to support HAProxy PROXY protocol
-	// This allows FRP to pass real client IP when ProxyProtocol is enabled
+	// This allows FRP to pass real client IP when ProxyProtocol is enabled.
+	//
+	// SECURITY FIX: Previously the Policy unconditionally returned USE,
+	// meaning ANY connection's PROXY protocol header was accepted. If the
+	// server is directly exposed (not behind HAProxy/FRP), an attacker can
+	// forge the PROXY protocol header to spoof their source IP. Now we
+	// only accept PROXY protocol from loopback or private IPs (where
+	// FRP/HAProxy would be running). Public connections are handled
+	// normally without PROXY protocol parsing.
 	proxyLn := &proxyproto.Listener{
 		Listener:          ln,
-		Policy:            func(upstream net.Addr) (proxyproto.Policy, error) { return proxyproto.USE, nil },
+		Policy: func(upstream net.Addr) (proxyproto.Policy, error) {
+			host, _, _ := net.SplitHostPort(upstream.String())
+			ip := net.ParseIP(host)
+			if ip != nil && (ip.IsLoopback() || isPrivateIP(ip)) {
+				return proxyproto.USE, nil
+			}
+			return proxyproto.IGNORE, nil
+		},
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	defer proxyLn.Close()

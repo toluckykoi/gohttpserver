@@ -121,13 +121,29 @@ func NewHTTPStaticServer(root string, noIndex bool) *HTTPStaticServer {
 
 	if !noIndex {
 		go func() {
+			// LOGIC FIX: Add panic recovery so a single bad file
+			// (weird encoding, symlink loop) doesn't permanently
+			// kill the index rebuild goroutine. Without this, the
+			// search index would stop updating silently.
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("makeIndex goroutine panic: %v — index rebuild stopped until restart", r)
+				}
+			}()
 			time.Sleep(1 * time.Second)
 			for {
 				startTime := time.Now()
 				log.Println("Started making search index")
-				s.makeIndex()
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("makeIndex iteration panic: %v", r)
+						}
+					}()
+					s.makeIndex()
+				}()
 				log.Printf("Completed search index in %v", time.Since(startTime))
-			time.Sleep(time.Minute * 10)
+				time.Sleep(time.Minute * 10)
 			}
 		}()
 	}
@@ -1449,9 +1465,20 @@ func (s *HTTPStaticServer) hJSONList(w http.ResponseWriter, r *http.Request) {
 		return lrs[i].Name < lrs[j].Name
 	})
 
+	// Only expose the three effective permission flags to the client.
+	// The raw AccessConf also carries the per-user rule list from
+	// .ghs.yml — including each user's upload/edit Token — plus the
+	// accessTables regexes. Serialising it would hand every listing
+	// viewer (including anonymous ones) the tokens, which grant
+	// upload/edit rights via canUploadByToken/canEditByToken (CWE-200).
+	// The frontend only consumes auth.upload/delete/edit.
 	data, _ := json.Marshal(map[string]any{
 		"files": lrs,
-		"auth":  auth,
+		"auth": map[string]bool{
+			"upload": auth.Upload,
+			"delete": auth.Delete,
+			"edit":   auth.Edit,
+		},
 	})
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(data)
