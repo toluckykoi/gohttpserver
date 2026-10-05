@@ -44,3 +44,6 @@ gohttpserver.db
 gohttpserver.db-wal
 gohttpserver.db-shm
 frontend/node_modules/
+
+# Local Go build cache (used when GOCACHE is pinned to the repo)
+.gocache/

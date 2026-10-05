@@ -146,7 +146,6 @@
       <!-- Main content area -->
       <main class="app-main">
         <div class="main-inner">
-          <Breadcrumb />
           <FileList />
         </div>
         <footer class="app-footer">
@@ -220,7 +219,6 @@
 import { onMounted, onBeforeUnmount, computed, ref, defineAsyncComponent } from 'vue'
 import { useFileStore } from './stores/fileStore'
 import { useTheme } from './composables/useTheme'
-import Breadcrumb from './components/Breadcrumb.vue'
 import FileList from './components/FileList.vue'
 import Login from './views/Login.vue'
 import AdminPanel from './views/AdminPanel.vue'
@@ -751,6 +749,8 @@ onBeforeUnmount(() => {
 .theme-card-swatch[data-theme="green"] .theme-card-swatch-dark     { background: #059669; }
 .theme-card-swatch[data-theme="cyan"]  .theme-card-swatch-light    { background: #ecfeff; }
 .theme-card-swatch[data-theme="cyan"]  .theme-card-swatch-dark     { background: #0891b2; }
+.theme-card-swatch[data-theme="dark"]  .theme-card-swatch-light    { background: #16181d; }
+.theme-card-swatch[data-theme="dark"]  .theme-card-swatch-dark     { background: #4c8dff; }
 
 .theme-card-name {
   flex: 1;
@@ -906,7 +906,8 @@ onBeforeUnmount(() => {
 }
 
 :global([data-theme="black"]) .footer-icon--github,
-:global([data-theme="green"]) .footer-icon--github {
+:global([data-theme="green"]) .footer-icon--github,
+:global([data-theme="dark"]) .footer-icon--github {
   fill: #e6edf3;
 }
 
@@ -1083,5 +1084,58 @@ onBeforeUnmount(() => {
   --el-bg-color-page: #f3f7f9;
   --el-fill-color-light: #edf4f7;
   --el-fill-color: #e9f1f5;
+}
+
+/* ────────────────────────────────────────────────────────────────
+   Dark — true dark mode. Element Plus dark-theme convention:
+   primary-light-N steps get DARKER as N grows (they back tinted
+   fills), while primary-dark-2 is the lighter hover on the accent.
+   ──────────────────────────────────────────────────────────────── */
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --el-color-primary: #4c8dff;
+  --el-color-primary-light-3: #3a6fd1;
+  --el-color-primary-light-5: #2b529c;
+  --el-color-primary-light-7: #1f3a6e;
+  --el-color-primary-light-8: #182c52;
+  --el-color-primary-light-9: #13223e;
+  --el-color-primary-dark-2: #79acff;
+
+  --el-text-color-primary: #e7e9ec;
+  --el-text-color-regular: #c2c6cd;
+  --el-text-color-secondary: #949aa5;
+  --el-text-color-placeholder: #6b7280;
+
+  --el-bg-color: #16181d;
+  --el-bg-color-page: #0f1115;
+  --el-bg-color-overlay: #1e2127;
+
+  --el-fill-color: #262a31;
+  --el-fill-color-light: #1f2329;
+  --el-fill-color-lighter: #1a1d23;
+  --el-fill-color-extra-light: #171a20;
+  --el-fill-color-blank: #16181d;
+
+  --el-border-color: #383d46;
+  --el-border-color-light: #30353d;
+  --el-border-color-lighter: #282c34;
+  --el-border-color-extra-light: #22262d;
+  --el-border-color-dark: #434954;
+  --el-border-color-darker: #4e5560;
+
+  --el-mask-color: rgba(0, 0, 0, 0.6);
+
+  /* The global light-theme shadows vanish on dark surfaces; swap in
+     deeper, wider umbra so cards still lift off the page. */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4),
+               0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45),
+               0 2px 4px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 10px 32px rgba(0, 0, 0, 0.5),
+               0 4px 8px rgba(0, 0, 0, 0.35);
+  --shadow-xl: 0 20px 56px rgba(0, 0, 0, 0.55),
+               0 8px 16px rgba(0, 0, 0, 0.4);
 }
 </style>

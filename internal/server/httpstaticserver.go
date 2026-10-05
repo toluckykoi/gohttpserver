@@ -98,6 +98,14 @@ type HTTPStaticServer struct {
 	// readers always see a consistent snapshot — the previous bare
 	// slice field was a data race under `go test -race`.
 	indexes atomic.Pointer[[]IndexFileItem]
+
+	// accessConfCache memoises the parsed .ghs.yml files. Reading and
+	// YAML-decoding a config on every request (hJSONList, hDelete,
+	// hUpload, hEdit, hFetch, hIndex) was pure overhead; the cache is
+	// keyed by the config file's absolute path and invalidated by mtime,
+	// so external edits are still picked up automatically.
+	accessConfCache *util.FileCache[rawAccessConf]
+
 	m       *mux.Router
 	bufPool sync.Pool // use sync.Pool caching buf to reduce gc ratio
 }
@@ -110,9 +118,10 @@ func NewHTTPStaticServer(root string, noIndex bool) *HTTPStaticServer {
 	log.Printf("root path: %s\n", root)
 	m := mux.NewRouter()
 	s := &HTTPStaticServer{
-		Root:  root,
-		Theme: "black",
-		m:     m,
+		Root:            root,
+		Theme:           "black",
+		m:               m,
+		accessConfCache: util.NewFileCache[rawAccessConf](parseAccessConfFile),
 		bufPool: sync.Pool{
 			New: func() any { return make([]byte, 32*1024) },
 		},
@@ -312,6 +321,7 @@ func (s *HTTPStaticServer) hDelete(w http.ResponseWriter, req *http.Request) {
 	}
 	// Drop cached sizes — files just disappeared from disk.
 	invalidateDirSizeCache()
+	s.invalidateAccessConf()
 	w.Write([]byte("Success"))
 }
 
@@ -437,6 +447,7 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 	// next directory listing should reflect it without waiting for the
 	// 10-minute index rebuild.
 	invalidateDirSizeCache()
+	s.invalidateAccessConf()
 
 	if req.FormValue("unzip") == "true" {
 		// Streaming NDJSON progress: switch the response to chunked
@@ -604,6 +615,7 @@ func (s *HTTPStaticServer) hEdit(w http.ResponseWriter, req *http.Request) {
 	// The file's modification time and parent dir's size-cache just
 	// changed — drop the cache so the next listing reflects reality.
 	invalidateDirSizeCache()
+	s.invalidateAccessConf()
 
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]any{
@@ -693,9 +705,10 @@ func isPrivateIPv4(ip net.IP) bool {
 
 // hFetch downloads a remote URL to a file under the current route.
 // Form fields:
-//   url  — the http(s) URL to fetch (required)
-//   to   — destination basename under the current directory (required;
-//          path separators and `..` rejected the same way as uploads)
+//
+//	url  — the http(s) URL to fetch (required)
+//	to   — destination basename under the current directory (required;
+//	       path separators and `..` rejected the same way as uploads)
 //
 // SSRF: the URL is parsed; only http/https are accepted; the dial
 // address is validated against the safe-dial rules above so an
@@ -710,8 +723,8 @@ func (s *HTTPStaticServer) hFetch(w http.ResponseWriter, req *http.Request) {
 	dirpath := s.getRealPath(req)
 
 	// Auth — must have upload on the destination dir. Same
-// body-preserving dance as hEdit: token from URL query / X-Token
-// header, session fallback via canUploadSession.
+	// body-preserving dance as hEdit: token from URL query / X-Token
+	// header, session fallback via canUploadSession.
 	ac := s.readAccessConf(dirpath)
 	token := req.URL.Query().Get("token")
 	if token == "" {
@@ -823,6 +836,7 @@ func (s *HTTPStaticServer) hFetch(w http.ResponseWriter, req *http.Request) {
 	}
 
 	invalidateDirSizeCache()
+	s.invalidateAccessConf()
 
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]any{
@@ -1224,13 +1238,59 @@ type AccessConf struct {
 	AccessTables []AccessTable `yaml:"accessTables"`
 }
 
+// rawAccessConf is the on-disk shape of .ghs.yml, using pointers so we
+// can tell which keys a given file actually sets. That distinction is
+// what preserves the historic merge behaviour — a child directory's
+// .ghs.yml overrides only the keys it declares and inherits everything
+// else from its parent — while still allowing the decode result to be
+// cached. A plain AccessConf cannot be merged correctly because a
+// zero-valued bool is indistinguishable from an explicit `upload: false`.
+type rawAccessConf struct {
+	Upload       *bool          `yaml:"upload"`
+	Delete       *bool          `yaml:"delete"`
+	Edit         *bool          `yaml:"edit"`
+	Users        *[]UserControl `yaml:"users"`
+	AccessTables *[]AccessTable `yaml:"accessTables"`
+}
+
+// parseAccessConfFile decodes one .ghs.yml. It is handed to the
+// FileCache, which calls it only on a cache miss or mtime change.
+func parseAccessConfFile(data []byte) (*rawAccessConf, error) {
+	var raw rawAccessConf
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	return &raw, nil
+}
+
+// mergeInto overlays the keys this file declared onto the inherited
+// config. Fields the file omits keep their inherited value; fields it
+// sets (including explicit false or an empty list) replace it.
+func (raw *rawAccessConf) mergeInto(ac *AccessConf) {
+	if raw.Upload != nil {
+		ac.Upload = *raw.Upload
+	}
+	if raw.Delete != nil {
+		ac.Delete = *raw.Delete
+	}
+	if raw.Edit != nil {
+		ac.Edit = *raw.Edit
+	}
+	if raw.Users != nil {
+		ac.Users = *raw.Users
+	}
+	if raw.AccessTables != nil {
+		ac.AccessTables = *raw.AccessTables
+	}
+}
+
 // reCache caches compiled access-table regexps. Access from HTTP handler
 // goroutines is concurrent, so the map is guarded by a RWMutex — the
 // previous unsynchronised map produced a data race under `go test -race`
 // and could corrupt the map on concurrent first-access of the same rule.
 var (
-	reCache    = make(map[string]*regexp.Regexp)
-	reCacheMu  sync.RWMutex
+	reCache   = make(map[string]*regexp.Regexp)
+	reCacheMu sync.RWMutex
 )
 
 func compileCached(pattern string) *regexp.Regexp {
@@ -1547,6 +1607,11 @@ func (s *HTTPStaticServer) historyDirSize(dir string) int64 {
 	})
 
 	dirInfoSize.mutex.Lock()
+	// Lazy-init the map so a nil value (e.g. after a test resets it, or a
+	// zero-value Directory) doesn't panic on write.
+	if dirInfoSize.size == nil {
+		dirInfoSize.size = make(map[string]int64)
+	}
 	dirInfoSize.size[dir] = size
 	dirInfoSize.mutex.Unlock()
 
@@ -1560,6 +1625,53 @@ func invalidateDirSizeCache() {
 	dirInfoSize.mutex.Lock()
 	dirInfoSize.size = make(map[string]int64)
 	dirInfoSize.mutex.Unlock()
+}
+
+// addDelta adjusts the cached size of the directory holding relFile and
+// every cached ancestor by delta. Paths are slash-normalised paths
+// relative to Root ("." for the root itself). Ancestors that were never
+// read (absent from the cache) are skipped: historyDirSize computes them
+// lazily from disk on the next read, so the cache can only ever be
+// under-populated, never wrong.
+func (d *Directory) addDelta(relFile string, delta int64) {
+	if delta == 0 {
+		return
+	}
+	dir := path.Dir(filepath.ToSlash(filepath.Clean(relFile)))
+
+	d.mutex.Lock()
+	if d.size != nil {
+		for {
+			if _, ok := d.size[dir]; ok {
+				d.size[dir] += delta
+			}
+			if dir == "." || dir == "/" {
+				break
+			}
+			parent := path.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+	d.mutex.Unlock()
+}
+
+// dropSubtree removes the cache entry for dir and every descendant entry.
+// Called after a recursive delete so the deleted subtree's sizes don't
+// linger and get re-used for a directory that no longer exists.
+func (d *Directory) dropSubtree(dir string) {
+	dir = filepath.ToSlash(filepath.Clean(dir))
+	prefix := dir + "/"
+
+	d.mutex.Lock()
+	for k := range d.size {
+		if k == dir || strings.HasPrefix(k, prefix) {
+			delete(d.size, k)
+		}
+	}
+	d.mutex.Unlock()
 }
 
 func (s *HTTPStaticServer) findIndex(text string) []IndexFileItem {
@@ -1616,18 +1728,27 @@ func (s *HTTPStaticServer) readAccessConf(realPath string) (ac AccessConf) {
 		realPath = filepath.Dir(realPath)
 	}
 	cfgFile := filepath.Join(realPath, YAMLCONF)
-	data, err := os.ReadFile(cfgFile)
+	raw, err := s.accessConfCache.Get(cfgFile)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return
+		if !os.IsNotExist(err) {
+			log.Printf("Err read .ghs.yml: %v", err)
 		}
-		log.Printf("Err read .ghs.yml: %v", err)
+		return
 	}
-	err = yaml.Unmarshal(data, &ac)
-	if err != nil {
-		log.Printf("Err format .ghs.yml: %v", err)
+	if raw == nil {
+		return
 	}
+	raw.mergeInto(&ac)
 	return
+}
+
+// invalidateAccessConf drops the memoised .ghs.yml parses. Called after
+// a handler may have created, rewritten, or removed a config file so the
+// next request re-reads it from disk instead of serving a stale value.
+func (s *HTTPStaticServer) invalidateAccessConf() {
+	if s.accessConfCache != nil {
+		s.accessConfCache.InvalidateAll()
+	}
 }
 
 func deepPath(basedir, name string, maxDepth int) string {

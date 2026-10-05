@@ -1,83 +1,98 @@
 <template>
   <div class="file-list-container">
-    <div class="toolbar">
-      <div class="toolbar-group toolbar-group--nav">
-        <el-tooltip content="Back" placement="bottom">
-          <el-button class="toolbar-btn" type="default" @click="goBack">
-            <el-icon><ArrowLeft /></el-icon>
-            <span class="toolbar-label">Back</span>
-          </el-button>
-        </el-tooltip>
-        <el-tooltip content="Refresh (F5)" placement="bottom">
-          <el-button
-            class="toolbar-btn toolbar-refresh"
-            type="default"
-            :class="{ 'toolbar-refresh--spinning': refreshing }"
-            @click="handleRefresh"
-          >
-            <el-icon><Refresh /></el-icon>
-            <span class="toolbar-label">Refresh</span>
-          </el-button>
-        </el-tooltip>
-        <el-tooltip
-          :content="showHidden ? 'Hide hidden files' : 'Show hidden files'"
-          placement="bottom"
-        >
-          <el-button class="toolbar-btn" type="default" @click="toggleShowHidden">
-            <el-icon><View /></el-icon>
-            <span class="toolbar-label">{{ showHidden ? 'Hide' : 'Show' }} Hidden</span>
-          </el-button>
-        </el-tooltip>
-        <!-- Mobile only: enter / exit selection mode for card-based multi-select.
-             Hidden on desktop where the table has built-in checkbox columns. -->
-        <el-tooltip
-          v-if="!loading && sortedFiles.length > 0"
-          :content="fileStore.selectionMode ? 'Exit selection mode' : 'Select files'"
-          placement="bottom"
-        >
-          <el-button
-            class="toolbar-btn toolbar-select-toggle"
-            :type="fileStore.selectionMode ? 'primary' : 'default'"
-            @click="handleToggleSelectionMode"
-          >
-            <el-icon><Check /></el-icon>
-            <span class="toolbar-label">{{ fileStore.selectionMode ? 'Done' : 'Select' }}</span>
-          </el-button>
-        </el-tooltip>
+    <!-- Unified panel: breadcrumb + controls + stats + list share one
+         glass card instead of four stacked bands of different chrome. -->
+    <div class="panel-card">
+      <div class="toolbar">
+        <Breadcrumb class="toolbar-breadcrumb" />
+        <div class="toolbar-controls">
+          <div class="toolbar-group toolbar-group--nav">
+            <el-tooltip content="Back" placement="bottom">
+              <el-button class="toolbar-btn" type="default" @click="goBack">
+                <el-icon><ArrowLeft /></el-icon>
+                <span class="toolbar-label">Back</span>
+              </el-button>
+            </el-tooltip>
+            <el-tooltip content="Refresh (F5)" placement="bottom">
+              <el-button
+                class="toolbar-btn toolbar-refresh"
+                type="default"
+                :class="{ 'toolbar-refresh--spinning': refreshing }"
+                @click="handleRefresh"
+              >
+                <el-icon><Refresh /></el-icon>
+                <span class="toolbar-label">Refresh</span>
+              </el-button>
+            </el-tooltip>
+            <el-tooltip
+              :content="showHidden ? 'Hide hidden files' : 'Show hidden files'"
+              placement="bottom"
+            >
+              <el-button class="toolbar-btn" type="default" @click="toggleShowHidden">
+                <el-icon><View /></el-icon>
+                <span class="toolbar-label">{{ showHidden ? 'Hide' : 'Show' }} Hidden</span>
+              </el-button>
+            </el-tooltip>
+            <!-- Mobile only: enter / exit selection mode for card-based multi-select.
+                 Hidden on desktop where the table has built-in checkbox columns. -->
+            <el-tooltip
+              v-if="!loading && sortedFiles.length > 0"
+              :content="fileStore.selectionMode ? 'Exit selection mode' : 'Select files'"
+              placement="bottom"
+            >
+              <el-button
+                class="toolbar-btn toolbar-select-toggle"
+                :type="fileStore.selectionMode ? 'primary' : 'default'"
+                @click="handleToggleSelectionMode"
+              >
+                <el-icon><Check /></el-icon>
+                <span class="toolbar-label">{{ fileStore.selectionMode ? 'Done' : 'Select' }}</span>
+              </el-button>
+            </el-tooltip>
+          </div>
+
+          <div v-if="auth.upload || auth.delete" class="toolbar-group toolbar-group--actions">
+            <el-tooltip v-if="auth.upload" content="Upload files" placement="bottom">
+              <el-button
+                class="toolbar-btn"
+                type="primary"
+                @click="showUploadModal = true"
+              >
+                <el-icon><Upload /></el-icon>
+                <span class="toolbar-label">Upload</span>
+              </el-button>
+            </el-tooltip>
+            <el-tooltip v-if="auth.upload" content="Download a remote file via URL" placement="bottom">
+              <el-button
+                class="toolbar-btn"
+                @click="showUrlDownloadModal = true"
+              >
+                <el-icon><Link /></el-icon>
+                <span class="toolbar-label">From URL</span>
+              </el-button>
+            </el-tooltip>
+            <el-tooltip v-if="auth.delete" content="New folder" placement="bottom">
+              <el-button
+                class="toolbar-btn"
+                @click="handleCreateDirectory"
+              >
+                <el-icon><FolderAdd /></el-icon>
+                <span class="toolbar-label">New Folder</span>
+              </el-button>
+            </el-tooltip>
+          </div>
+        </div>
       </div>
 
-      <div v-if="auth.upload || auth.delete" class="toolbar-group toolbar-group--actions">
-        <el-tooltip v-if="auth.upload" content="Upload files" placement="bottom">
-          <el-button
-            class="toolbar-btn"
-            type="primary"
-            @click="showUploadModal = true"
-          >
-            <el-icon><Upload /></el-icon>
-            <span class="toolbar-label">Upload</span>
-          </el-button>
-        </el-tooltip>
-        <el-tooltip v-if="auth.upload" content="Download a remote file via URL" placement="bottom">
-          <el-button
-            class="toolbar-btn"
-            @click="showUrlDownloadModal = true"
-          >
-            <el-icon><Link /></el-icon>
-            <span class="toolbar-label">From URL</span>
-          </el-button>
-        </el-tooltip>
-        <el-tooltip v-if="auth.delete" content="New folder" placement="bottom">
-          <el-button
-            class="toolbar-btn"
-            type="success"
-            @click="handleCreateDirectory"
-          >
-            <el-icon><FolderAdd /></el-icon>
-            <span class="toolbar-label">New Folder</span>
-          </el-button>
-        </el-tooltip>
+      <!-- Directory stats: cheap to compute, makes the listing feel
+           alive and gives the toolbar card a second, quieter tier. -->
+      <div v-if="!loading && sortedFiles.length > 0" class="panel-stats">
+        <span>{{ sortedFiles.length }} {{ sortedFiles.length === 1 ? 'item' : 'items' }}</span>
+        <span class="panel-stats-sep" aria-hidden="true">·</span>
+        <span>{{ formatBytes(totalSize) }}</span>
+        <span class="panel-stats-sep" aria-hidden="true">·</span>
+        <span>Last modified {{ lastModified }}</span>
       </div>
-    </div>
 
     <!-- Empty state -->
     <div v-if="!loading && sortedFiles.length === 0" class="empty-state">
@@ -102,20 +117,38 @@
            reach and clearly contextual to the table/cards below. -->
       <div v-if="selectedCount > 0" class="selection-bar" role="status">
         <div class="selection-bar-left">
+          <span class="selection-bar-badge" aria-hidden="true">
+            <el-icon :size="13"><Check /></el-icon>
+          </span>
           <span class="selection-bar-count">
             {{ selectedCount }} selected
+            <template v-if="selectedTotalSize > 0">
+              <span class="selection-bar-sep">·</span>
+              <span class="selection-bar-size data-mono">{{ formatBytes(selectedTotalSize) }}</span>
+            </template>
           </span>
         </div>
         <div class="selection-bar-right">
-          <el-tooltip content="Download selected" placement="bottom">
+          <el-tooltip content="Download selected as archive" placement="bottom">
             <el-button
-              class="selection-bar-btn selection-bar-download"
-              text
+              class="selection-bar-action"
               :icon="Download"
-              aria-label="Download selected"
               @click="handleDownloadSelected"
-            />
+            >
+              <span class="selection-bar-action-label">Download</span>
+            </el-button>
           </el-tooltip>
+          <el-tooltip v-if="auth.delete" content="Delete selected items" placement="bottom">
+            <el-button
+              class="selection-bar-action selection-bar-action--danger"
+              :icon="Delete"
+              :loading="deletingSelected"
+              @click="handleDeleteSelected"
+            >
+              <span class="selection-bar-action-label">Delete</span>
+            </el-button>
+          </el-tooltip>
+          <span class="selection-bar-divider" aria-hidden="true" />
           <el-button
             v-if="!isAllSelected && sortedFiles.length > selectedCount"
             class="selection-bar-btn"
@@ -147,10 +180,13 @@
         </div>
       </div>
 
-    <!-- Desktop / tablet: table layout -->
+    <!-- Desktop / tablet: table layout. Renders visibleFiles (an
+         incrementally-growing prefix of sortedFiles) instead of the
+         full list — mounting thousands of el-table rows at once froze
+         the page for seconds on large directories. -->
     <el-table
       class="file-table"
-      :data="sortedFiles"
+      :data="visibleFiles"
       v-loading="loading"
       style="width: 100%"
       :default-sort="defaultSort"
@@ -191,167 +227,84 @@
         </template>
       </el-table-column>
 
-      <el-table-column label="Actions" width="340" class-name="col-actions">
+      <el-table-column label="Actions" width="120" class-name="col-actions">
         <template #default="{ row }">
-          <!-- Desktop actions -->
+          <!-- Quiet actions: monochrome bare icons, always visible.
+               The chip border/bg appears on row hover; the accent
+               color on button hover. One contextual quick action +
+               Download + an overflow menu holding everything else
+               (incl. Delete, whose red lives only inside the menu). -->
           <div class="action-buttons action-desktop" @click.stop>
-            <!-- Directory actions -->
             <template v-if="row.type === 'dir'">
               <el-tooltip content="Download as ZIP" placement="top">
                 <el-button
-                  type="primary"
+                  class="row-action-btn"
                   :icon="Download"
-                  circle
-                  size="small"
+                  aria-label="Download as ZIP"
                   @click="handleDownloadArchive(row)"
                 />
               </el-tooltip>
-              <el-tooltip content="Info" placement="top">
-                <el-button
-                  type="info"
-                  :icon="InfoFilled"
-                  circle
-                  size="small"
-                  @click="handleShowInfo(row)"
-                />
-              </el-tooltip>
-              <el-tooltip content="QR Code" placement="top">
-                <el-button
-                  type="warning"
-                  :icon="Camera"
-                  circle
-                  size="small"
-                  @click="handleShowQrCode(row)"
-                />
-              </el-tooltip>
-              <el-tooltip v-if="auth.delete" content="Delete (hold Alt to skip confirm)" placement="top">
-                <el-button
-                  type="danger"
-                  :icon="Delete"
-                  circle
-                  size="small"
-                  @click="handleDeleteFile(row)"
-                />
-              </el-tooltip>
             </template>
-
-            <!-- File actions -->
             <template v-else>
-              <el-tooltip content="Download" placement="top">
-                <el-button
-                  type="primary"
-                  :icon="Download"
-                  circle
-                  size="small"
-                  @click="handleDownload(row)"
-                />
-              </el-tooltip>
-              <el-tooltip content="Copy Link" placement="top">
-                <el-button
-                  type="success"
-                  :icon="DocumentCopy"
-                  circle
-                  size="small"
-                  @click="handleCopyLink(row)"
-                />
-              </el-tooltip>
-              <el-tooltip content="QR Code" placement="top">
-                <el-button
-                  type="warning"
-                  :icon="Camera"
-                  circle
-                  size="small"
-                  @click="handleShowQrCode(row)"
-                />
-              </el-tooltip>
-              <el-tooltip v-if="canPreview(row)" content="Preview" placement="top">
-                <el-button
-                  type="primary"
-                  :icon="Reading"
-                  circle
-                  size="small"
-                  @click="handleShowPreview(row)"
-                />
-              </el-tooltip>
               <el-tooltip v-if="isImage(row)" content="Preview image" placement="top">
                 <el-button
-                  type="primary"
+                  class="row-action-btn"
                   :icon="Picture"
-                  circle
-                  size="small"
+                  aria-label="Preview image"
                   @click="handleShowImagePreview(row)"
                 />
               </el-tooltip>
-              <el-tooltip content="Info" placement="top">
+              <el-tooltip v-else-if="isVideo(row)" content="Play video" placement="top">
                 <el-button
-                  type="info"
-                  :icon="InfoFilled"
-                  circle
-                  size="small"
-                  @click="handleShowInfo(row)"
-                />
-              </el-tooltip>
-              <el-tooltip
-                v-if="isVideo(row)"
-                content="Play Video"
-                placement="top"
-              >
-                <el-button
-                  type="primary"
+                  class="row-action-btn"
                   :icon="VideoPlay"
-                  circle
-                  size="small"
+                  aria-label="Play video"
                   @click="handleVideoPlay(row)"
                 />
               </el-tooltip>
-              <el-tooltip
-                v-if="hasQrCode(row)"
-                content="Install"
-                placement="top"
-              >
+              <el-tooltip v-else-if="canPreview(row)" content="Preview" placement="top">
                 <el-button
-                  type="success"
-                  :icon="Box"
-                  circle
-                  size="small"
-                  @click="handleInstall(row)"
+                  class="row-action-btn"
+                  :icon="Reading"
+                  aria-label="Preview"
+                  @click="handleShowPreview(row)"
                 />
               </el-tooltip>
-              <el-tooltip v-if="auth.delete" content="Delete (hold Alt to skip confirm)" placement="top">
+              <el-tooltip content="Download" placement="top">
                 <el-button
-                  type="danger"
-                  :icon="Delete"
-                  circle
-                  size="small"
-                  @click="handleDeleteFile(row)"
+                  class="row-action-btn"
+                  :icon="Download"
+                  aria-label="Download"
+                  @click="handleDownload(row)"
                 />
               </el-tooltip>
             </template>
-          </div>
-          <!-- Mobile: dropdown menu -->
-          <div class="action-mobile" @click.stop>
-            <el-dropdown trigger="click" @command="(cmd: string) => handleMobileAction(cmd, row)">
-              <el-button :icon="MoreFilled" circle size="small" />
+            <el-dropdown trigger="click" placement="bottom-end" @command="(cmd: string) => handleMobileAction(cmd, row)">
+              <el-button
+                class="row-action-btn"
+                :icon="MoreFilled"
+                aria-label="More actions"
+              />
               <template #dropdown>
                 <el-dropdown-menu>
                   <template v-if="row.type === 'dir'">
-                    <el-dropdown-item command="zip">Download as ZIP</el-dropdown-item>
-                    <el-dropdown-item command="info">Info</el-dropdown-item>
-                    <el-dropdown-item command="qrcode">QR Code</el-dropdown-item>
-                    <el-dropdown-item v-if="auth.delete" command="delete" divided>
+                    <el-dropdown-item command="zip" :icon="Download">Download as ZIP</el-dropdown-item>
+                    <el-dropdown-item command="qrcode" :icon="Camera">QR Code</el-dropdown-item>
+                    <el-dropdown-item command="info" :icon="InfoFilled">Info</el-dropdown-item>
+                    <el-dropdown-item v-if="auth.delete" command="delete" :icon="Delete" divided>
                       Delete
                     </el-dropdown-item>
                   </template>
                   <template v-else>
-                    <el-dropdown-item command="download">Download</el-dropdown-item>
-                    <el-dropdown-item command="copy">Copy Link</el-dropdown-item>
-                    <el-dropdown-item command="qrcode">QR Code</el-dropdown-item>
-                    <el-dropdown-item v-if="isImage(row)" command="image-preview">Preview image</el-dropdown-item>
-                    <el-dropdown-item v-if="canPreview(row)" command="preview">Preview</el-dropdown-item>
-                    <el-dropdown-item v-if="isVideo(row)" command="video">Play Video</el-dropdown-item>
-                    <el-dropdown-item v-if="hasQrCode(row)" command="install">Install</el-dropdown-item>
-                    <el-dropdown-item command="info">Info</el-dropdown-item>
-                    <el-dropdown-item v-if="auth.delete" command="delete" divided>
+                    <el-dropdown-item command="download" :icon="Download">Download</el-dropdown-item>
+                    <el-dropdown-item command="copy" :icon="DocumentCopy">Copy Link</el-dropdown-item>
+                    <el-dropdown-item command="qrcode" :icon="Camera">QR Code</el-dropdown-item>
+                    <el-dropdown-item v-if="isImage(row)" command="image-preview" :icon="Picture">Preview image</el-dropdown-item>
+                    <el-dropdown-item v-if="canPreview(row)" command="preview" :icon="Reading">Preview</el-dropdown-item>
+                    <el-dropdown-item v-if="isVideo(row)" command="video" :icon="VideoPlay">Play Video</el-dropdown-item>
+                    <el-dropdown-item v-if="hasQrCode(row)" command="install" :icon="Box">Install</el-dropdown-item>
+                    <el-dropdown-item command="info" :icon="InfoFilled">Info</el-dropdown-item>
+                    <el-dropdown-item v-if="auth.delete" command="delete" :icon="Delete" divided>
                       Delete
                     </el-dropdown-item>
                   </template>
@@ -366,7 +319,7 @@
     <!-- Mobile: card list layout (no horizontal scroll) -->
     <div class="mobile-file-list" :class="{ 'is-loading': loading }">
       <div
-        v-for="row in sortedFiles"
+        v-for="row in visibleFiles"
         :key="row.name"
         class="mobile-file-card"
         :class="{
@@ -386,10 +339,10 @@
           @change="fileStore.toggleSelect(row.path)"
           @click.stop
         />
-        <div class="mobile-file-icon">
-          <el-icon :size="22">
-            <component :is="getFileIcon(row.name, row.type)" />
-          </el-icon>
+        <div class="mobile-file-icon" :style="iconTileStyle(row)">
+          <svg class="mobile-file-glyph" viewBox="0 0 24 24" fill="currentColor">
+            <path v-for="(d, i) in getFileIconPaths(row.name, row.type)" :key="i" :d="d" />
+          </svg>
         </div>
         <div class="mobile-file-info">
           <div class="mobile-file-name">{{ row.name }}</div>
@@ -439,7 +392,24 @@
         </div>
       </div>
     </div>
+
+    <!-- Incremental-render sentinel. When it scrolls into view the next
+         PAGE_SIZE rows are appended automatically; the button is the
+         manual fallback. Always mounted (v-show semantics) so the
+         IntersectionObserver attaches exactly once. -->
+    <div v-if="sortedFiles.length > 0" ref="sentinelRef" class="load-more-sentinel">
+      <el-button
+        v-if="hasMoreFiles"
+        class="load-more-btn"
+        text
+        type="primary"
+        @click="displayCount += PAGE_SIZE"
+      >
+        Load more — {{ sortedFiles.length - displayCount }} of {{ sortedFiles.length }} remaining
+      </el-button>
+    </div>
     </template>
+    </div>
 
     <NewFolderDialog
       v-model:visible="showNewFolderDialog"
@@ -497,10 +467,11 @@ import { useFileApi } from '@/composables/useFileApi'
 import type { FileItem as FileItemType } from '@/types'
 import { formatBytes } from '@/utils/formatBytes'
 import { getEncodePath, parentDirectory } from '@/utils/path'
-import { shouldHaveQrcode, isVideoFile, isPreviewableImage, getFileIcon } from '@/utils/fileIcon'
+import { shouldHaveQrcode, isVideoFile, isPreviewableImage, getFileIconPaths, getFileIconColor } from '@/utils/fileIcon'
 import { isPreviewable } from '@/utils/previewable'
 import { copyText } from '@/utils/clipboard'
 import FileItem from './FileItem.vue'
+import Breadcrumb from './Breadcrumb.vue'
 
 // Modals are lazily loaded: each one pulls in its own chunk of
 // Element Plus components, the qrcode lib, marked, etc. Users that
@@ -575,7 +546,50 @@ const loading = computed(() => fileStore.loading)
 const showHidden = computed(() => fileStore.showHidden)
 const selectedCount = computed(() => fileStore.selectedCount)
 const isAllSelected = computed(() => fileStore.isAllSelected)
+// Combined size of the current selection. Directories contribute 0,
+// so the figure reads as "payload you'd actually download/delete".
+const selectedTotalSize = computed(() =>
+  fileStore.files.reduce(
+    (sum, f) => (fileStore.selectedFiles.has(f.path) ? sum + (f.size || 0) : sum),
+    0
+  )
+)
 const defaultSort = computed(() => ({ prop: fileStore.sortProp, order: fileStore.sortOrder }))
+
+// ── Incremental rendering for huge directories ──
+// el-table mounts one row of DOM per data item; with several thousand
+// files that first mount blocked the main thread for seconds. We render
+// the first PAGE_SIZE rows and grow the window as the user scrolls
+// (IntersectionObserver on a sentinel div below the list), so the page
+// stays responsive no matter how large the directory is. Sorting and
+// stats still operate on the full sortedFiles list.
+const PAGE_SIZE = 500
+const displayCount = ref(PAGE_SIZE)
+const visibleFiles = computed(() => sortedFiles.value.slice(0, displayCount.value))
+const hasMoreFiles = computed(() => sortedFiles.value.length > displayCount.value)
+const sentinelRef = ref<HTMLElement>()
+let sentinelObserver: IntersectionObserver | null = null
+
+// ── Directory stats (toolbar card second tier) ──
+// Sum of the visible listing — directory sizes are already resolved
+// server-side, so this is a plain reduce with no extra requests.
+const totalSize = computed(() =>
+  sortedFiles.value.reduce((sum, f) => sum + (f.size || 0), 0)
+)
+const lastModified = computed(() => {
+  if (sortedFiles.value.length === 0) return ''
+  const latest = Math.max(...sortedFiles.value.map(f => f.mtime || 0))
+  return dayjs(latest).fromNow()
+})
+
+/** Per-type tinted chip for the mobile card icon (mirrors FileItem). */
+function iconTileStyle(file: FileItemType) {
+  const color = getFileIconColor(file.name, file.type)
+  return {
+    color,
+    background: `color-mix(in srgb, ${color} 12%, transparent)`
+  }
+}
 
 /** Image siblings for the prev/next carousel inside ImagePreviewModal. */
 const imageSiblings = computed(() =>
@@ -641,6 +655,17 @@ onMounted(() => {
   window.addEventListener('keydown', onAltChange)
   window.addEventListener('keyup', onAltChange)
   window.addEventListener('blur', onWindowBlur)
+  // Grow the rendered window automatically when the sentinel nears the
+  // viewport. rootMargin preloads a screenful ahead so scrolling feels
+  // seamless rather than snapping at the boundary.
+  sentinelObserver = new IntersectionObserver((entries) => {
+    if (entries.some(e => e.isIntersecting) && hasMoreFiles.value) {
+      displayCount.value += PAGE_SIZE
+    }
+  }, { rootMargin: '800px' })
+  if (sentinelRef.value) {
+    sentinelObserver.observe(sentinelRef.value)
+  }
   // Apply saved sort order after component is mounted
   nextTick(() => {
     if (elTableRef.value && fileStore.files.length > 0) {
@@ -649,8 +674,19 @@ onMounted(() => {
   })
 })
 
+// The sentinel sits behind a v-if (hidden for empty listings), so Vue
+// swaps the element out on navigation. Re-attach the observer whenever
+// the template ref points at a fresh element, otherwise auto-loading
+// silently stops working after visiting an empty directory.
+watch(sentinelRef, (el, oldEl) => {
+  if (oldEl) sentinelObserver?.unobserve(oldEl)
+  if (el) sentinelObserver?.observe(el)
+}, { flush: 'post' })
+
 // Restore saved sort order when files change (navigation, refresh, etc.)
 watch(() => fileStore.files, (newFiles) => {
+  // New listing — restart the incremental window from the top.
+  displayCount.value = PAGE_SIZE
   if (newFiles.length > 0 && elTableRef.value) {
     nextTick(() => {
       elTableRef.value?.sort(fileStore.sortProp, fileStore.sortOrder)
@@ -663,6 +699,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onAltChange)
   window.removeEventListener('keyup', onAltChange)
   window.removeEventListener('blur', onWindowBlur)
+  sentinelObserver?.disconnect()
+  sentinelObserver = null
 })
 
 function toggleShowHidden() {
@@ -887,6 +925,65 @@ function handleUrlDownloaded() {
 // ── Multi-select handlers ──
 
 /**
+ * Batch delete. Bypasses fileStore.deleteFile on purpose: that helper
+ * fires one success toast per file, which turns a 20-item batch into a
+ * toast storm. Here we hit the API directly, reconcile the local list
+ * once, and report a single summary.
+ */
+const deletingSelected = ref(false)
+async function handleDeleteSelected() {
+  const selected = fileStore.files.filter((f) =>
+    fileStore.selectedFiles.has(f.path)
+  )
+  if (selected.length === 0 || deletingSelected.value) return
+
+  try {
+    await ElMessageBox.confirm(
+      `Delete ${selected.length} selected item${selected.length > 1 ? 's' : ''}? This cannot be undone.`,
+      'Confirm batch delete',
+      {
+        confirmButtonText: 'Delete',
+        cancelButtonText: 'Cancel',
+        type: 'warning',
+        confirmButtonClass: 'el-button--danger'
+      }
+    )
+  } catch {
+    return // user cancelled
+  }
+
+  deletingSelected.value = true
+  try {
+    const results = await Promise.allSettled(
+      selected.map((f) => fileApi.deleteFile(currentPath.value, f.name))
+    )
+    const okPaths = new Set(
+      selected
+        .filter((_, i) => results[i].status === 'fulfilled')
+        .map((f) => f.path)
+    )
+    // Reconcile locally (same optimistic pattern as deleteFile), then
+    // silently re-sync with the server in the background.
+    fileStore.files = fileStore.files.filter((f) => !okPaths.has(f.path))
+    const remaining = new Set(fileStore.selectedFiles)
+    okPaths.forEach((p) => remaining.delete(p))
+    fileStore.selectedFiles = remaining
+
+    const failed = results.length - okPaths.size
+    if (failed === 0) {
+      ElMessage.success(`Deleted ${okPaths.size} item${okPaths.size > 1 ? 's' : ''}`)
+    } else {
+      ElMessage.warning(`Deleted ${okPaths.size} item${okPaths.size > 1 ? 's' : ''}, ${failed} failed`)
+    }
+    fileStore.loadFiles(undefined, undefined, { silent: true }).catch(err =>
+      console.error('Background refresh after batch delete failed:', err)
+    )
+  } finally {
+    deletingSelected.value = false
+  }
+}
+
+/**
  * Element Plus selection-change event. Fires for every individual toggle
  * and the final state is the full set of currently-selected rows. We mirror
  * the full set into the store so the rest of the UI (mobile cards, selection
@@ -942,23 +1039,74 @@ function handleToggleSelectionMode() {
   padding: 2px 0 24px;
 }
 
-/* ── Toolbar ──
-   Modern segmented bar: nav/view group sits in a pill, action group
-   gets its own row with the primary CTA popping in accent color. */
+/* ── Unified panel card ──
+   One glass surface for breadcrumb, controls, stats and the list.
+   Replaces the old stack of separate toolbar / table cards — four
+   horizontal bands of different chrome collapse into one. */
+.panel-card {
+  background: color-mix(in srgb, var(--el-bg-color) 80%, transparent);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  overflow: hidden;
+  transition: background-color var(--transition-base),
+              border-color var(--transition-base);
+}
+
+/* ── Toolbar (top tier of the panel) ── */
 .toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  margin-bottom: 16px;
-  padding: 8px;
-  background: color-mix(in srgb, var(--el-bg-color) 75%, transparent);
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-xs);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
   flex-wrap: wrap;
+}
+
+/* Breadcrumb.vue ships its own page-level padding; zero it here.
+   The two-class selector keeps this scoped rule ahead of the child
+   component's own .breadcrumb padding regardless of style order. */
+.toolbar .toolbar-breadcrumb {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+}
+
+.toolbar-breadcrumb :deep(.breadcrumb-inner) {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.toolbar-breadcrumb :deep(.breadcrumb-inner)::-webkit-scrollbar {
+  display: none;
+}
+
+.toolbar-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* Stats tier — quiet metadata line between toolbar and list */
+.panel-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  font-size: 11.5px;
+  color: var(--el-text-color-placeholder);
+  font-variant-numeric: tabular-nums;
+  border-bottom: 1px solid color-mix(in srgb, var(--el-border-color-lighter) 70%, transparent);
+}
+
+.panel-stats-sep {
+  opacity: 0.5;
+  user-select: none;
 }
 
 .toolbar-group {
@@ -996,14 +1144,6 @@ function handleToggleSelectionMode() {
 
 .toolbar-group :deep(.el-button:hover) {
   background: var(--el-bg-color);
-}
-
-.toolbar-group--actions :deep(.el-button--success:hover) {
-  background: color-mix(in srgb, var(--el-color-success) 88%, white);
-  color: #fff;
-  transform: translateY(-1px);
-  box-shadow: 0 2px 6px color-mix(in srgb, var(--el-color-success) 30%, transparent),
-              0 6px 20px color-mix(in srgb, var(--el-color-success) 25%, transparent);
 }
 
 /* Primary CTA — Upload. Pops against the rest. */
@@ -1053,23 +1193,39 @@ function handleToggleSelectionMode() {
 
 /* ── Selection bar (sits between toolbar and file list) ──
    Slim contextual bar that only appears when at least one item is
-   selected. Uses a subtle accent fill so it reads as a contextual
-   control without competing with the toolbar. */
+   selected. Left: badge + count + combined size. Right: the two
+   batch actions as tinted pills (Download primary, Delete danger),
+   then quiet text controls for select-all / clear. */
 .selection-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 14px;
-  padding: 10px 14px;
+  margin: 10px 12px;
+  padding: 8px 10px 8px 12px;
   border-radius: var(--radius-lg);
-  background: color-mix(in srgb, var(--el-color-primary) 10%, var(--el-bg-color));
-  border: 1px solid color-mix(in srgb, var(--el-color-primary) 22%, transparent);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--el-color-primary) 6%, transparent);
+  background: color-mix(in srgb, var(--el-color-primary) 8%, var(--el-bg-color));
+  border: 1px solid color-mix(in srgb, var(--el-color-primary) 20%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--el-color-primary) 5%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   animation: fade-up 240ms var(--ease-out) both;
   transition:
     background-color var(--transition-base),
     border-color var(--transition-base);
+}
+
+.selection-bar-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border-radius: 7px;
+  color: #fff;
+  background: var(--el-color-primary);
+  box-shadow: 0 2px 6px color-mix(in srgb, var(--el-color-primary) 35%, transparent);
 }
 
 .selection-bar-count {
@@ -1079,30 +1235,80 @@ function handleToggleSelectionMode() {
   font-variant-numeric: tabular-nums;
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  white-space: nowrap;
 }
 
-.selection-bar-count::before {
-  content: "";
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--el-color-primary);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--el-color-primary) 18%, transparent);
+.selection-bar-sep {
+  color: var(--el-text-color-secondary);
+  font-weight: 400;
+}
+
+.selection-bar-size {
+  font-weight: 500;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
 }
 
 .selection-bar-left {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
 }
 
 .selection-bar-right {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+}
+
+/* Batch action pills — tinted, medium emphasis. Download is the
+   primary action; Delete carries the danger hue into the bar so the
+   irreversible action is unmistakable before it's clicked. */
+.selection-bar-action.el-button {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  margin-left: 0;
+  color: var(--el-color-primary);
+  background: color-mix(in srgb, var(--el-color-primary) 12%, var(--el-bg-color));
+  border: 1px solid color-mix(in srgb, var(--el-color-primary) 26%, transparent);
+  transition: all var(--transition-base);
+}
+
+.selection-bar-action.el-button:hover {
+  background: color-mix(in srgb, var(--el-color-primary) 18%, var(--el-bg-color));
+  border-color: color-mix(in srgb, var(--el-color-primary) 40%, transparent);
+  transform: translateY(-1px);
+}
+
+.selection-bar-action.el-button:active {
+  transform: translateY(0) scale(0.97);
+}
+
+.selection-bar-action--danger.el-button {
+  color: var(--el-color-danger);
+  background: color-mix(in srgb, var(--el-color-danger) 9%, var(--el-bg-color));
+  border-color: color-mix(in srgb, var(--el-color-danger) 24%, transparent);
+}
+
+.selection-bar-action--danger.el-button:hover {
+  background: color-mix(in srgb, var(--el-color-danger) 15%, var(--el-bg-color));
+  border-color: color-mix(in srgb, var(--el-color-danger) 38%, transparent);
+}
+
+.selection-bar-action :deep(.el-icon) {
+  font-size: 14px;
+}
+
+.selection-bar-divider {
+  width: 1px;
+  height: 18px;
+  margin: 0 4px;
+  background: color-mix(in srgb, var(--el-color-primary) 18%, transparent);
 }
 
 .selection-bar-btn {
@@ -1116,6 +1322,38 @@ function handleToggleSelectionMode() {
 
 .selection-bar-clear {
   margin-left: 2px;
+}
+
+/* Phones: collapse the pills to icon-only so the bar fits one row,
+   and drop the size figure — the count alone carries the message. */
+@media (max-width: 640px) {
+  .selection-bar {
+    padding: 6px 8px 6px 10px;
+  }
+
+  .selection-bar-sep,
+  .selection-bar-size {
+    display: none;
+  }
+
+  .selection-bar-action.el-button {
+    width: 30px;
+    padding: 0;
+  }
+
+  .selection-bar-action-label {
+    display: none;
+  }
+
+  .selection-bar-action :deep(.el-icon) {
+    margin-right: 0;
+  }
+
+  .selection-bar-btn {
+    font-size: 12px;
+    padding-left: 6px;
+    padding-right: 6px;
+  }
 }
 
 /* Mobile-only: the "Select" / "Done" toggle button in the toolbar.
@@ -1196,8 +1434,8 @@ function handleToggleSelectionMode() {
 }
 
 /* ── Table ──
-   Glass card surface, hairline borders, generous row padding,
-   tighter typography for a refined, modern feel. */
+   Lives INSIDE the panel card now: no own border/radius/shadow, the
+   card supplies the chrome. Hairline row separators stay. */
 .file-list-container :deep(.el-table) {
   --el-table-border-color: transparent;
   --el-table-border: none;
@@ -1214,17 +1452,7 @@ function handleToggleSelectionMode() {
     transparent
   );
   --el-table-header-bg-color: color-mix(in srgb, var(--el-fill-color) 50%, transparent);
-  background: color-mix(in srgb, var(--el-bg-color) 80%, transparent);
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: var(--radius-lg);
-  overflow: hidden;
-  box-shadow: var(--shadow-sm);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-}
-
-.file-list-container :deep(.el-table__header-wrapper) {
-  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  background: transparent;
 }
 
 .file-list-container :deep(.el-table__header th) {
@@ -1393,16 +1621,62 @@ function handleToggleSelectionMode() {
   background: color-mix(in srgb, var(--el-color-primary) 16%, transparent);
 }
 
-.action-buttons :deep(.el-button) {
-  transition: all var(--transition-base);
+/* ── Action buttons: monochrome, always visible ──
+   Bare icons at rest (no chip chrome) so the column never reads as
+   an empty white strip; the chip border/bg fades in on row hover,
+   the accent color on button hover. */
+.action-buttons {
+  justify-content: flex-end;
 }
 
-.action-buttons :deep(.el-button:hover) {
-  transform: translateY(-1px);
+.action-buttons :deep(.el-button + .el-button) {
+  margin-left: 0;
 }
 
-.action-buttons :deep(.el-button:active) {
-  transform: translateY(0) scale(0.95);
+.action-buttons :deep(.el-dropdown) {
+  display: inline-flex;
+}
+
+.action-buttons :deep(.row-action-btn.el-button) {
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+  margin-left: 0;
+  border-radius: 6px;
+  color: var(--el-text-color-secondary);
+  background: transparent;
+  border: 1px solid transparent;
+  box-shadow: none;
+  transition: color var(--transition-base),
+              border-color var(--transition-base),
+              background var(--transition-base),
+              box-shadow var(--transition-base),
+              transform var(--transition-fast);
+}
+
+/* Row hover: chip materialises behind the icon. */
+.file-list-container :deep(.el-table__body tr:hover .row-action-btn.el-button),
+.file-list-container :deep(.el-table__body tr.file-row-selected .row-action-btn.el-button) {
+  color: var(--el-text-color-regular);
+  background: var(--el-bg-color);
+  border-color: var(--el-border-color-lighter);
+  box-shadow: var(--shadow-xs);
+}
+
+/* Button hover: accent. */
+.action-buttons :deep(.row-action-btn.el-button:hover) {
+  color: var(--el-color-primary);
+  border-color: color-mix(in srgb, var(--el-color-primary) 35%, transparent);
+  background: color-mix(in srgb, var(--el-color-primary) 6%, var(--el-bg-color));
+}
+
+.action-buttons :deep(.row-action-btn.el-button:active) {
+  transform: scale(0.9);
+}
+
+.action-buttons :deep(.row-action-btn .el-icon) {
+  font-size: 14px;
 }
 
 /* ── Empty state ──
@@ -1414,6 +1688,7 @@ function handleToggleSelectionMode() {
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  margin: 12px;
   padding: 64px 24px 56px;
   text-align: center;
   border: 1px dashed var(--el-border-color);
@@ -1470,9 +1745,17 @@ function handleToggleSelectionMode() {
   border-radius: var(--radius-lg);
 }
 
-/* ── Mobile dropdown ── */
-.action-mobile {
-  display: none;
+/* ── Incremental-render sentinel ── */
+.load-more-sentinel {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 4px;
+  padding: 4px 0;
+}
+
+.load-more-btn {
+  font-size: 13px;
 }
 
 /* ── Mobile card list (hidden on desktop) ── */
@@ -1499,6 +1782,13 @@ function handleToggleSelectionMode() {
 
   .mobile-file-list {
     display: block;
+    padding: 10px 12px 12px;
+  }
+
+  /* Breadcrumb gets its own full-width row inside the panel so the
+     control groups below can wrap without fighting it. */
+  .toolbar-breadcrumb {
+    flex: 1 1 100%;
   }
 
   /* Hide Modified column (still applies if the table ever leaks through) */
@@ -1582,15 +1872,19 @@ function handleToggleSelectionMode() {
   width: 44px;
   height: 44px;
   border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--el-color-primary) 12%, transparent);
-  color: var(--el-color-primary);
+  /* color + background come from iconTileStyle (per file type) */
   transition: background var(--transition-base),
               transform var(--transition-base);
 }
 
 .mobile-file-card:hover .mobile-file-icon {
-  background: color-mix(in srgb, var(--el-color-primary) 18%, transparent);
   transform: scale(1.04);
+}
+
+.mobile-file-glyph {
+  width: 22px;
+  height: 22px;
+  display: block;
 }
 
 .mobile-file-info {

@@ -2,10 +2,10 @@ import { ref, watch } from 'vue'
 
 const themeKey = 'gohttpserver-theme'
 // Available themes. 'white' is the default — a calm, neutral surface
-// that suits a file manager. The other three (black, green, cyan)
-// remain selectable from the theme picker for users who want a
-// different accent colour.
-const availableThemes = ['white', 'black', 'green', 'cyan'] as const
+// that suits a file manager. 'black', 'green' and 'cyan' are light
+// accent variants; 'dark' is a true dark mode (deep slate surfaces,
+// lifted blue accent) selectable from the same theme picker.
+const availableThemes = ['white', 'black', 'green', 'cyan', 'dark'] as const
 type Theme = typeof availableThemes[number]
 
 // Pick the initial theme on first load. Two cases:

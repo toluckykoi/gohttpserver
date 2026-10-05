@@ -2,21 +2,25 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"text/template"
 	"time"
 
@@ -35,6 +39,7 @@ import (
 	"github.com/codeskyblue/gohttpserver/internal/store"
 	"github.com/codeskyblue/gohttpserver/internal/util"
 	"github.com/codeskyblue/gohttpserver/internal/webdav"
+	"github.com/gorilla/securecookie"
 )
 
 type Configure struct {
@@ -62,14 +67,14 @@ type Configure struct {
 		ID     string   `yaml:"id"`     // for oauth2
 		Secret string   `yaml:"secret"` // for oauth2
 	} `yaml:"auth"`
-	DeepPathMaxDepth int  `yaml:"deep-path-max-depth"`
-	NoIndex          bool `yaml:"no-index"`
-	CORSOrigins      []string `yaml:"cors-origins"`
-	AllowPublicOauth2 bool   `yaml:"allow-public-oauth2"`
-	Login            bool   `yaml:"login"`
-	DB               string `yaml:"db"`
-	SessionTTL       time.Duration `yaml:"session-ttl"`
-	FRP              struct {
+	DeepPathMaxDepth  int           `yaml:"deep-path-max-depth"`
+	NoIndex           bool          `yaml:"no-index"`
+	CORSOrigins       []string      `yaml:"cors-origins"`
+	AllowPublicOauth2 bool          `yaml:"allow-public-oauth2"`
+	Login             bool          `yaml:"login"`
+	DB                string        `yaml:"db"`
+	SessionTTL        time.Duration `yaml:"session-ttl"`
+	FRP               struct {
 		Enabled    bool   `yaml:"enabled"`
 		ServerAddr string `yaml:"serverAddr"`
 		ServerPort int    `yaml:"serverPort"`
@@ -93,7 +98,13 @@ func (l httpLogger) Log(record accesslog.LogRecord) {
 		// 公网 IP 说明是通过 FRP 访问
 		accessType = "FRP"
 	}
-	log.Printf("[%s] %s - %s %d %s", accessType, record.Ip, record.Method, record.Status, record.Uri)
+	slog.Info("access",
+		slog.String("type", accessType),
+		slog.String("ip", record.Ip),
+		slog.String("method", record.Method),
+		slog.Int("status", record.Status),
+		slog.String("uri", record.Uri),
+	)
 }
 
 // isPrivateIP 判断 IP 是否为内网地址
@@ -221,9 +232,9 @@ func fixPrefix(prefix string) string {
 // (Allow-Headers: * let X-Token through). Now the policy is opt-in:
 //   - --cors-origins not set → no CORS headers (same-origin only)
 //   - --cors-origins '*'     → allow all (the old behaviour; insecure,
-//                              only useful for public read-only servers)
+//     only useful for public read-only servers)
 //   - --cors-origins https://a.com --cors-origins https://b.com
-//                            → allow only those origins
+//     → allow only those origins
 //
 // Only the matching origin is echoed back; credentials are not allowed
 // when the origin is "*". Preflight OPTIONS is answered without calling
@@ -288,8 +299,14 @@ func multiBasicAuth(auths []string) func(http.Handler) http.Handler {
 }
 
 func main() {
+	// Initialize structured logger early
+	util.InitLogger(&slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})
+
 	if err := parseFlags(); err != nil {
-		log.Fatal(err)
+		slog.Error("parse flags failed", util.ErrorAttr(err))
+		os.Exit(1)
 	}
 	// --login implies upload/delete/edit: an authenticated operator
 	// should be able to manage files without separately passing those
@@ -312,14 +329,13 @@ func main() {
 		debugCfg.Auth.HTTP = nil
 		debugCfg.Auth.Secret = ""
 		data, _ := yaml.Marshal(debugCfg)
-		fmt.Printf("--- config (secrets redacted) ---\n%s\n", string(data))
+		slog.Debug("config (secrets redacted)", slog.String("config", string(data)))
 	}
-	log.SetFlags(log.Lshortfile | log.LstdFlags)
 
 	// make sure prefix matches: ^/.*[^/]$
 	gcfg.Prefix = fixPrefix(gcfg.Prefix)
 	if gcfg.Prefix != "" {
-		log.Printf("url prefix: %s", gcfg.Prefix)
+		slog.Info("url prefix configured", slog.String("prefix", gcfg.Prefix))
 	}
 
 	ss := server.NewHTTPStaticServer(gcfg.Root, gcfg.NoIndex)
@@ -337,13 +353,14 @@ func main() {
 	if gcfg.PlistProxy != "" {
 		u, err := url.Parse(gcfg.PlistProxy)
 		if err != nil {
-			log.Fatal(err)
+			slog.Error("invalid plistproxy url", util.ErrorAttr(err))
+			os.Exit(1)
 		}
 		u.Scheme = "https"
 		ss.PlistProxy = u.String()
 	}
 	if ss.PlistProxy != "" {
-		log.Printf("plistproxy: %s", strconv.Quote(ss.PlistProxy))
+		slog.Info("plistproxy configured", slog.String("url", ss.PlistProxy))
 	}
 
 	var hdlr http.Handler = ss
@@ -363,6 +380,22 @@ func main() {
 	}
 
 	mainRouter := mux.NewRouter()
+
+	// Request ID middleware - adds X-Request-ID header and context
+	mainRouter.Use(util.RequestIDMiddleware)
+
+	// Structured logging middleware
+	mainRouter.Use(util.LoggingMiddleware(util.Logger()))
+
+	// Health check endpoint (before prefix routing)
+	mainRouter.HandleFunc("/healthz", util.HealthCheckHandler(VERSION)).Methods("GET")
+	mainRouter.HandleFunc("/-/healthz", util.HealthCheckHandler(VERSION)).Methods("GET")
+
+	// Prometheus-format metrics (before prefix routing so scrapers can
+	// hit a stable path regardless of --prefix).
+	mainRouter.HandleFunc("/metrics", util.MetricsHandler(VERSION)).Methods("GET", "HEAD")
+	mainRouter.HandleFunc("/-/metrics", util.MetricsHandler(VERSION)).Methods("GET", "HEAD")
+
 	router := mainRouter
 	if gcfg.Prefix != "" {
 		router = mainRouter.PathPrefix(gcfg.Prefix).Subrouter()
@@ -417,9 +450,9 @@ func main() {
 	}
 	db, err := store.OpenDB(dbPath)
 	if err != nil {
-		log.Fatalf("open database %q: %v", dbPath, err)
+		slog.Error("open database failed", util.ErrorAttr(err), slog.String("path", dbPath))
+		os.Exit(1)
 	}
-	defer db.Close()
 
 	// FRP client initialization with database for config persistence
 	frpClient := frp.NewFRPClient(db)
@@ -427,7 +460,7 @@ func main() {
 	// Try to load FRP config from database first
 	dbFRPCfg, dbFRPEnabled, err := frpClient.LoadFromDB()
 	if err != nil {
-		log.Printf("FRP load config from DB error: %v", err)
+		slog.Error("FRP load config from DB failed", util.ErrorAttr(err))
 	}
 
 	// Auto-fill LocalIP and LocalPort from program's listening address
@@ -466,11 +499,11 @@ func main() {
 	// Apply FRP config if available
 	if frpCfg != nil {
 		if err := frpClient.UpdateConfig(frpCfg); err != nil {
-			log.Printf("FRP config error: %v", err)
+			slog.Error("FRP config error", util.ErrorAttr(err))
 		}
 		if frpEnabled {
 			if err := frpClient.SetEnabled(true); err != nil {
-				log.Printf("FRP start error: %v", err)
+				slog.Error("FRP start error", util.ErrorAttr(err))
 			}
 		}
 	}
@@ -510,7 +543,7 @@ func main() {
 			for _, acc := range webdavState.List() {
 				full := filepath.Join(gcfg.Root, acc.RootPath)
 				if err := usageStateObj.Recalculate(full, acc.ID); err != nil {
-					log.Printf("webdav-quota: startup recalculate for %s failed: %v", acc.ID, err)
+					slog.Error("webdav quota startup recalculate failed", util.ErrorAttr(err), slog.String("account_id", acc.ID))
 				}
 			}
 		}
@@ -529,14 +562,14 @@ func main() {
 		// loginWhitelist), so an unauthenticated request is redirected
 		// to /-/login rather than reaching the handlers.
 		admin.RegisterRoutes(router, &admin.API{
-		Login:     loginStateObj,
-		Webdav:    webdavState,
-		Usage:     usageStateObj,
-		Root:      gcfg.Root,
-		LocalAddr: gcfg.Addr,
-		FRP:       frpClient,
-		Version:   VERSION,
-	})
+			Login:     loginStateObj,
+			Webdav:    webdavState,
+			Usage:     usageStateObj,
+			Root:      gcfg.Root,
+			LocalAddr: gcfg.Addr,
+			FRP:       frpClient,
+			Version:   VERSION,
+		})
 	} else {
 		// SECURITY FIX: When --login is disabled, do NOT register the
 		// admin API routes. Previously the routes were registered with
@@ -616,11 +649,17 @@ func main() {
 	// the proxy. Refuse to start on a non-loopback bind unless the
 	// operator explicitly acknowledges the risk with --allow-public-oauth2.
 	if gcfg.Auth.Type == "oauth2-proxy" && !gcfg.AllowPublicOauth2 && !auth.IsLoopbackAddr(gcfg.Addr) {
-		log.Fatalf("Refusing to start: auth-type=oauth2-proxy on non-loopback %s is insecure " +
-			"(clients can forge X-Auth-Request-* headers). Bind to 127.0.0.1:%s or use --allow-public-oauth2 " +
-			"only if a proxy in front strips those headers.", gcfg.Addr, port)
+		slog.Error("refusing to start: oauth2-proxy on non-loopback is insecure",
+			slog.String("addr", gcfg.Addr),
+			slog.String("port", port),
+			slog.String("reason", "clients can forge X-Auth-Request-* headers; bind to loopback or use --allow-public-oauth2 only behind a header-stripping proxy"))
+		os.Exit(1)
 	}
-	log.Printf("listening on %s, local address http://%s:%s\n", strconv.Quote(gcfg.Addr), util.GetLocalIP(), port)
+	slog.Info("server listening",
+		slog.String("addr", gcfg.Addr),
+		slog.String("local_ip", util.GetLocalIP()),
+		slog.String("port", port),
+	)
 
 	srv := &http.Server{
 		Handler: mainRouter,
@@ -642,12 +681,18 @@ func main() {
 	// same way. Cookies persist across server restarts as long as the
 	// operator set GHS_SESSION_KEY (otherwise each restart mints a new
 	// signing key, invalidating all existing cookies).
+	if sessionKey := os.Getenv("GHS_SESSION_KEY"); sessionKey != "" {
+		auth.Store.Codecs = securecookie.CodecsFromPairs([]byte(sessionKey))
+		slog.Info("using GHS_SESSION_KEY from environment for session signing")
+	} else {
+		slog.Warn("GHS_SESSION_KEY not set; sessions will be invalidated on restart")
+	}
 	if gcfg.SessionTTL > 0 {
 		auth.Store.Options.MaxAge = int(gcfg.SessionTTL.Seconds())
 	} else {
 		auth.Store.Options.MaxAge = 0
 	}
-	log.Printf("session cookie ttl: %s", gcfg.SessionTTL)
+	slog.Info("session cookie ttl configured", slog.String("ttl", gcfg.SessionTTL.String()))
 
 	// When serving over TLS, mark the session cookie Secure so browsers
 	// never send it over a plain-HTTP connection (downgrade sniffing).
@@ -658,7 +703,8 @@ func main() {
 	// Create listener and wrap with proxyproto for FRP real IP support
 	ln, err := net.Listen("tcp", gcfg.Addr)
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("listen failed", util.ErrorAttr(err), slog.String("addr", gcfg.Addr))
+		os.Exit(1)
 	}
 
 	// Wrap listener with proxyproto to support HAProxy PROXY protocol
@@ -672,7 +718,7 @@ func main() {
 	// FRP/HAProxy would be running). Public connections are handled
 	// normally without PROXY protocol parsing.
 	proxyLn := &proxyproto.Listener{
-		Listener:          ln,
+		Listener: ln,
 		Policy: func(upstream net.Addr) (proxyproto.Policy, error) {
 			host, _, _ := net.SplitHostPort(upstream.String())
 			ip := net.ParseIP(host)
@@ -683,18 +729,57 @@ func main() {
 		},
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	defer proxyLn.Close()
 
-	// For TLS, wrap the proxyproto listener with TLS
+	// Serve in a background goroutine so the main goroutine can react to
+	// whichever happens first: a fatal Serve error, or a termination
+	// signal. http.Server.Shutdown closes the listener it was given, so
+	// there is no separate Close() to run here.
+	serveErr := make(chan error, 1)
 	if gcfg.Key != "" && gcfg.Cert != "" {
 		tlsConfig := &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		}
 		tlsLn := tls.NewListener(proxyLn, tlsConfig)
-		defer tlsLn.Close()
-		err = srv.Serve(tlsLn)
+		go func() { serveErr <- srv.Serve(tlsLn) }()
 	} else {
-		err = srv.Serve(proxyLn)
+		go func() { serveErr <- srv.Serve(proxyLn) }()
 	}
-	log.Fatal(err)
+
+	// Graceful shutdown: drain in-flight requests, then release the
+	// database. Cleanup runs in LIFO order and only after the HTTP
+	// server has stopped, so a request mid-transaction still has a live
+	// DB handle while it finishes.
+	shutdownMgr := util.NewShutdownManager(srv, util.Logger(), 30*time.Second)
+	shutdownMgr.RegisterCleanup(func() error {
+		slog.Info("closing database")
+		return db.Close()
+	})
+
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+
+	select {
+	case err := <-serveErr:
+		// Serve only returns once the server has stopped. Anything other
+		// than a clean Shutdown is fatal; still run cleanup so the DB
+		// handle and listeners are released before we exit.
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("server stopped unexpectedly", util.ErrorAttr(err))
+			if shutErr := shutdownMgr.Shutdown(); shutErr != nil {
+				slog.Error("cleanup after server failure reported errors", util.ErrorAttr(shutErr))
+			}
+			os.Exit(1)
+		}
+	case <-signalCtx.Done():
+		slog.Info("shutdown signal received")
+		if err := shutdownMgr.Shutdown(); err != nil {
+			slog.Error("graceful shutdown did not complete cleanly", util.ErrorAttr(err))
+		}
+		// Wait for Serve to observe the closed listener so we don't race
+		// process exit against in-flight goroutines.
+		if err := <-serveErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("server stopped unexpectedly during shutdown", util.ErrorAttr(err))
+			os.Exit(1)
+		}
+	}
 }

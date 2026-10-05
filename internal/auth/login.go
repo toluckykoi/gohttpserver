@@ -60,8 +60,9 @@ type loginCredentials struct {
 // when no stored credentials exist. We keep them as constants so we can
 // detect when the admin is still using the defaults and warn them.
 const (
-	defaultUsername = "admin"
-	defaultPassword = "admin"
+	defaultUsername         = "admin"
+	defaultPassword         = "admin"
+	maxLoginAttemptsEntries = 10000 // hard cap for loginAttempts map
 )
 
 // LoginState bundles the in-memory credentials with a mutex guarding
@@ -75,11 +76,12 @@ type LoginState struct {
 	dbPath string // kept so tests can reopen the same DB to verify persistence
 
 	// Rate limiting for brute-force protection
-	rateLimitMu      sync.Mutex
-	loginAttempts    map[string]*loginAttempt // key: IP address
-	rateLimitEnabled bool
-	maxAttempts      int
-	lockoutDuration  time.Duration
+	rateLimitMu       sync.Mutex
+	loginAttempts     map[string]*loginAttempt // key: IP address
+	rateLimitEnabled  bool
+	maxAttempts       int
+	lockoutDuration   time.Duration
+	maxAttemptEntries int
 }
 
 // loginAttempt tracks failed login attempts from an IP address
@@ -89,14 +91,6 @@ type loginAttempt struct {
 	lockedUntil time.Time
 }
 
-// load reads the credentials row (or initialises defaults if absent), and
-// returns the in-memory state. Errors during read are logged but not
-// fatal — the server falls back to the default admin/admin credentials so
-// a misconfigured operator never locks themselves out of their own box.
-//
-// When no row exists the defaults are kept in memory ONLY — nothing is
-// written. This keeps transient runs (e.g. `gohttpserver --login` for a
-// quick test) from persisting credentials. The row is created on the first
 // successful changePassword call, which is the moment the operator has
 // actually chosen a secret worth keeping.
 func LoadLoginCredentials(db *sql.DB) *LoginState {
@@ -108,12 +102,13 @@ func LoadLoginCredentials(db *sql.DB) *LoginState {
 // DB to verify persistence.
 func LoadLoginCredentialsAt(db *sql.DB, path string) *LoginState {
 	st := &LoginState{
-		db:               db,
-		dbPath:           path,
-		loginAttempts:    make(map[string]*loginAttempt),
-		rateLimitEnabled: true,
-		maxAttempts:      5,
-		lockoutDuration:  15 * time.Minute,
+		db:                db,
+		dbPath:            path,
+		loginAttempts:     make(map[string]*loginAttempt),
+		rateLimitEnabled:  true,
+		maxAttempts:       5,
+		lockoutDuration:   15 * time.Minute,
+		maxAttemptEntries: maxLoginAttemptsEntries,
 	}
 	// Start background cleanup for loginAttempts map.
 	// SECURITY FIX: Without this, the map grows unboundedly. Combined
@@ -403,6 +398,11 @@ func (s *LoginState) recordFailedLogin(ip string) {
 
 	attempt, exists := s.loginAttempts[ip]
 	if !exists {
+		// Hard cap: reject new IPs when map is full
+		if len(s.loginAttempts) >= s.maxAttemptEntries {
+			log.Printf("login: rate limit map full (%d entries), rejecting IP %s", s.maxAttemptEntries, ip)
+			return
+		}
 		attempt = &loginAttempt{
 			count:    0,
 			lastFail: time.Now(),

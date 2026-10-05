@@ -13,11 +13,13 @@ require (
 	github.com/goji/httpauth v0.0.0-20160601135302-2da839ab0f4d
 	github.com/gorilla/handlers v1.5.2
 	github.com/gorilla/mux v1.8.1
+	github.com/gorilla/securecookie v1.1.2
 	github.com/gorilla/sessions v1.4.0
-	github.com/shogo82148/androidbinary v1.0.5
+	github.com/pires/go-proxyproto v0.7.0
 	golang.org/x/crypto v0.54.0
 	golang.org/x/net v0.56.0
 	golang.org/x/text v0.40.0
+	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.54.0
 )
 
@@ -33,7 +35,6 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/gorilla/securecookie v1.1.2 // indirect
 	github.com/hashicorp/yamux v0.1.1 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.6 // indirect
@@ -41,11 +42,11 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.0 // indirect
-	github.com/pires/go-proxyproto v0.7.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/quic-go/quic-go v0.60.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/samber/lo v1.47.0 // indirect
+	github.com/shogo82148/androidbinary v1.0.5
 	github.com/smartystreets/goconvey v1.6.4 // indirect
 	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8 // indirect
 	github.com/spf13/cobra v1.8.0 // indirect

@@ -1,8 +1,13 @@
 <template>
   <div class="file-name-cell">
-    <el-icon :size="18" class="file-icon">
-      <component :is="iconComponent" />
-    </el-icon>
+    <!-- Tinted chip: 12% of the type color behind a full-strength
+         glyph. Gives instant type recognition (amber folder, violet
+         image, rose video…) without a rainbow of raw icon colors. -->
+    <span class="file-icon-chip" :style="chipStyle" aria-hidden="true">
+      <svg class="file-icon-glyph" viewBox="0 0 24 24" fill="currentColor">
+        <path v-for="(d, i) in iconPaths" :key="i" :d="d" />
+      </svg>
+    </span>
     <span class="name">{{ file.name }}</span>
   </div>
 </template>
@@ -10,7 +15,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { FileItem as FileItemType } from '@/types'
-import { getFileIcon } from '@/utils/fileIcon'
+import { getFileIconPaths, getFileIconColor } from '@/utils/fileIcon'
 
 interface Props {
   file: FileItemType
@@ -18,7 +23,12 @@ interface Props {
 
 const props = defineProps<Props>()
 
-const iconComponent = computed(() => getFileIcon(props.file.name, props.file.type))
+const iconPaths = computed(() => getFileIconPaths(props.file.name, props.file.type))
+const iconColor = computed(() => getFileIconColor(props.file.name, props.file.type))
+const chipStyle = computed(() => ({
+  color: iconColor.value,
+  background: `color-mix(in srgb, ${iconColor.value} 12%, transparent)`
+}))
 </script>
 
 <style scoped>
@@ -27,13 +37,25 @@ const iconComponent = computed(() => getFileIcon(props.file.name, props.file.typ
   align-items: center;
   gap: 10px;
   /* Match the cell's 24px line-height so the row stays at 41px
-     regardless of the icon's intrinsic height. */
+     regardless of the chip's intrinsic height. */
   height: 24px;
 }
 
-.file-icon {
-  color: var(--el-color-primary);
+.file-icon-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
   flex-shrink: 0;
+  border-radius: 7px;
+  transition: transform var(--transition-base);
+}
+
+.file-icon-glyph {
+  width: 14px;
+  height: 14px;
+  display: block;
 }
 
 .name {
