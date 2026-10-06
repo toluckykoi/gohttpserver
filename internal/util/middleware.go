@@ -10,6 +10,35 @@ import (
 	"time"
 )
 
+// SecurityHeaders applies the HTTP security headers to every response.
+//
+// It lives at the outermost layer (wrapped around the whole router in main)
+// because the file handler used to set these itself: the login page and the
+// embedded SPA assets are served by other packages and therefore went out with
+// no CSP, no X-Frame-Options and no nosniff at all — on the most
+// phishing-sensitive page of the app.
+//
+// csp is passed in rather than hard-coded so the file-server package stays the
+// single source of truth for the policy that matches the frontend it embeds.
+func SecurityHeaders(csp string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h := w.Header()
+			h.Set("Content-Security-Policy", csp)
+			h.Set("X-Content-Type-Options", "nosniff")
+			h.Set("X-Frame-Options", "DENY")
+			h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+			h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+			// HSTS only when this process actually serves TLS; behind a
+			// TLS-terminating proxy the operator sets it there instead.
+			if r.TLS != nil {
+				h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // RequestIDMiddleware adds a unique request ID to each request context.
 // The request ID is returned in the X-Request-ID response header.
 func RequestIDMiddleware(next http.Handler) http.Handler {
@@ -50,6 +79,11 @@ func LoggingMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 			logger.Info("HTTP request",
 				RequestIDAttr(requestID),
 				ClientIPAttr(clientIP),
+				// LOCAL / FRP classification used to be produced by a second
+				// logger wrapping the file handler, which meant every request
+				// was logged twice (and reparsed the private-IP CIDRs each
+				// time). One line now carries both.
+				slog.String("access_type", AccessTypeOf(clientIP)),
 				MethodAttr(r.Method),
 				PathAttr(r.URL.Path),
 				StatusAttr(rw.statusCode),

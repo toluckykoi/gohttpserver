@@ -15,8 +15,6 @@ github.com/client9/misspell v0.3.4/go.mod h1:qj6jICC3Q7zFZvVWo7KLAzC3yx5G7kyvSDk
 github.com/cncf/udpa/go v0.0.0-20191209042840-269d4d468f6f/go.mod h1:M8M6+tZqaGXZJjfX53e64911xZQV5JYwmTeXPW+k8Sc=
 github.com/codeskyblue/dockerignore v0.0.0-20151214070507-de82dee623d9 h1:c9axcChJwkLuSl9AvwTHi8jiBa6+VX4gGgERhABgv2E=
 github.com/codeskyblue/dockerignore v0.0.0-20151214070507-de82dee623d9/go.mod h1:XNZkUhPf+qgRnhY/ecS3B73ODJ2NXCzDMJHXM069IMg=
-github.com/codeskyblue/go-accesslog v0.0.0-20171215023101-6188d3bd9371 h1:dEBIvaVFaP2Uc9QA6J41qWxE5NfEnDWEBk+kWv5nK5k=
-github.com/codeskyblue/go-accesslog v0.0.0-20171215023101-6188d3bd9371/go.mod h1:sgXnVxxZ1u72GAzc9s1SzpuPMxBDKfTg6F2PvDrPSJU=
 github.com/codeskyblue/openid-go v0.0.0-20160923065855-0d30842b2fb4 h1:66lzN78lwccK+BPztRgBiWCYzhlerQEVOh2oeBksu5I=
 github.com/codeskyblue/openid-go v0.0.0-20160923065855-0d30842b2fb4/go.mod h1:K/hSCtAHvnE9aM+LsYgVmgzPNFuWFdx6i9t6/3jNrZQ=
 github.com/coreos/go-oidc/v3 v3.18.0 h1:V9orjXynvu5wiC9SemFTWnG4F45v403aIcjWo0d41+A=

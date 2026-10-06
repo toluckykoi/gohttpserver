@@ -5,7 +5,6 @@ go 1.26
 require (
 	github.com/alecthomas/kingpin v2.2.6+incompatible
 	github.com/codeskyblue/dockerignore v0.0.0-20151214070507-de82dee623d9
-	github.com/codeskyblue/go-accesslog v0.0.0-20171215023101-6188d3bd9371
 	github.com/codeskyblue/openid-go v0.0.0-20160923065855-0d30842b2fb4
 	github.com/fatedier/frp v0.70.1
 	github.com/fork2fix/go-plist v0.0.0-20181126021357-36960be5e636
@@ -19,7 +18,6 @@ require (
 	golang.org/x/crypto v0.54.0
 	golang.org/x/net v0.56.0
 	golang.org/x/text v0.40.0
-	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.54.0
 )
 

@@ -97,11 +97,27 @@ func CompressToZip(w http.ResponseWriter, rootDir string) {
 	defer zw.Close()
 
 	filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
-		zipPath := path[len(rootDir):]
+		// filepath.Walk calls back with a nil FileInfo when an entry cannot be
+		// lstat'ed (missing root, permission-denied child, file removed
+		// mid-walk). Dereferencing it panicked the request, so skip instead.
+		if err != nil || info == nil {
+			return nil
+		}
 		if info.Name() == ".ghs.yml" { // ignore .ghs.yml for security
 			return nil
 		}
-		return zw.Add(zipPath, path)
+		zipPath := path[len(rootDir):]
+		if zipPath == "" {
+			// The walk root itself: archiving a single file used to produce an
+			// entry literally named "." (sanitizedName("") == ".").
+			zipPath = info.Name()
+		}
+		if addErr := zw.Add(zipPath, path); addErr != nil {
+			// Stop on the first failure: the client has usually gone away, and
+			// continuing would deflate the whole remaining tree for nothing.
+			return addErr
+		}
+		return nil
 	})
 }
 

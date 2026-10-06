@@ -186,8 +186,8 @@ func (api *API) handleWebdavStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"enabled":   api.Webdav.IsEnabled(),
-		"accounts":  public,
+		"enabled":    api.Webdav.IsEnabled(),
+		"accounts":   public,
 		"webdav_url": "/dav/",
 	})
 }

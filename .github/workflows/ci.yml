@@ -1,0 +1,79 @@
+name: ci
+
+# @Author      ：幸运锦鲤
+# @Description : 每次 push / pull_request 都做前端构建 + Go 格式/静态检查/测试
+#                发布产物仍由 release.yml（仅 v* tag 触发）负责
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+
+# 只需要读取代码
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: build-and-test
+    runs-on: ubuntu-latest
+
+    # 同一分支/PR 的新提交会取消仍在跑的旧任务
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      # ------------------------------------------------------------------
+      # 必须先构建前端：assets.go 里有 //go:embed frontend/dist，
+      # 而 frontend/dist 在 .gitignore 中被忽略、检出后并不存在。
+      # 只要 dist 缺失，任何编译根包的 go build / go vet / go test
+      # 都会以 "pattern frontend/dist: no matching files found" 失败，
+      # 所以这一步要排在任何 Go 命令之前。
+      # ------------------------------------------------------------------
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Check gofmt
+        # 只检查 git 跟踪的 Go 文件，并显式排除 testdata：
+        # testdata/ 里放着刻意留空的 fixture（如 filetypes/code.go），
+        # gofmt 会报 "expected 'package', found 'EOF'"，那不是真问题。
+        # （go vet / go test 用 ./... 匹配时 Go 工具链本身会跳过 testdata，
+        #  只有 gofmt 是按文件系统遍历的。）
+        run: |
+          files=$(git ls-files '*.go' | grep -v '^testdata/')
+          unformatted=$(gofmt -l $files || true)
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未通过 gofmt 检查，请执行 gofmt -w 后再提交："
+            echo "$unformatted"
+            exit 1
+          fi
+          echo "gofmt 检查通过"
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Go test
+        run: go test -race -count=1 ./...

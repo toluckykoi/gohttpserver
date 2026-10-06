@@ -34,14 +34,14 @@ type FRPClient struct {
 
 // FRPConfig holds the FRP client configuration
 type FRPConfig struct {
-	ServerAddr          string
-	ServerPort          int
-	AuthToken           string
-	ProxyName           string
-	ProxyType           string
-	LocalIP             string
-	LocalPort           int
-	RemotePort          int
+	ServerAddr           string
+	ServerPort           int
+	AuthToken            string
+	ProxyName            string
+	ProxyType            string
+	LocalIP              string
+	LocalPort            int
+	RemotePort           int
 	ProxyProtocolVersion string // v1 or v2, empty means disabled
 }
 
@@ -96,25 +96,25 @@ func (c *FRPClient) registeredProxyName() string {
 // getOrCreateEncryptionKey loads or creates the FRP encryption key
 func (c *FRPClient) getOrCreateEncryptionKey() ([]byte, error) {
 	keyFile := "frp-encryption.key"
-	
+
 	// Try to load existing key
 	if data, err := os.ReadFile(keyFile); err == nil {
 		if len(data) == 32 {
 			return data, nil
 		}
 	}
-	
+
 	// Generate new 256-bit key
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
 		return nil, fmt.Errorf("generate encryption key: %w", err)
 	}
-	
+
 	// Save to file with restricted permissions
 	if err := os.WriteFile(keyFile, key, 0600); err != nil {
 		return nil, fmt.Errorf("save encryption key: %w", err)
 	}
-	
+
 	return key, nil
 }
 
@@ -123,27 +123,27 @@ func (c *FRPClient) encryptToken(plaintext string) (string, error) {
 	if plaintext == "" {
 		return "", nil
 	}
-	
+
 	key, err := c.getOrCreateEncryptionKey()
 	if err != nil {
 		return "", err
 	}
-	
+
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", fmt.Errorf("create cipher: %w", err)
 	}
-	
+
 	aesGCM, err := cipher.NewGCM(block)
 	if err != nil {
 		return "", fmt.Errorf("create GCM: %w", err)
 	}
-	
+
 	nonce := make([]byte, aesGCM.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return "", fmt.Errorf("generate nonce: %w", err)
 	}
-	
+
 	ciphertext := aesGCM.Seal(nonce, nonce, []byte(plaintext), nil)
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
@@ -153,44 +153,44 @@ func (c *FRPClient) decryptToken(encoded string) (string, error) {
 	if encoded == "" {
 		return "", nil
 	}
-	
+
 	// If it doesn't look like base64-encoded ciphertext, treat as plaintext (legacy)
 	if len(encoded) < 32 {
 		return encoded, nil
 	}
-	
+
 	ciphertext, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
 		// Not valid base64, treat as plaintext (legacy)
 		return encoded, nil
 	}
-	
+
 	key, err := c.getOrCreateEncryptionKey()
 	if err != nil {
 		return "", err
 	}
-	
+
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", fmt.Errorf("create cipher: %w", err)
 	}
-	
+
 	aesGCM, err := cipher.NewGCM(block)
 	if err != nil {
 		return "", fmt.Errorf("create GCM: %w", err)
 	}
-	
+
 	nonceSize := aesGCM.NonceSize()
 	if len(ciphertext) < nonceSize {
 		return encoded, nil // Too short, treat as plaintext
 	}
-	
+
 	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
 	plaintext, err := aesGCM.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
 		return "", fmt.Errorf("decrypt: %w", err)
 	}
-	
+
 	return string(plaintext), nil
 }
 

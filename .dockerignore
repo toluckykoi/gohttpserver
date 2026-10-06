@@ -1,0 +1,35 @@
+# ---------------------------------------------------------------------------
+# Docker 构建上下文忽略清单
+# 精简 COPY . . 时发送给 daemon 的内容（node_modules / .git / 本地缓存 /
+# 构建产物 / 数据库 / 测试数据等都不进上下文）。
+# 注意：frontend/dist 与 dist 必须忽略，镜像内的 dist 由前端构建阶段产出，
+#       避免脏的工作区产物覆盖镜像内的构建结果。
+# ---------------------------------------------------------------------------
+
+# 版本控制与 CI 配置
+.git
+.gitignore
+.github
+
+# 本地构建缓存与产物
+.gocache
+dist
+frontend/dist
+*.exe
+
+# 依赖目录（镜像内由 npm ci / go mod download 重新安装）
+node_modules
+frontend/node_modules
+
+# 运行时生成的数据库与密钥
+*.db
+*.db-wal
+*.db-shm
+frp-encryption.key
+
+# 本地测试数据与文档
+testdata
+docs
+
+# 审计 / 临时文件
+.audit*

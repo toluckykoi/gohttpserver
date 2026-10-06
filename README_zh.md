@@ -95,6 +95,69 @@ gohttpserver -r ./ --port 8000 --login
 
 使用 `gohttpserver --help` 查看更多使用选项，使用一键安装脚本可以不使用命令行启动。
 
+### 命令行参数
+
+参数按照 `main.go` 中的声明顺序排列；标注「可重复」的参数可以传入多次。
+`--conf`（YAML 格式）可以配置同样的选项，命令行参数的优先级高于配置文件。
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--conf` | | 配置文件路径，YAML 格式 |
+| `-r`, `--root` | `./` | 对外提供服务的根目录 |
+| `--prefix` | | URL 前缀，例如 `/foo` |
+| `--port` | `8000` | 监听端口 |
+| `-a`, `--addr` | | 监听地址，例如 `127.0.0.1:8000`（设置后忽略 `--port`） |
+| `--cert` | | TLS `cert.pem` 路径 |
+| `--key` | | TLS `key.pem` 路径 |
+| `--auth-type` | | 认证方式：`http`、`openid` 或 `oauth2-proxy` |
+| `--auth-http` | | HTTP 基础认证，格式 `用户名:密码`（可重复） |
+| `--auth-openid` | `https://login.netease.com/openid` | OpenID 认证身份 URL |
+| `--theme` | `black` | 网页主题，可选 `black`、`green` |
+| `--upload` | 关闭 | 启用上传支持 |
+| `--delete` | 关闭 | 启用删除支持 |
+| `--edit` | 关闭 | 启用文件编辑支持 |
+| `--xheaders` | 关闭 | 信任 `X-Forwarded-*` 请求头，在 Nginx 后面运行时使用 |
+| `--debug` | 关闭 | 启用调试模式 |
+| `-p`, `--plistproxy` | `https://plistproxy.herokuapp.com/plist` | 服务器不是 HTTPS 时使用的 plist 代理 |
+| `--title` | `Go HTTP File Server` | 服务器标题 |
+| `--google-tracker-id` | | Google Analytics 跟踪 ID，留空表示禁用 |
+| `--deep-path-max-depth` | `5` | 自动合并单级子目录的最大深度；`-1` 表示不合并目录 |
+| `--no-index` | 关闭 | 禁用目录索引 |
+| `--cors-origins` | | 允许的 CORS 来源（可重复；留空表示不启用 CORS，`*` 表示允许所有，不安全） |
+| `--allow-public-oauth2` | 关闭 | 允许在非回环地址上使用 oauth2-proxy 模式（不安全；仅限搭配会剥离 `X-Auth-Request-*` 的代理使用） |
+| `--login` | 关闭 | 启用用户名/密码登录拦截（独立于 `--auth-type`），同时自动开启上传/删除/编辑。默认账号密码：`admin`/`admin` |
+| `--db` | `./gohttpserver.db` | SQLite 数据库文件路径，仅在启用 `--login` 时生效 |
+| `--session-ttl` | `12h` | 登录会话的有效期；`0` 表示使用浏览器会话 cookie |
+
+`-h` / `--help` 可以打印上面的参数列表，`--version` 可以打印构建信息。
+
+## 监控
+
+以下两个运维接口始终注册在根路径下（注册在 `--prefix` 路由之前），
+这样健康检查和抓取端始终有固定的访问地址：
+
+- `GET /healthz`（同时支持 `/-/healthz`）—— JSON 存活探针：
+
+  ```bash
+  curl -s http://localhost:8000/healthz
+  {"status":"ok","version":"v1.2.3"}
+  ```
+
+- `GET /metrics`（同时支持 `/-/metrics`）—— Prometheus 文本格式
+  （`text/plain; version=0.0.4`），同样允许 `HEAD` 请求：
+
+  ```bash
+  curl -s http://localhost:8000/metrics
+  # HELP gohttpserver_requests_total Total number of HTTP requests served.
+  # TYPE gohttpserver_requests_total counter
+  gohttpserver_requests_total 42
+  # ... response_bytes_total、response_status_total{class="2xx|3xx|4xx|5xx"}、
+  #     requests_in_flight、uptime_seconds ...
+  gohttpserver_build_info{version="v1.2.3"} 1
+  ```
+
+`--prefix` 不影响这两个路径，它们始终位于 `/healthz` 和 `/metrics`。
+
 ## Docker 使用方法（开发中）
 
 ## 认证选项
@@ -391,6 +454,12 @@ server {
 2. `hello -world` 表示必须包含 `hello` 但不包含 `world`
 
 ## 开发者指南
+
+> **注意**：`frontend/dist` **没有**提交到仓库（被 `.gitignore` 中的 `dist/`
+> 规则忽略），但 `assets.go` 通过 `//go:embed frontend/dist` 指令依赖该目录。
+> 因此在全新克隆的仓库上直接执行 `go build ./...` 会报错
+> `pattern frontend/dist: no matching files found`。请先运行 `./build.sh`
+> （或在 `frontend/` 目录下执行 `npm ci && npm run build`），然后再编译 Go 代码。
 
 1、构建项目（推荐使用使用构建脚本进行构建）
 

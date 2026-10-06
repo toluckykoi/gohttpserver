@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/alecthomas/kingpin"
-	accesslog "github.com/codeskyblue/go-accesslog"
 	"github.com/go-yaml/yaml"
 	"github.com/goji/httpauth"
 	"github.com/gorilla/handlers"
@@ -87,50 +86,10 @@ type Configure struct {
 	} `yaml:"frp"`
 }
 
-type httpLogger struct{}
-
-func (l httpLogger) Log(record accesslog.LogRecord) {
-	// 判断访问来源：FRP 或本地
-	// 通过判断 IP 地址是否为内网地址来区分
-	accessType := "LOCAL"
-	ip := net.ParseIP(record.Ip)
-	if ip != nil && !isPrivateIP(ip) {
-		// 公网 IP 说明是通过 FRP 访问
-		accessType = "FRP"
-	}
-	slog.Info("access",
-		slog.String("type", accessType),
-		slog.String("ip", record.Ip),
-		slog.String("method", record.Method),
-		slog.Int("status", record.Status),
-		slog.String("uri", record.Uri),
-	)
-}
-
-// isPrivateIP 判断 IP 是否为内网地址
-func isPrivateIP(ip net.IP) bool {
-	privateRanges := []string{
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-		"192.168.0.0/16",
-		"127.0.0.0/8",
-		"::1/128",
-		"fc00::/7",
-	}
-	for _, cidr := range privateRanges {
-		_, network, _ := net.ParseCIDR(cidr)
-		if network.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
 var (
 	defaultPlistProxy = "https://plistproxy.herokuapp.com/plist"
 	defaultOpenID     = "https://login.netease.com/openid"
 	gcfg              = Configure{}
-	logger            = httpLogger{}
 
 	VERSION   = "unknown"
 	BUILDTIME = "unknown time"
@@ -365,7 +324,11 @@ func main() {
 
 	var hdlr http.Handler = ss
 
-	hdlr = accesslog.NewLoggingHandler(hdlr, logger)
+	// NOTE: there used to be a second logger here
+	// (accesslog.NewLoggingHandler). It logged every request a second time and
+	// re-parsed the private-IP CIDR list on the hot path. The structured
+	// middleware below now emits one line per request, including the
+	// LOCAL/FRP access_type classification.
 
 	// CORS — opt-in via --cors-origins. Empty = same-origin only.
 	hdlr = cors(gcfg.CORSOrigins)(hdlr)
@@ -625,7 +588,12 @@ func main() {
 		}).Methods("GET")
 	}
 
-	router.PathPrefix("/-/frontend/").Handler(http.StripPrefix(gcfg.Prefix+"/-/frontend/", http.FileServer(FrontendAssets)))
+	// The embedded SPA bundle is served through util.StaticAssets so the
+	// hashed assets get gzip + immutable caching (without it the browser had
+	// neither a compressed body nor any validator to revalidate with).
+	router.PathPrefix("/-/frontend/").Handler(util.StaticAssets(
+		http.StripPrefix(gcfg.Prefix+"/-/frontend/", http.FileServer(FrontendAssets))))
+
 	router.HandleFunc("/-/sysinfo", func(w http.ResponseWriter, r *http.Request) {
 		data, _ := json.Marshal(map[string]any{
 			"version": VERSION,
@@ -662,7 +630,10 @@ func main() {
 	)
 
 	srv := &http.Server{
-		Handler: mainRouter,
+		// SecurityHeaders wraps the whole router (not just the file handler)
+		// so the login page, the admin API, WebDAV, /metrics and the embedded
+		// SPA assets all carry CSP / nosniff / X-Frame-Options too.
+		Handler: util.SecurityHeaders(server.ContentSecurityPolicy)(mainRouter),
 		Addr:    gcfg.Addr,
 		// ReadHeaderTimeout mitigates Slowloris: a client must send the
 		// full request headers within this window or the connection is
@@ -722,7 +693,7 @@ func main() {
 		Policy: func(upstream net.Addr) (proxyproto.Policy, error) {
 			host, _, _ := net.SplitHostPort(upstream.String())
 			ip := net.ParseIP(host)
-			if ip != nil && (ip.IsLoopback() || isPrivateIP(ip)) {
+			if ip != nil && (ip.IsLoopback() || util.IsPrivateIP(ip)) {
 				return proxyproto.USE, nil
 			}
 			return proxyproto.IGNORE, nil

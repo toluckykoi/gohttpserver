@@ -42,17 +42,20 @@ import (
 
 const YAMLCONF = ".ghs.yml"
 
-const contentSecurityPolicy = "default-src 'self'; script-src 'self' 'unsafe-inline' https://www.google-analytics.com https://www.googletagmanager.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://www.google-analytics.com https://www.googletagmanager.com; font-src 'self' data:; media-src 'self'; connect-src 'self' https://www.google-analytics.com https://www.googletagmanager.com; form-action 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'"
+// ContentSecurityPolicy is the CSP applied to every response by the
+// security-header middleware in main.go (util.SecurityHeaders). It is
+// exported so the single outermost middleware can cover the login page and
+// the embedded SPA assets too, which are served outside this package.
+const ContentSecurityPolicy = "default-src 'self'; script-src 'self' 'unsafe-inline' https://www.google-analytics.com https://www.googletagmanager.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://www.google-analytics.com https://www.googletagmanager.com; font-src 'self' data:; media-src 'self'; connect-src 'self' https://www.google-analytics.com https://www.googletagmanager.com; form-action 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'"
 
-// maxUploadSize caps the size of file uploads (10 GiB). Prevents a single
-// upload from exhausting disk space. Set via --max-upload flag if needed.
+// maxUploadSize caps the size of a single uploaded file (10 GiB).
 const maxUploadSize int64 = 10 * 1024 * 1024 * 1024
 
-// maxZipExpansionRatio rejects zip files whose uncompressed size exceeds
-// this multiple of the compressed size. A ratio > 100:1 is almost always
-// a zip bomb (typical text/code compresses ~3-10x; only highly repetitive
-// binary data achieves >100x).
-const maxZipExpansionRatio = 100
+// maxUploadBytes caps the whole multipart request body. The SPA uploads one
+// file per request, so the per-file cap plus a small multipart-overhead
+// allowance is enough; the point is to reject an oversized body BEFORE
+// multipart parsing buffers it to os.TempDir().
+const maxUploadBytes int64 = maxUploadSize + (64 << 20)
 
 // defaultPlistProxy is the fallback plist proxy used when s.PlistProxy is
 // empty. Kept here so the server package is self-contained.
@@ -70,6 +73,10 @@ type ApkInfo struct {
 type IndexFileItem struct {
 	Path string
 	Info os.FileInfo
+	// Lower is Path lower-cased once at index time. Search used to call
+	// strings.ToLower on the path for every file × keyword pair, which
+	// allocated ~2M short-lived strings per query on a large share.
+	Lower string
 }
 
 type Directory struct {
@@ -197,15 +204,20 @@ func NewHTTPStaticServer(root string, noIndex bool) *HTTPStaticServer {
 }
 
 func (s *HTTPStaticServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Security headers - defense in depth
-	w.Header().Set("Content-Security-Policy", contentSecurityPolicy)
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
-	w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-	// HSTS only when serving over TLS
-	if r.TLS != nil {
-		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+	// SECURITY: reject any URL path containing a backslash.
+	//
+	// gorilla/mux normalises the request path with path.Clean, which only
+	// treats "/" as a separator — but on Windows filepath.Clean (used by
+	// resolvePath) also treats "\" as one. A path like
+	// "/prefix/..\..\" therefore survives routing, and resolvePath then
+	// computes a path ABOVE s.Root: uploads/edits could write outside the
+	// share, and readAccessConf used to recurse until the stack blew up
+	// (fatal error, whole process down). No route of ours needs a literal
+	// backslash — the SPA always builds URL paths with "/" — so refusing
+	// them here closes the whole class in one place.
+	if strings.ContainsRune(r.URL.Path, '\\') {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
 	}
 	s.m.ServeHTTP(w, r)
 }
@@ -233,7 +245,13 @@ func (s *HTTPStaticServer) relFromRoot(path string) string {
 // absolute, slash-normalised filesystem path under s.Root. It is shared by
 // getRealPath (which feeds it from a route var) and by handlers like
 // hZipMulti that take paths from a JSON body. filepath.Clean collapses any
-// ".." segments so a caller cannot escape s.Root.
+// ".." segments.
+//
+// SECURITY: Clean alone is not enough to guarantee containment — with a
+// non-empty --prefix the prefix is stripped via filepath.Rel, and on Windows
+// a "\"-separated ".." survives mux's slash-only clean (see ServeHTTP, which
+// now rejects backslashes outright). Callers that mutate the filesystem MUST
+// therefore also verify the result with insideRoot / mustResolveRequestPath.
 func (s *HTTPStaticServer) resolvePath(urlPath string) string {
 	if !strings.HasPrefix(urlPath, "/") {
 		urlPath = "/" + urlPath
@@ -244,6 +262,27 @@ func (s *HTTPStaticServer) resolvePath(urlPath string) string {
 		relativePath = cleanPath
 	}
 	return filepath.ToSlash(filepath.Join(s.Root, relativePath))
+}
+
+// insideRoot reports whether an already-resolved path is s.Root itself or a
+// descendant of it.
+func (s *HTTPStaticServer) insideRoot(resolved string) bool {
+	return isUnderRoot(resolved, s.Root)
+}
+
+// rootPath is the cleaned absolute root, without the trailing separator that
+// NewHTTPStaticServer appends.
+func (s *HTTPStaticServer) rootPath() string {
+	return filepath.Clean(s.Root)
+}
+
+// resolveRequestPath resolves the request's file path and reports whether it
+// stayed inside Root. Handlers that read or write files must bail out when
+// ok is false — resolvePath cannot guarantee containment on its own (see its
+// doc comment).
+func (s *HTTPStaticServer) resolveRequestPath(r *http.Request) (string, bool) {
+	p := s.getRealPath(r)
+	return p, s.insideRoot(p)
 }
 
 func (s *HTTPStaticServer) hIndex(w http.ResponseWriter, r *http.Request) {
@@ -280,29 +319,53 @@ func (s *HTTPStaticServer) hIndex(w http.ResponseWriter, r *http.Request) {
 		data, _ := io.ReadAll(f)
 		w.Write(data)
 	} else {
+		// SECURITY: the access-control file is never served over HTTP.
+		// It used to be readable whenever delete was enabled, and its body
+		// carries every users[].token from .ghs.yml — the very credentials
+		// canUploadByToken/canEditByToken accept, and which hJSONList
+		// deliberately hides (CWE-200). Nothing in the UI needs it.
 		if filepath.Base(path) == YAMLCONF {
-			auth := s.readAccessConf(realPath)
-			if !auth.Delete {
-				http.Error(w, "Security warning, not allowed to read", http.StatusForbidden)
-				return
-			}
+			http.Error(w, "Not found", http.StatusNotFound)
+			return
 		}
 		if r.FormValue("download") == "true" {
-			w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(filepath.Base(path)))
+			w.Header().Set("Content-Disposition", downloadDisposition(filepath.Base(path)))
 		}
 		http.ServeFile(w, r, realPath)
 	}
 }
 
+// downloadDisposition builds an RFC 6266 Content-Disposition value. The old
+// code used strconv.Quote, which is a Go string literal escaper and not an
+// HTTP quoted-string: non-ASCII names went out raw in the header (undefined
+// for header values) and control bytes became invalid \xNN escapes. We now
+// emit a quoted ASCII fallback plus the RFC 5987 filename* form so modern
+// clients get the real name.
+func downloadDisposition(name string) string {
+	ascii := strings.Map(func(r rune) rune {
+		if r < 0x20 || r > 0x7e || r == '"' || r == '\\' {
+			return '_'
+		}
+		return r
+	}, name)
+	if ascii == "" {
+		ascii = "download"
+	}
+	return fmt.Sprintf("attachment; filename=%q; filename*=UTF-8''%s",
+		ascii, url.PathEscape(name))
+}
+
 func (s *HTTPStaticServer) hDelete(w http.ResponseWriter, req *http.Request) {
-	realPath := s.getRealPath(req)
-	// Defence-in-depth: resolvePath already runs filepath.Clean, but
-	// os.RemoveAll is destructive, so re-verify the resolved path stays
-	// under s.Root before deleting. This guards against any future
-	// change to resolvePath/Prefix handling that might reopen a
-	// traversal gap.
-	if !isUnderRoot(realPath, s.Root) {
+	realPath, ok := s.resolveRequestPath(req)
+	if !ok {
 		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	// Refuse to delete the share root itself. isUnderRoot reports true for
+	// equality, so DELETE / ({"path": ""}) used to wipe the whole share in a
+	// single request — and --login forces delete on for every logged-in user.
+	if filepath.Clean(realPath) == s.rootPath() {
+		http.Error(w, "Refusing to delete the share root", http.StatusBadRequest)
 		return
 	}
 	auth := s.readAccessConf(realPath)
@@ -310,6 +373,10 @@ func (s *HTTPStaticServer) hDelete(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "Delete forbidden", http.StatusForbidden)
 		return
 	}
+
+	// Remember how much is about to disappear so the cached directory sizes
+	// can be adjusted instead of being thrown away wholesale.
+	removed, sizeKnown := s.removedSize(realPath)
 
 	err := os.RemoveAll(realPath)
 	if err != nil {
@@ -319,14 +386,27 @@ func (s *HTTPStaticServer) hDelete(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "Delete failed", http.StatusInternalServerError)
 		return
 	}
-	// Drop cached sizes — files just disappeared from disk.
-	invalidateDirSizeCache()
+	rel := s.relFromRoot(realPath)
+	if sizeKnown {
+		dirInfoSize.addDelta(rel, -removed)
+	}
+	// The subtree no longer exists; drop its own cached entry. When the size
+	// was unknown (never walked), also drop the ancestors so the next read
+	// recomputes them from disk rather than reporting a stale total.
+	dirInfoSize.dropSubtree(rel)
+	if !sizeKnown {
+		dirInfoSize.invalidatePath(rel)
+	}
 	s.invalidateAccessConf()
 	w.Write([]byte("Success"))
 }
 
 func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Request) {
-	dirpath := s.getRealPath(req)
+	dirpath, ok := s.resolveRequestPath(req)
+	if !ok {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
 
 	// check auth
 	auth := s.readAccessConf(dirpath)
@@ -335,7 +415,32 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 		return
 	}
 
+	// SECURITY: cap the request body BEFORE multipart parsing. FormFile calls
+	// ParseMultipartForm, which keeps the first 32 MiB in memory and spills
+	// everything else to os.TempDir() — so the old per-file check (which ran
+	// after parsing) could not prevent a client from filling the temp
+	// filesystem. MaxBytesReader makes the parse itself fail once the cap is
+	// exceeded. The SPA uploads one file per request, hence a single-file cap
+	// plus multipart overhead.
+	req.Body = http.MaxBytesReader(w, req.Body, maxUploadBytes)
+
 	file, header, err := req.FormFile("file")
+	// Register temp-file cleanup before any early return below: a malformed
+	// multipart body still spills parts to disk, and the old code returned
+	// the mkdir response before this defer existed, leaking them forever.
+	if req.MultipartForm != nil {
+		defer req.MultipartForm.RemoveAll() // Seen from go source code, req.MultipartForm not nil after call FormFile(..)
+	}
+	if err != nil && !errors.Is(err, http.ErrMissingFile) {
+		log.Printf("parse form file: %v", err)
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, fmt.Sprintf("Upload too large (max %d bytes)", maxUploadBytes), http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, "Failed to parse upload", http.StatusBadRequest)
+		return
+	}
 
 	if _, err := os.Stat(dirpath); os.IsNotExist(err) {
 		if err := os.MkdirAll(dirpath, os.ModePerm); err != nil {
@@ -353,16 +458,7 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 		})
 		return
 	}
-
-	if err != nil {
-		log.Printf("parse form file: %v", err)
-		http.Error(w, "Failed to parse upload", http.StatusInternalServerError)
-		return
-	}
-	defer func() {
-		file.Close()
-		req.MultipartForm.RemoveAll() // Seen from go source code, req.MultipartForm not nil after call FormFile(..)
-	}()
+	defer file.Close()
 
 	// Check upload size limit to prevent disk exhaustion
 	if header.Size > maxUploadSize {
@@ -419,22 +515,18 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 		dstPath = filepath.Join(dirpath, filename)
 	}
 
-	// Large file (>32MB) will store in tmp directory
-	// The quickest operation is call os.Move instead of os.Copy
-	// Note: it seems not working well, os.Rename might be failed
-
-	var copyErr error
-	dst, err := os.Create(dstPath)
-	if err != nil {
-		log.Printf("create file %q: %v", util.SanitizeLogInput(dstPath), err)
-		http.Error(w, "File create failed", http.StatusInternalServerError)
-		return
+	// Capture the pre-existing size so the directory-size cache can be
+	// adjusted by the exact delta afterwards.
+	var oldSize int64
+	if fi, statErr := os.Stat(dstPath); statErr == nil && !fi.IsDir() {
+		oldSize = fi.Size()
 	}
 
-	buf := s.bufPool.Get().([]byte)
-	defer s.bufPool.Put(buf)
-	_, copyErr = io.CopyBuffer(dst, file, buf)
-	dst.Close()
+	// Write to a temp file in the same directory and rename into place. A
+	// direct os.Create truncated the destination first, so a failed or
+	// interrupted upload both destroyed the previous file and left a
+	// truncated one visible in the listing.
+	written, copyErr := s.writeFileAtomic(dstPath, file, 0)
 	if copyErr != nil {
 		log.Printf("upload copy %q: %v", util.SanitizeLogInput(dstPath), copyErr)
 		http.Error(w, "Upload failed", http.StatusInternalServerError)
@@ -443,10 +535,10 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
 
-	// Drop cached directory sizes — a file just landed on disk and the
-	// next directory listing should reflect it without waiting for the
-	// 10-minute index rebuild.
-	invalidateDirSizeCache()
+	// Adjust the cached directory sizes by the exact delta instead of
+	// dropping the whole cache — a wipe forced the next listing to re-walk
+	// every directory in the share.
+	dirInfoSize.addDelta(s.relFromRoot(dstPath), written-oldSize)
 	s.invalidateAccessConf()
 
 	if req.FormValue("unzip") == "true" {
@@ -484,6 +576,10 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 		if err == nil {
 			os.Remove(dstPath)
 		}
+		// Extraction added many files (and removed the archive), so the
+		// cached totals for the target directory and its ancestors are
+		// stale: drop that chain and let the next listing re-walk it.
+		dirInfoSize.invalidatePath(s.relFromRoot(dirpath))
 		message := "success"
 		if err != nil {
 			message = err.Error()
@@ -506,6 +602,62 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 // memory pressure on the server.
 const maxEditSize int64 = 5 * 1024 * 1024
 
+// writeFileAtomic streams src into a temp file next to dst and renames it into
+// place only after the copy succeeded. Two properties matter:
+//
+//   - The destination is never left truncated/zero-filled by a failed or
+//     oversized write (the previous os.Create + os.Truncate(path, oldSize)
+//     "rollback" padded the file with NUL bytes, destroying the content).
+//   - Readers can never observe a half-written file.
+//
+// limit > 0 caps the accepted size (0 = unlimited); exceeding it returns
+// errTooLarge without touching dst.
+func (s *HTTPStaticServer) writeFileAtomic(dst string, src io.Reader, limit int64) (int64, error) {
+	dir := filepath.Dir(dst)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(dst)+".upload-*")
+	if err != nil {
+		return 0, err
+	}
+	tmpName := tmp.Name()
+	// Any error path removes the temp file; only a successful rename keeps it.
+	committed := false
+	defer func() {
+		if !committed {
+			tmp.Close()
+			os.Remove(tmpName)
+		}
+	}()
+
+	buf := s.bufPool.Get().([]byte)
+	defer s.bufPool.Put(buf)
+
+	reader := src
+	if limit > 0 {
+		// Read one byte past the limit so an over-size body is detected
+		// rather than silently truncated.
+		reader = io.LimitReader(src, limit+1)
+	}
+	written, err := io.CopyBuffer(tmp, reader, buf)
+	if err != nil {
+		return 0, err
+	}
+	if limit > 0 && written > limit {
+		return written, errTooLarge
+	}
+	if err := tmp.Close(); err != nil {
+		return written, err
+	}
+	if err := os.Rename(tmpName, dst); err != nil {
+		return written, err
+	}
+	committed = true
+	return written, nil
+}
+
+// errTooLarge is returned by writeFileAtomic when the source exceeds the
+// caller's limit.
+var errTooLarge = errors.New("payload exceeds size limit")
+
 // hEdit handles PUT requests against an existing file. The request
 // body becomes the new file contents. Use case: the frontend's
 // in-browser editor saves changes for small text files (code,
@@ -520,14 +672,16 @@ func (s *HTTPStaticServer) hEdit(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	dstPath := s.getRealPath(req)
-
-	// Reject obvious path escapes early — the resolvePath call below
-	// already cleans the route var, but a PUT against "../../etc/foo"
-	// would resolve outside Root and we'd then be writing to a file
-	// the user can't browse to. Belt and braces.
-	if strings.Contains(req.URL.Path, "..") {
+	dstPath, inside := s.resolveRequestPath(req)
+	if !inside {
 		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	// The access-control file is not writable through the HTTP API: an
+	// operator with edit rights could otherwise write itself delete rights
+	// (and every other .ghs.yml key) via a PUT.
+	if filepath.Base(dstPath) == YAMLCONF {
+		http.Error(w, "Not editable", http.StatusForbidden)
 		return
 	}
 
@@ -575,46 +729,37 @@ func (s *HTTPStaticServer) hEdit(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Size cap before we copy anything — reading the body unbounded
-	// would let a client exhaust server memory with a giant PUT.
+	// Fast rejection when the client declared an over-size body. The hard
+	// cap is applied while streaming (MaxBytesReader + writeFileAtomic), so a
+	// missing or lying Content-Length (chunked PUT) is still bounded.
 	if req.ContentLength > maxEditSize {
 		http.Error(w, fmt.Sprintf("File too large to edit (max %d bytes); re-upload instead", maxEditSize), http.StatusRequestEntityTooLarge)
 		return
 	}
+	req.Body = http.MaxBytesReader(w, req.Body, maxEditSize)
 
-	dst, err := os.Create(dstPath)
-	if err != nil {
-		log.Printf("edit create %q: %v", util.SanitizeLogInput(dstPath), err)
-		http.Error(w, "File create failed", http.StatusInternalServerError)
-		return
-	}
-	defer dst.Close()
-
-	buf := s.bufPool.Get().([]byte)
-	defer s.bufPool.Put(buf)
-	written, copyErr := io.CopyBuffer(dst, req.Body, buf)
+	oldSize := fi.Size()
+	written, copyErr := s.writeFileAtomic(dstPath, req.Body, maxEditSize)
 	if copyErr != nil {
-		// Roll back partial writes — the file is now shorter than it
-		// was on disk. Truncate to its previous size rather than
-		// leaving a half-written file in place.
-		if cerr := dst.Close(); cerr == nil {
-			os.Truncate(dstPath, fi.Size())
-		}
 		log.Printf("edit copy %q: %v", util.SanitizeLogInput(dstPath), copyErr)
+		if errors.Is(copyErr, errTooLarge) {
+			http.Error(w, fmt.Sprintf("File too large to edit (max %d bytes)", maxEditSize), http.StatusRequestEntityTooLarge)
+			return
+		}
+		var maxErr *http.MaxBytesError
+		if errors.As(copyErr, &maxErr) {
+			http.Error(w, fmt.Sprintf("File too large to edit (max %d bytes)", maxEditSize), http.StatusRequestEntityTooLarge)
+			return
+		}
+		// The original file is untouched: writeFileAtomic only renames on
+		// success, so there is no partial/NUL-filled file to roll back.
 		http.Error(w, "Edit failed", http.StatusInternalServerError)
 		return
 	}
-	// Defence-in-depth: if Content-Length was missing or lied, refuse
-	// to commit a write that exceeds the cap. Truncate and 413.
-	if written > maxEditSize {
-		os.Truncate(dstPath, fi.Size())
-		http.Error(w, fmt.Sprintf("File too large to edit (max %d bytes)", maxEditSize), http.StatusRequestEntityTooLarge)
-		return
-	}
 
-	// The file's modification time and parent dir's size-cache just
-	// changed — drop the cache so the next listing reflects reality.
-	invalidateDirSizeCache()
+	// The file's modification time and its directory's cached size just
+	// changed — adjust the cache by the exact delta instead of dropping it.
+	dirInfoSize.addDelta(s.relFromRoot(dstPath), written-oldSize)
 	s.invalidateAccessConf()
 
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
@@ -720,7 +865,11 @@ func isPrivateIPv4(ip net.IP) bool {
 // scratch buffer (same pattern as uploads) so a 1 GB download
 // doesn't pin a gigabyte of server RAM.
 func (s *HTTPStaticServer) hFetch(w http.ResponseWriter, req *http.Request) {
-	dirpath := s.getRealPath(req)
+	dirpath, inside := s.resolveRequestPath(req)
+	if !inside {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
 
 	// Auth — must have upload on the destination dir. Same
 	// body-preserving dance as hEdit: token from URL query / X-Token
@@ -811,31 +960,32 @@ func (s *HTTPStaticServer) hFetch(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	dst, err := os.Create(dstPath)
-	if err != nil {
-		log.Printf("fetch create %q: %v", util.SanitizeLogInput(dstPath), err)
-		http.Error(w, "File create failed", http.StatusInternalServerError)
-		return
-	}
-	defer dst.Close()
-
-	buf := s.bufPool.Get().([]byte)
-	defer s.bufPool.Put(buf)
-	written, copyErr := io.CopyBuffer(dst, httpResp.Body, buf)
-	if copyErr != nil {
-		// Roll back: drop the partial file. The user can re-trigger.
-		os.Remove(dstPath)
-		log.Printf("fetch copy %q: %v", util.SanitizeLogInput(dstPath), copyErr)
-		http.Error(w, "Fetch copy failed", http.StatusBadGateway)
-		return
-	}
-	if written > maxFetchSize {
-		os.Remove(dstPath)
+	// Reject an over-size remote resource early when the server declares a
+	// Content-Length; the copy below is bounded regardless.
+	if httpResp.ContentLength > maxFetchSize {
 		http.Error(w, fmt.Sprintf("Remote file too large (max %d bytes)", maxFetchSize), http.StatusRequestEntityTooLarge)
 		return
 	}
 
-	invalidateDirSizeCache()
+	var oldSize int64
+	if fi, statErr := os.Stat(dstPath); statErr == nil && !fi.IsDir() {
+		oldSize = fi.Size()
+	}
+
+	// Atomic + bounded: a failed or over-size download can neither leave a
+	// partial file behind nor stream an unbounded body to disk.
+	written, copyErr := s.writeFileAtomic(dstPath, httpResp.Body, maxFetchSize)
+	if copyErr != nil {
+		log.Printf("fetch copy %q: %v", util.SanitizeLogInput(dstPath), copyErr)
+		if errors.Is(copyErr, errTooLarge) {
+			http.Error(w, fmt.Sprintf("Remote file too large (max %d bytes)", maxFetchSize), http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, "Fetch copy failed", http.StatusBadGateway)
+		return
+	}
+
+	dirInfoSize.addDelta(s.relFromRoot(dstPath), written-oldSize)
 	s.invalidateAccessConf()
 
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
@@ -978,7 +1128,19 @@ func (s *HTTPStaticServer) hInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *HTTPStaticServer) hZip(w http.ResponseWriter, r *http.Request) {
-	zipx.CompressToZip(w, s.getRealPath(r))
+	target, ok := s.resolveRequestPath(r)
+	if !ok {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	// Stat first: CompressToZip walks the path, and filepath.Walk hands the
+	// callback a nil os.FileInfo when the root cannot be lstat'ed — which
+	// used to be dereferenced (panic) for e.g. GET /missing?op=archive.
+	if _, err := os.Stat(target); err != nil {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+	zipx.CompressToZip(w, target)
 }
 
 // zipMultiRequest is the body shape posted by the frontend's multi-select
@@ -1432,6 +1594,14 @@ func (c *AccessConf) canUpload(r *http.Request) bool {
 func (s *HTTPStaticServer) hJSONList(w http.ResponseWriter, r *http.Request) {
 	requestPath := mux.Vars(r)["path"]
 	realPath := s.getRealPath(r)
+	// Root-relative, slash-normalised form of the listed directory ("" for the
+	// share root). The search index and the directory-size cache are both keyed
+	// by filesystem-relative paths, whereas requestPath is URL-shaped and also
+	// carries --prefix, so the two must not be mixed.
+	relDir := s.relFromRoot(realPath)
+	if relDir == "." {
+		relDir = ""
+	}
 	search := r.FormValue("search")
 	auth := s.readAccessConf(realPath)
 	auth.Upload = auth.canUpload(r)
@@ -1450,16 +1620,24 @@ func (s *HTTPStaticServer) hJSONList(w http.ResponseWriter, r *http.Request) {
 		// filepath.HasPrefix is deprecated since Go 1.0 and has subtle
 		// bugs on Windows (it matches on path separators). Use a plain
 		// string prefix check after normalising both sides to slashes.
-		prefix := filepath.ToSlash(requestPath)
-		if !strings.HasSuffix(prefix, "/") {
+		// The scope comes from the filesystem-relative directory: scoping by
+		// the URL path (which carries --prefix) matched no index entry at all
+		// whenever a prefix was configured, so search silently returned
+		// nothing there.
+		prefix := relDir
+		if prefix != "" {
 			prefix += "/"
 		}
-		// requestPath == "/" should match everything (root search).
-		matchRoot := prefix == "/" || requestPath == ""
+		matchRoot := prefix == ""
 		for _, item := range results {
 			p := filepath.ToSlash(item.Path)
-			if matchRoot || strings.HasPrefix(p, prefix) || p == filepath.ToSlash(requestPath) {
-				fileInfoMap[item.Path] = item.Info
+			if matchRoot || strings.HasPrefix(p, prefix) || p == relDir {
+				// Index entries are root-relative, but every other path this
+				// API emits is URL-shaped (it includes --prefix) because the
+				// SPA posts those values back to /-/zip, whose resolvePath
+				// strips the prefix. Re-attach it so both branches agree.
+				key := strings.TrimPrefix(filepath.ToSlash(path.Join(s.Prefix, p)), "/")
+				fileInfoMap[key] = item.Info
 			}
 		}
 	} else {
@@ -1476,34 +1654,51 @@ func (s *HTTPStaticServer) hJSONList(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			fileInfoMap[filepath.Join(requestPath, entry.Name())] = info
+			// Slash-normalise: filepath.Join produces backslashes on Windows,
+			// and these values are handed to the SPA as URL paths (they are
+			// also posted back to /-/zip, whose resolvePath expects "/").
+			key := strings.TrimPrefix(filepath.ToSlash(filepath.Join(requestPath, entry.Name())), "/")
+			fileInfoMap[key] = info
 		}
 	}
 
 	// turn file list -> json
 	lrs := make([]HTTPFileInfo, 0)
-	for path, info := range fileInfoMap {
+	for itemPath, info := range fileInfoMap {
 		if !auth.canAccess(info.Name()) {
 			continue
 		}
 		lr := HTTPFileInfo{
 			Name:    info.Name(),
-			Path:    path,
+			Path:    itemPath,
 			ModTime: info.ModTime().UnixNano() / 1e6,
 		}
 		if search != "" {
-			name, err := filepath.Rel(requestPath, path)
-			if err != nil {
-				log.Println(requestPath, path, err)
+			// Show the hit relative to the directory being browsed, not
+			// relative to the URL path: requestPath carries --prefix, so
+			// Rel(requestPath, itemPath) produced names like "../file3.txt"
+			// (or, without a prefix, an outright error). itemPath is the
+			// URL-shaped key, so strip the prefix to get back to the
+			// root-relative path the index uses.
+			relToRoot := strings.TrimPrefix(itemPath, strings.TrimPrefix(s.Prefix, "/")+"/")
+			if relDir == "" {
+				lr.Name = relToRoot
+			} else if name, err := filepath.Rel(filepath.FromSlash(relDir), filepath.FromSlash(relToRoot)); err == nil {
+				lr.Name = filepath.ToSlash(name)
+			} else {
+				lr.Name = relToRoot
 			}
-			lr.Name = filepath.ToSlash(name) // fix for windows
 		}
 		if info.IsDir() {
-			name := deepPath(realPath, info.Name(), maxDepth)
+			name := filepath.ToSlash(deepPath(realPath, info.Name(), maxDepth))
 			lr.Name = name
-			lr.Path = filepath.Join(filepath.Dir(path), name)
+			lr.Path = strings.TrimPrefix(path.Join(path.Dir(itemPath), name), "/")
 			lr.Type = "dir"
-			lr.Size = s.historyDirSize(lr.Path)
+			// The size cache is keyed by the filesystem-relative path (the
+			// deep-merged directory name can span several levels), not by the
+			// URL-shaped lr.Path.
+			childReal := filepath.Join(realPath, filepath.FromSlash(name))
+			lr.Size = s.historyDirSize(s.relFromRoot(childReal))
 		} else {
 			lr.Type = "file"
 			lr.Size = info.Size() // formatSize(info)
@@ -1560,7 +1755,7 @@ func (s *HTTPStaticServer) makeIndex() error {
 
 		path, _ = filepath.Rel(s.Root, path)
 		path = filepath.ToSlash(path)
-		indexes = append(indexes, IndexFileItem{path, info})
+		indexes = append(indexes, IndexFileItem{Path: path, Info: info, Lower: strings.ToLower(path)})
 		return nil
 	})
 	// Publish the new snapshot atomically so concurrent findIndex
@@ -1582,45 +1777,122 @@ func (s *HTTPStaticServer) historyDirSize(dir string) int64 {
 	// invalidation paths write (also ToSlash'd).
 	dir = filepath.ToSlash(filepath.Clean(dir))
 
-	dirInfoSize.mutex.RLock()
-	size, ok := dirInfoSize.size[dir]
-	dirInfoSize.mutex.RUnlock()
-
-	if ok {
+	if size, ok := dirInfoSize.peek(dir); ok {
 		return size
 	}
 
-	// Walk the actual filesystem rather than relying on s.indexes. The
-	// index is rebuilt by makeIndex every 10 minutes, so reading from
-	// it would leave a freshly-uploaded (or extracted) directory
-	// reporting a stale size until the next cycle. Walking the real
-	// tree is O(n) in the directory's file count, which is acceptable
-	// for a file manager and gives the user an immediately-correct
-	// number after upload/unzip/delete.
-	absDir := filepath.Join(s.Root, dir)
-	filepath.Walk(absDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+	// Cache miss. Walk the real filesystem rather than relying on s.indexes:
+	// the index is only rebuilt every 10 minutes, so reading from it would
+	// leave a freshly-uploaded (or extracted) directory reporting a stale
+	// size. Walking is O(files under dir) — but we record the total for EVERY
+	// directory inside the walked subtree, so listing a directory with N
+	// subdirectories costs one traversal instead of N (previously each
+	// sibling missed the cache and re-walked its own subtree).
+	absDir := filepath.Join(s.Root, filepath.FromSlash(dir))
+	totals := make(map[string]int64)
+	filepath.Walk(absDir, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
 			return nil
 		}
-		size += info.Size()
+		rel, relErr := filepath.Rel(s.Root, p)
+		if relErr != nil {
+			return nil
+		}
+		// Attribute the file's bytes to its own directory and every
+		// directory between it and the walk root (never above the walk
+		// root: an ancestor's total must not be derived from a partial
+		// subtree).
+		child := filepath.ToSlash(path.Dir(filepath.ToSlash(rel)))
+		for {
+			totals[child] += info.Size()
+			if child == dir || child == "." || child == "/" || child == "" {
+				break
+			}
+			parent := path.Dir(child)
+			if parent == child {
+				break
+			}
+			child = parent
+		}
 		return nil
 	})
 
-	dirInfoSize.mutex.Lock()
-	// Lazy-init the map so a nil value (e.g. after a test resets it, or a
-	// zero-value Directory) doesn't panic on write.
-	if dirInfoSize.size == nil {
-		dirInfoSize.size = make(map[string]int64)
+	dirInfoSize.mergeIn(totals)
+	if size, ok := dirInfoSize.peek(dir); ok {
+		return size
 	}
-	dirInfoSize.size[dir] = size
-	dirInfoSize.mutex.Unlock()
-
-	return size
+	return totals[dir]
 }
 
-// invalidateDirSizeCache drops every cached size entry. Called after any
-// mutation (upload, unzip, delete) so the next read computes fresh
-// against the real filesystem. Cheap: the map rebuilds lazily on demand.
+// peek returns the cached size for a slash-normalised directory key.
+func (d *Directory) peek(dir string) (int64, bool) {
+	d.mutex.RLock()
+	defer d.mutex.RUnlock()
+	size, ok := d.size[dir]
+	return size, ok
+}
+
+// mergeIn fills in cache entries that are not present yet, leaving already
+// known (and possibly delta-adjusted) values untouched.
+func (d *Directory) mergeIn(totals map[string]int64) {
+	if len(totals) == 0 {
+		return
+	}
+	d.mutex.Lock()
+	defer d.mutex.Unlock()
+	if d.size == nil {
+		d.size = make(map[string]int64)
+	}
+	for k, v := range totals {
+		if _, exists := d.size[k]; !exists {
+			d.size[k] = v
+		}
+	}
+}
+
+// invalidatePath drops the cached size for a path and all of its ancestors, so
+// the next read recomputes that chain from disk. Much cheaper than wiping the
+// whole cache (which forced a full re-walk of every directory in the share)
+// while still being exact, because a stale ancestor can never be trusted.
+func (d *Directory) invalidatePath(relPath string) {
+	dir := filepath.ToSlash(filepath.Clean(relPath))
+
+	d.mutex.Lock()
+	defer d.mutex.Unlock()
+	if d.size == nil {
+		return
+	}
+	for {
+		delete(d.size, dir)
+		if dir == "." || dir == "/" || dir == "" {
+			break
+		}
+		parent := path.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+}
+
+// removedSize reports how many bytes are about to be removed at realPath, and
+// whether that number is known. A regular file's size is exact; a directory's
+// size is only known if its entry is already cached (otherwise the caller must
+// invalidate the ancestor chain instead of applying a delta).
+func (s *HTTPStaticServer) removedSize(realPath string) (int64, bool) {
+	info, err := os.Stat(realPath)
+	if err != nil {
+		return 0, false
+	}
+	if !info.IsDir() {
+		return info.Size(), true
+	}
+	return dirInfoSize.peek(s.relFromRoot(realPath))
+}
+
+// invalidateDirSizeCache drops every cached size entry. Prefer the targeted
+// addDelta / dropSubtree / invalidatePath helpers on mutation paths; this is
+// the big hammer for cases where the whole tree may have changed.
 func invalidateDirSizeCache() {
 	dirInfoSize.mutex.Lock()
 	dirInfoSize.size = make(map[string]int64)
@@ -1683,19 +1955,26 @@ func (s *HTTPStaticServer) findIndex(text string) []IndexFileItem {
 	if ptr == nil {
 		return ret
 	}
+	// Lowercase each keyword once, not once per file per keyword.
+	keywords := make([]string, 0, 4)
+	needs := make([]bool, 0, 4)
+	for keyword := range strings.FieldsSeq(text) {
+		needContains := true
+		if strings.HasPrefix(keyword, "-") {
+			needContains = false
+			keyword = keyword[1:]
+		}
+		if keyword == "" {
+			continue
+		}
+		keywords = append(keywords, strings.ToLower(keyword))
+		needs = append(needs, needContains)
+	}
 	for _, item := range *ptr {
 		ok := true
 		// search algorithm, space for AND
-		for keyword := range strings.FieldsSeq(text) {
-			needContains := true
-			if strings.HasPrefix(keyword, "-") {
-				needContains = false
-				keyword = keyword[1:]
-			}
-			if keyword == "" {
-				continue
-			}
-			ok = (needContains == strings.Contains(strings.ToLower(item.Path), strings.ToLower(keyword)))
+		for i, keyword := range keywords {
+			ok = (needs[i] == strings.Contains(item.Lower, keyword))
 			if !ok {
 				break
 			}
@@ -1715,31 +1994,61 @@ func (s *HTTPStaticServer) defaultAccessConf() AccessConf {
 	}
 }
 
+// readAccessConf merges the .ghs.yml chain that applies to realPath: the
+// root config first, then each directory on the way down, so a nested file
+// only overrides the keys it declares.
+//
+// This is deliberately ITERATIVE. The previous implementation recursed to the
+// parent until filepath.Rel reported ".", which for a path above Root (the
+// resolver could produce one on Windows when --prefix was set) never
+// terminated: Dir stops changing at the volume root while Rel keeps returning
+// "..", so the process died with an unrecoverable "fatal error: stack
+// overflow" from a single HTTP request.
 func (s *HTTPStaticServer) readAccessConf(realPath string) (ac AccessConf) {
-	relativePath, err := filepath.Rel(s.Root, realPath)
-	if err != nil || relativePath == "." || relativePath == "" { // actually relativePath is always "." if root == realPath
-		ac = s.defaultAccessConf()
-		realPath = s.Root
-	} else {
-		parentPath := filepath.Dir(realPath)
-		ac = s.readAccessConf(parentPath)
+	ac = s.defaultAccessConf()
+
+	root := s.rootPath()
+	dir := filepath.Clean(realPath)
+	if util.IsFile(dir) {
+		dir = filepath.Dir(dir)
 	}
-	if util.IsFile(realPath) {
-		realPath = filepath.Dir(realPath)
+	// Anything outside Root contributes nothing — and must not be walked.
+	if !s.insideRoot(dir) {
+		return ac
 	}
-	cfgFile := filepath.Join(realPath, YAMLCONF)
-	raw, err := s.accessConfCache.Get(cfgFile)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			log.Printf("Err read .ghs.yml: %v", err)
+
+	// Collect root → dir, then merge from the root downwards.
+	chain := make([]string, 0, 8)
+	for {
+		chain = append(chain, dir)
+		if dir == root {
+			break
 		}
-		return
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		if !s.insideRoot(parent) {
+			break
+		}
+		dir = parent
 	}
-	if raw == nil {
-		return
+
+	for i := len(chain) - 1; i >= 0; i-- {
+		cfgFile := filepath.Join(chain[i], YAMLCONF)
+		raw, err := s.accessConfCache.Get(cfgFile)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				log.Printf("Err read .ghs.yml: %v", err)
+			}
+			continue
+		}
+		if raw == nil {
+			continue
+		}
+		raw.mergeInto(&ac)
 	}
-	raw.mergeInto(&ac)
-	return
+	return ac
 }
 
 // invalidateAccessConf drops the memoised .ghs.yml parses. Called after
@@ -1869,6 +2178,14 @@ func checkFilename(name string) error {
 	if strings.ContainsAny(name, "\\/:*<>|") {
 		return errors.New("name should not contain \\/:*<>|")
 	}
+	// SECURITY: the access-control file must not be writable through the HTTP
+	// API. A user with upload-only rights could otherwise upload a .ghs.yml
+	// granting itself delete/edit (the handler invalidates the config cache
+	// immediately afterwards, so it would take effect on the next request).
+	// The zip and WebDAV paths already refuse this name.
+	if name == YAMLCONF {
+		return errors.New("reserved file name")
+	}
 	return nil
 }
 
@@ -1897,6 +2214,10 @@ func checkPathSegment(seg string) error {
 	}
 	if strings.ContainsAny(seg, "\\:*<>|\"\x00") {
 		return errors.New("path segment should not contain \\:*<>|\"")
+	}
+	// See checkFilename: .ghs.yml is never writable over HTTP.
+	if seg == YAMLCONF {
+		return errors.New("reserved file name")
 	}
 	return nil
 }

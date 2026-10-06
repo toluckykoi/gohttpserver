@@ -39,7 +39,7 @@ type WebdavAccount struct {
 	// unlimited (no quota enforced, no quota reported via PROPFIND).
 	// Old on-disk records without this field decode as 0, which is the
 	// safest default for a quota field on legacy deployments.
-	QuotaBytes   int64 `json:"quota_bytes"`
+	QuotaBytes    int64 `json:"quota_bytes"`
 	CreatedAtUnix int64 `json:"created_at"`
 	UpdatedAtUnix int64 `json:"updated_at"`
 }

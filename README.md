@@ -100,6 +100,70 @@ gohttpserver -r ./ --port 8000 --login
 
 Run `gohttpserver --help` to see more options. You can also use the one-line install script to start the service without command-line arguments.
 
+### Command-line options
+
+Flags are listed in the order `main.go` declares them. Flags marked
+"repeatable" may be given more than once. `--conf` (YAML) provides the same
+settings; command-line flags take priority over the config file.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--conf` | | Config file path, YAML format |
+| `-r`, `--root` | `./` | Root directory to serve |
+| `--prefix` | | URL prefix, e.g. `/foo` |
+| `--port` | `8000` | Listen port |
+| `-a`, `--addr` | | Listen address, e.g. `127.0.0.1:8000` (overrides `--port`) |
+| `--cert` | | TLS `cert.pem` path |
+| `--key` | | TLS `key.pem` path |
+| `--auth-type` | | Auth type: `http`, `openid` or `oauth2-proxy` |
+| `--auth-http` | | HTTP basic auth as `user:pass` (repeatable) |
+| `--auth-openid` | `https://login.netease.com/openid` | OpenID auth identity URL |
+| `--theme` | `black` | Web theme, one of `black`, `green` |
+| `--upload` | off | Enable upload support |
+| `--delete` | off | Enable delete support |
+| `--edit` | off | Enable file edit support |
+| `--xheaders` | off | Trust `X-Forwarded-*` headers, used behind Nginx |
+| `--debug` | off | Enable debug mode |
+| `-p`, `--plistproxy` | `https://plistproxy.herokuapp.com/plist` | Plist proxy when the server is not HTTPS |
+| `--title` | `Go HTTP File Server` | Server title |
+| `--google-tracker-id` | | Google Analytics tracker ID; empty disables it |
+| `--deep-path-max-depth` | `5` | Max depth for auto-merging single-subdirectory paths; `-1` never combines dirs |
+| `--no-index` | off | Disable indexing |
+| `--cors-origins` | | Allowed CORS origins (repeatable; empty = no CORS, `*` = allow all, insecure) |
+| `--allow-public-oauth2` | off | Allow oauth2-proxy mode on a non-loopback bind (insecure; only behind a proxy that strips `X-Auth-Request-*`) |
+| `--login` | off | Enable the username/password login gate (independent of `--auth-type`); also enables upload/delete/edit. Default credentials: `admin`/`admin` |
+| `--db` | `./gohttpserver.db` | SQLite database file path; only used when `--login` is enabled |
+| `--session-ttl` | `12h` | How long a logged-in session stays valid; `0` = browser-session cookies |
+
+`-h` / `--help` prints this list, and `--version` prints build information.
+
+## Monitoring
+
+Two operational endpoints are served on the root path, registered before the
+`--prefix` routing so health checks and scrapers keep a stable address:
+
+- `GET /healthz` (also `/-/healthz`) — JSON liveness probe:
+
+  ```bash
+  curl -s http://localhost:8000/healthz
+  {"status":"ok","version":"v1.2.3"}
+  ```
+
+- `GET /metrics` (also `/-/metrics`) — Prometheus text exposition format
+  (`text/plain; version=0.0.4`); `HEAD` is allowed too:
+
+  ```bash
+  curl -s http://localhost:8000/metrics
+  # HELP gohttpserver_requests_total Total number of HTTP requests served.
+  # TYPE gohttpserver_requests_total counter
+  gohttpserver_requests_total 42
+  # ... response_bytes_total, response_status_total{class="2xx|3xx|4xx|5xx"},
+  #     requests_in_flight, uptime_seconds ...
+  gohttpserver_build_info{version="v1.2.3"} 1
+  ```
+
+`--prefix` does not affect these paths: they stay at `/healthz` and `/metrics`.
+
 ## Docker (under development)
 
 ## Authentication
@@ -134,7 +198,7 @@ Run `gohttpserver --help` to see more options. You can also use the one-line ins
 
 ## Admin Panel
 
-When `--login` is enabled, click the user avatar (top-right) → "管理面板"
+When `--login` is enabled, click the user avatar (top-right) → "Admin Panel"
 to open the full-screen admin panel. The panel has three tabs:
 
 - **个人中心 (Profile)**: Shows the current user's username, auth
@@ -404,6 +468,13 @@ Search follows Google-like universal format. Keywords are space-separated, and a
 2. `hello -world` means `hello` must be present and `world` must NOT be present.
 
 ## Developer Guide
+
+> **Note**: `frontend/dist` is **not** committed — it is ignored by the
+> `dist/` rule in `.gitignore` — but `assets.go` requires it through the
+> `//go:embed frontend/dist` directive. On a fresh clone `go build ./...`
+> therefore fails with `pattern frontend/dist: no matching files found`.
+> Run `./build.sh` (or `npm ci && npm run build` inside `frontend/`) before
+> building the Go code.
 
 1. Build the project (recommended to use build scripts):
 

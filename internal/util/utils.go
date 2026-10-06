@@ -28,15 +28,91 @@ func GetLocalIP() string {
 	if err != nil {
 		return ""
 	}
+	// Prefer a private LAN address over anything else: the first non-loopback
+	// IPv4 on a typical developer/host machine is often a Tailscale/CGNAT
+	// (100.64.0.0/10) or VPN address, which is useless as the "share this URL
+	// with your colleagues" address the admin panel shows.
+	fallback := ""
 	for _, address := range addrs {
-		// check the address type and if it is not a loopback the display it
-		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-			if ipnet.IP.To4() != nil {
-				return ipnet.IP.String()
-			}
+		ipnet, ok := address.(*net.IPNet)
+		if !ok || ipnet.IP.IsLoopback() || ipnet.IP.To4() == nil {
+			continue
+		}
+		if isLANAddress(ipnet.IP) {
+			return ipnet.IP.String()
+		}
+		if fallback == "" {
+			fallback = ipnet.IP.String()
 		}
 	}
-	return ""
+	return fallback
+}
+
+// isLANAddress reports whether ip is in one of the LAN/CGNAT ranges a browser
+// on the same network could actually reach.
+func isLANAddress(ip net.IP) bool {
+	for _, cidr := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"} {
+		if _, network, err := net.ParseCIDR(cidr); err == nil && network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// privateNets are the ranges treated as internal. Parsed once at init: the
+// access-log path used to rebuild and reparse this list for EVERY request.
+// 100.64.0.0/10 (CGNAT/Tailscale) and fe80::/10 (link-local) are included so a
+// VPN/tailnet client is not mislabelled as a public "FRP" visitor.
+var privateNets = func() []*net.IPNet {
+	cidrs := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"127.0.0.0/8",
+		"169.254.0.0/16",
+		"100.64.0.0/10",
+		"::1/128",
+		"fc00::/7",
+		"fe80::/10",
+	}
+	nets := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		if _, n, err := net.ParseCIDR(c); err == nil {
+			nets = append(nets, n)
+		}
+	}
+	return nets
+}()
+
+// IsPrivateIP reports whether ip falls in a private/loopback/link-local range.
+func IsPrivateIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	for _, n := range privateNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// AccessTypeOf classifies a client address for the access log: "LOCAL" for
+// private/loopback clients, "FRP" for anything arriving from a public address
+// (i.e. through a tunnel or port-forward). An unparseable or empty address is
+// reported as UNKNOWN rather than being silently called public.
+func AccessTypeOf(ipStr string) string {
+	if ipStr == "" {
+		return "UNKNOWN"
+	}
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return "UNKNOWN"
+	}
+	if IsPrivateIP(ip) {
+		return "LOCAL"
+	}
+	return "FRP"
 }
 
 func FileExists(path string) bool {

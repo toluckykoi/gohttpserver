@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -154,7 +153,9 @@ func (s *UsageState) addDelta(accountID string, delta int64) error {
 // Get() and addDelta().
 //
 // LOGIC FIX: RecalculateAll previously did
-//   s.addDelta(acc.ID, total - s.Get(acc.ID))
+//
+//	s.addDelta(acc.ID, total - s.Get(acc.ID))
+//
 // which spans two separate lock acquisitions — another goroutine can
 // modify the counter between Get and addDelta, producing a wrong delta.
 // setUsage does the read+replace in a single critical section.
@@ -318,6 +319,9 @@ type quotaFileSystem struct {
 	quotaBytes int64 // 0 = unlimited
 	root       string
 	readOnly   bool
+	// protectSystemFiles mirrors the account's flag: refuse writes to system
+	// and dot files (see checkWriteAllowed).
+	protectSystemFiles bool
 }
 
 // Mkdir creates a directory. Quota is irrelevant (directories are
@@ -325,6 +329,9 @@ type quotaFileSystem struct {
 func (q *quotaFileSystem) Mkdir(ctx context.Context, name string, perm os.FileMode) error {
 	if q.readOnly {
 		return errors.New("webdav: account is read-only")
+	}
+	if err := q.checkWriteAllowed(name); err != nil {
+		return err
 	}
 	return q.inner.Mkdir(ctx, name, perm)
 }
@@ -352,6 +359,11 @@ func (q *quotaFileSystem) OpenFile(ctx context.Context, name string, flag int, p
 	if isWrite && q.readOnly {
 		return nil, errors.New("webdav: account is read-only")
 	}
+	if isWrite {
+		if err := q.checkWriteAllowed(name); err != nil {
+			return nil, err
+		}
+	}
 
 	// Capture the pre-existing size BEFORE inner.OpenFile so that a
 	// O_TRUNC flag doesn't shrink the file underneath our Stat call.
@@ -361,9 +373,11 @@ func (q *quotaFileSystem) OpenFile(ctx context.Context, name string, flag int, p
 	var oldSize int64
 	var absPath string
 	if isWrite {
-		absPath = filepath.Join(q.root, filepath.FromSlash(pathUnescape(name)))
-		if info, statErr := os.Stat(absPath); statErr == nil && info != nil {
-			oldSize = info.Size()
+		absPath, _ = q.resolveInRoot(name)
+		if absPath != "" {
+			if info, statErr := os.Stat(absPath); statErr == nil && info != nil {
+				oldSize = info.Size()
+			}
 		}
 	}
 
@@ -372,7 +386,10 @@ func (q *quotaFileSystem) OpenFile(ctx context.Context, name string, flag int, p
 		return nil, err
 	}
 
-	if !isWrite {
+	if !isWrite || absPath == "" {
+		// Reads, and writes whose target we refused to resolve inside the
+		// chroot, are passed through unaccounted: better a slightly
+		// under-counted total than a delta computed against the wrong path.
 		return inner, nil
 	}
 
@@ -402,8 +419,8 @@ func (q *quotaFileSystem) OpenFile(ctx context.Context, name string, flag int, p
 			// but accept the file. Cloudreve does the same. Future PUT
 			// requests will be rejected until usage drops below the cap.
 			if preflight > 0 && stateRef.Get(acct)+delta > preflight {
-			log.Printf("webdav-quota: account %s overshot quota by %d bytes (post-check); accepting file",
-				acct, stateRef.Get(acct)+delta-preflight)
+				log.Printf("webdav-quota: account %s overshot quota by %d bytes (post-check); accepting file",
+					acct, stateRef.Get(acct)+delta-preflight)
 			}
 			return stateRef.addDelta(acct, delta)
 		},
@@ -419,12 +436,23 @@ func (q *quotaFileSystem) RemoveAll(ctx context.Context, name string) error {
 	if q.readOnly {
 		return errors.New("webdav: account is read-only")
 	}
-	abs := filepath.Join(q.root, filepath.FromSlash(pathUnescape(name)))
-	removed, _ := walkSize(abs) // ignore error; partial result is better than nothing
+	if err := q.checkWriteAllowed(name); err != nil {
+		return err
+	}
+	abs, inside := q.resolveInRoot(name)
+	var removed int64
+	if inside {
+		removed, _ = walkSize(abs) // ignore error; partial result is better than nothing
+	} else {
+		// Never walk (or subtract) a path outside the chroot: the previous
+		// double-unescape made DELETE /dav/%252e%252e walk the chroot's PARENT
+		// and wipe the account's quota with someone else's bytes.
+		log.Printf("webdav-quota: refusing to account out-of-chroot delete %q", name)
+	}
 	if err := q.inner.RemoveAll(ctx, name); err != nil {
 		return err
 	}
-	if removed > 0 {
+	if inside && removed > 0 {
 		if err := q.state.addDelta(q.accountID, -removed); err != nil {
 			log.Printf("webdav-quota: account %s RemoveAll accounting failed: %v", q.accountID, err)
 		}
@@ -438,6 +466,14 @@ func (q *quotaFileSystem) RemoveAll(ctx context.Context, name string) error {
 func (q *quotaFileSystem) Rename(ctx context.Context, oldName, newName string) error {
 	if q.readOnly {
 		return errors.New("webdav: account is read-only")
+	}
+	// Moving a protected file away, or renaming something on top of one, are
+	// both writes to a protected name.
+	if err := q.checkWriteAllowed(oldName); err != nil {
+		return err
+	}
+	if err := q.checkWriteAllowed(newName); err != nil {
+		return err
 	}
 	return q.inner.Rename(ctx, oldName, newName)
 }
@@ -472,17 +508,53 @@ func (f *quotaFile) Close() error {
 	return err
 }
 
-// pathUnescape reverses the path escaping applied by webdav.Handler
-// (RFC 3986 percent-decoding). webdav.Dir uses path.Clean on the
-// already-decoded path; we only need the decoded string for filepath.Join.
-func pathUnescape(p string) string {
-	// os.PathSeparator is / on every supported target for this binary,
-	// so we don't have to worry about Windows backslashes in the input.
-	decoded, err := urlPathUnescape(p)
-	if err != nil {
-		return p
+// resolveInRoot joins a WebDAV-supplied name onto the account's chroot and
+// reports whether the result stays inside it. Returns ("", false) for a path
+// that escapes, in which case the caller must not touch the filesystem through
+// this result.
+//
+// NOTE: `name` arrives from golang.org/x/net/webdav, which strips its prefix
+// from r.URL.Path — a value net/http has ALREADY percent-decoded. The previous
+// implementation ran it through a second decode ("pathUnescape"), so the path
+// used for quota accounting diverged from the one the inner Dir actually
+// touched: "%252e%252e" reached the inner FS as the literal directory
+// "%2e%2e", while accounting resolved ".." and walked the chroot's parent
+// (quota wipe + an attacker-triggered full-tree walk). Never decode twice.
+func (q *quotaFileSystem) resolveInRoot(name string) (string, bool) {
+	joined := filepath.Join(q.root, filepath.FromSlash(name))
+	return joined, isUnderDir(joined, q.root)
+}
+
+// isUnderDir reports whether path is dir itself or a descendant of it.
+func isUnderDir(path, dir string) bool {
+	cleanDir := filepath.Clean(dir)
+	cleanPath := filepath.Clean(path)
+	if cleanPath == cleanDir {
+		return true
 	}
-	return decoded
+	return strings.HasPrefix(cleanPath+string(filepath.Separator),
+		cleanDir+string(filepath.Separator))
+}
+
+// checkWriteAllowed enforces the per-account write restrictions that apply to
+// every mutating operation:
+//
+//   - .ghs.yml is never writable through WebDAV. It is the HTTP access-control
+//     file, so allowing an account to drop one inside its chroot would let it
+//     grant itself upload/edit/delete rights for that directory (the same
+//     escalation the HTTP upload path refuses).
+//   - When the account has ProtectSystemFiles enabled (the admin UI default),
+//     system/dot files are protected as well. The flag was stored, shown in the
+//     UI and never enforced — a security control that silently did nothing.
+func (q *quotaFileSystem) checkWriteAllowed(name string) error {
+	base := filepath.Base(filepath.FromSlash(name))
+	if base == ".ghs.yml" {
+		return errors.New("webdav: .ghs.yml is protected")
+	}
+	if q.protectSystemFiles && isProtectedFilename(base) {
+		return fmt.Errorf("webdav: %q is a protected system file", base)
+	}
+	return nil
 }
 
 // ─── Top-level PROPFIND interceptor ─────────────────────────────────────────
@@ -629,9 +701,9 @@ func parseDepthHeader(v string) int {
 // xmlns:D="DAV:" attribute on the root element.
 
 type msResponse struct {
-	XMLName   xml.Name      `xml:"D:response"`
-	Href      string        `xml:"D:href"`
-	Propstats []msPropstat  `xml:"D:propstat"`
+	XMLName   xml.Name     `xml:"D:response"`
+	Href      string       `xml:"D:href"`
+	Propstats []msPropstat `xml:"D:propstat"`
 }
 
 type msPropstat struct {
@@ -680,9 +752,9 @@ func buildMultistatusResponse(
 	children []childInfo,
 ) msMultistatus {
 	rootProps := msProp{
-		Resourcetype: msResourcetype{Collection: &struct{}{}},
-		DisplayName:  rootInfo.Name(),
-		CreationDate: rootInfo.ModTime().UTC().Format(time.RFC3339),
+		Resourcetype:    msResourcetype{Collection: &struct{}{}},
+		DisplayName:     rootInfo.Name(),
+		CreationDate:    rootInfo.ModTime().UTC().Format(time.RFC3339),
 		GetLastModified: formatHTTPDate(rootInfo.ModTime()),
 		SupportedLock:   "",
 	}
@@ -707,11 +779,11 @@ func buildMultistatusResponse(
 	for _, c := range children {
 		href := strings.TrimRight(rootHref, "/") + "/" + urlPathEscape(c.name)
 		props := msProp{
-			Resourcetype: msResourcetype{}, // empty = regular file or non-collection
-			DisplayName:  c.name,
-			CreationDate: c.modTime.UTC().Format(time.RFC3339),
+			Resourcetype:    msResourcetype{}, // empty = regular file or non-collection
+			DisplayName:     c.name,
+			CreationDate:    c.modTime.UTC().Format(time.RFC3339),
 			GetLastModified: formatHTTPDate(c.modTime),
-			GetEtag:       weakEtag(c.modTime, c.size),
+			GetEtag:         weakEtag(c.modTime, c.size),
 		}
 		if !c.isDir {
 			size := c.size
@@ -789,13 +861,18 @@ func preflightQuota(used, quotaBytes, oldSize, contentLength int64) error {
 
 func urlPathEscape(s string) string {
 	const safe = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~"
+	const hexDigits = "0123456789ABCDEF"
 	var b strings.Builder
 	b.Grow(len(s))
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if c > 0x7f || strings.IndexByte(safe, c) < 0 {
+			// Two zero-padded digits: "%A"/"%9" are not valid RFC 3986
+			// escapes, so PROPFIND hrefs for names containing control bytes
+			// could not be resolved by clients.
 			b.WriteByte('%')
-			b.WriteString(strings.ToUpper(strconv.FormatUint(uint64(c), 16)))
+			b.WriteByte(hexDigits[c>>4])
+			b.WriteByte(hexDigits[c&0x0f])
 			continue
 		}
 		b.WriteByte(c)
@@ -803,32 +880,9 @@ func urlPathEscape(s string) string {
 	return b.String()
 }
 
-func urlPathUnescape(s string) (string, error) {
-	var b strings.Builder
-	b.Grow(len(s))
-	for i := 0; i < len(s); i++ {
-		if s[i] == '%' && i+2 < len(s) {
-			hi, ok1 := hexDigit(s[i+1])
-			lo, ok2 := hexDigit(s[i+2])
-			if ok1 && ok2 {
-				b.WriteByte(byte(hi<<4 | lo))
-				i += 2
-				continue
-			}
-		}
-		b.WriteByte(s[i])
-	}
-	return b.String(), nil
-}
+// urlPathUnescape was removed: the WebDAV handler receives an already
+// percent-decoded path from net/http, and decoding it a second time made the
+// quota accounting resolve a different path than the one the inner
+// filesystem touched. See resolveInRoot.
 
-func hexDigit(c byte) (int, bool) {
-	switch {
-	case c >= '0' && c <= '9':
-		return int(c - '0'), true
-	case c >= 'a' && c <= 'f':
-		return int(c-'a') + 10, true
-	case c >= 'A' && c <= 'F':
-		return int(c-'A') + 10, true
-	}
-	return 0, false
-}
+// (hexDigit was only used by urlPathUnescape.)

@@ -10,21 +10,38 @@ RUN npm run build
 
 # ---------- Stage 2: build Go binary (armhf) ----------
 FROM golang:1.26-alpine AS build
+# ARG 不会跨阶段继承，所以版本信息必须在构建阶段内声明
+ARG VERSION=docker
+ARG GITCOMMIT=unknown
+ARG BUILDTIME=unknown
 WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=frontend /build/dist ./frontend/dist
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -trimpath \
-    -ldflags '-s -w -X main.VERSION=docker' \
+    -ldflags "-s -w -X main.VERSION=$VERSION -X main.GITCOMMIT=$GITCOMMIT -X main.BUILDTIME=$BUILDTIME" \
     -o gohttpserver .
 
 # ---------- Stage 3: runtime ----------
 FROM arm32v7/alpine:3.21
 RUN apk add --no-cache ca-certificates
 WORKDIR /app
-RUN mkdir -p /app/public
+# 使用非 root 用户运行；同时把 /app 及其挂载点 /app/public 的属主改好：
+#   - /app 必须可写，因为程序会在工作目录创建 gohttpserver.db 与 frp-encryption.key
+#   - 全新创建的匿名卷会继承 /app/public 的属主，非 root 进程才能写入
+RUN adduser -D -H -s /sbin/nologin appuser \
+    && mkdir -p /app/public \
+    && chown -R appuser:appuser /app
 VOLUME /app/public
 COPY --from=build /build/gohttpserver /usr/local/bin/gohttpserver
+# 注意：由旧版本（以 root 运行）创建出来的已有卷属主仍是 root，
+# 首次使用需要手动执行一次 chown，例如
+#   docker run --rm -v <volume>:/app/public alpine chown -R 1000:1000 /app/public
+USER appuser
 EXPOSE 8000
+# 基于 busybox 的 wget 做健康检查（arm32v7/alpine 基础镜像自带，无需额外安装）
+# 使用 GET 而非 --spider（HEAD）：/healthz 路由只注册了 GET 方法
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget -q -O /dev/null http://127.0.0.1:8000/healthz || exit 1
 ENTRYPOINT ["/usr/local/bin/gohttpserver", "--root=/app/public"]

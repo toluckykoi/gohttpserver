@@ -20,16 +20,16 @@ import (
 // PUT / DELETE / MKCOL / MOVE / COPY / PROPPATCH / LOCK / UNLOCK per
 // RFC 4918. We extend it in three places:
 //
-//   1. handlePropfindRoot (webdav_quota.go) — top-level PROPFIND is
-//      self-handled so we can inject DAV:quota-used-bytes and
-//      DAV:quota-available-bytes (RFC 4331). All other PROPFIND
-//      requests pass through to upstream.
-//   2. quotaFileSystem (webdav_quota.go) — replaces the bare
-//      gdav.Dir so writes are intercepted for quota enforcement
-//      and byte-level accounting.
-//   3. preflightQuota check in ServeHTTP — fast rejection of
-//      over-quota PUTs based on Content-Length before delegating to
-//      upstream.
+//  1. handlePropfindRoot (webdav_quota.go) — top-level PROPFIND is
+//     self-handled so we can inject DAV:quota-used-bytes and
+//     DAV:quota-available-bytes (RFC 4331). All other PROPFIND
+//     requests pass through to upstream.
+//  2. quotaFileSystem (webdav_quota.go) — replaces the bare
+//     gdav.Dir so writes are intercepted for quota enforcement
+//     and byte-level accounting.
+//  3. preflightQuota check in ServeHTTP — fast rejection of
+//     over-quota PUTs based on Content-Length before delegating to
+//     upstream.
 type WebdavServer struct {
 	root     string
 	accounts *WebdavAccountState
@@ -161,12 +161,13 @@ func (s *WebdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// WebDAV locks actually prevent concurrent writes.
 	inner := gdav.Dir(accountRoot)
 	qfs := &quotaFileSystem{
-		inner:      inner,
-		state:      s.usage,
-		accountID:  acc.ID,
-		quotaBytes: acc.QuotaBytes,
-		root:       accountRoot,
-		readOnly:   acc.ReadOnly,
+		inner:              inner,
+		state:              s.usage,
+		accountID:          acc.ID,
+		quotaBytes:         acc.QuotaBytes,
+		root:               accountRoot,
+		readOnly:           acc.ReadOnly,
+		protectSystemFiles: acc.ProtectSystemFiles,
 	}
 	handler := &gdav.Handler{
 		Prefix:     "/dav/",
