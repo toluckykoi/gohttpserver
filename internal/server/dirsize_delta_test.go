@@ -96,9 +96,10 @@ func TestDirSizeLazyFallback(t *testing.T) {
 	}
 	os.WriteFile(filepath.Join(p, "f.bin"), make([]byte, 42), 0o644)
 
-	saved := dirInfoSize.size
-	dirInfoSize.size = nil
-	defer func() { dirInfoSize.size = saved }()
+	// Replace sharded cache with fresh empty one
+	saved := dirInfoSize
+	dirInfoSize = shardedDirSize{}
+	defer func() { dirInfoSize = saved }()
 
 	s := NewHTTPStaticServer(root, true)
 	if got := s.historyDirSize("x"); got != 42 {

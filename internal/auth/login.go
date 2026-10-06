@@ -1,10 +1,8 @@
 package auth
 
 import (
-	"crypto/sha256"
 	"database/sql"
 	"encoding/gob"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,7 +14,6 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"golang.org/x/crypto/bcrypt"
 
 	storedb "github.com/codeskyblue/gohttpserver/internal/store"
 	"github.com/codeskyblue/gohttpserver/internal/util"
@@ -61,7 +58,6 @@ type loginCredentials struct {
 // detect when the admin is still using the defaults and warn them.
 const (
 	defaultUsername         = "admin"
-	defaultPassword         = "admin"
 	maxLoginAttemptsEntries = 10000 // hard cap for loginAttempts map
 )
 
@@ -157,43 +153,17 @@ func LoginFromDB(path string) (*LoginState, error) {
 // defaultLoginCredentials returns admin/admin (bcrypt).
 func defaultLoginCredentials() *loginCredentials {
 	now := time.Now().Unix()
-	hash, err := bcrypt.GenerateFromPassword([]byte(defaultPassword), bcrypt.DefaultCost)
+	hash, err := Generate(defaultPassword)
 	if err != nil {
 		// bcrypt should never fail with a valid cost
 		log.Fatalf("login: failed to generate default password hash: %v", err)
 	}
 	return &loginCredentials{
 		Username:      defaultUsername,
-		PasswordSHA:   string(hash),
+		PasswordSHA:   hash,
 		CreatedAtUnix: now,
 		UpdatedAtUnix: now,
 	}
-}
-
-// isBcryptHash reports whether the stored hash is a bcrypt hash.
-// bcrypt hashes start with "$2a$", "$2b$", or "$2y$".
-func isBcryptHash(hash string) bool {
-	return strings.HasPrefix(hash, "$2a$") || strings.HasPrefix(hash, "$2b$") || strings.HasPrefix(hash, "$2y$")
-}
-
-// isLegacySHA256Hash reports whether the stored hash is a legacy SHA-256 hex digest.
-// SHA-256 hex digests are 64 characters long and contain only hex characters.
-func isLegacySHA256Hash(hash string) bool {
-	if len(hash) != 64 {
-		return false
-	}
-	for _, c := range hash {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-			return false
-		}
-	}
-	return true
-}
-
-// sha256Hex returns the hex-encoded SHA-256 of s (kept for legacy hash verification).
-func sha256Hex(s string) string {
-	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:])
 }
 
 // verify returns true iff username matches the stored username AND the
@@ -211,28 +181,17 @@ func (s *LoginState) verify(username, password string) bool {
 		return false
 	}
 
-	// Password check - support both bcrypt and legacy SHA-256
-	if isBcryptHash(s.creds.PasswordSHA) {
-		// New bcrypt hash
-		err := bcrypt.CompareHashAndPassword([]byte(s.creds.PasswordSHA), []byte(password))
-		return err == nil
-	} else if isLegacySHA256Hash(s.creds.PasswordSHA) {
-		// Legacy SHA-256 hash - verify and upgrade to bcrypt
-		expectedHash := sha256Hex(password)
-		if expectedHash == s.creds.PasswordSHA {
-			// Password matches legacy hash - upgrade to bcrypt in background
-			go s.upgradePasswordHash(password)
-			return true
-		}
-		return false
-	}
-
-	return false
+	// Password check using unified PasswordHash
+	ph := NewPasswordHashFromStored(s.creds.PasswordSHA)
+	return ph.Verify(password, func(newHash string) {
+		// Async upgrade to bcrypt
+		go s.upgradePasswordHash(newHash)
+	})
 }
 
 // upgradePasswordHash upgrades a legacy SHA-256 hash to bcrypt after successful login.
 // This runs in a goroutine to avoid blocking the login response.
-func (s *LoginState) upgradePasswordHash(password string) {
+func (s *LoginState) upgradePasswordHash(newHash string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -241,13 +200,7 @@ func (s *LoginState) upgradePasswordHash(password string) {
 		return
 	}
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		log.Printf("login: failed to upgrade password hash to bcrypt: %v", err)
-		return
-	}
-
-	s.creds.PasswordSHA = string(hash)
+	s.creds.PasswordSHA = newHash
 	s.creds.UpdatedAtUnix = time.Now().Unix()
 	if err := s.saveLocked(); err != nil {
 		log.Printf("login: failed to save upgraded password hash: %v", err)
@@ -267,14 +220,8 @@ func (s *LoginState) isDefaultPassword() bool {
 	if s.creds.Username != defaultUsername {
 		return false
 	}
-	// Check if password hash matches default password
-	if isBcryptHash(s.creds.PasswordSHA) {
-		err := bcrypt.CompareHashAndPassword([]byte(s.creds.PasswordSHA), []byte(defaultPassword))
-		return err == nil
-	} else if isLegacySHA256Hash(s.creds.PasswordSHA) {
-		return sha256Hex(defaultPassword) == s.creds.PasswordSHA
-	}
-	return false
+	ph := NewPasswordHashFromStored(s.creds.PasswordSHA)
+	return ph.IsDefaultPassword()
 }
 
 // changePassword verifies the old password, then atomically replaces the
@@ -282,22 +229,28 @@ func (s *LoginState) isDefaultPassword() bool {
 // fails. The lock is held across saveLogin so two concurrent changes
 // can't race and lose one of the writes.
 func (s *LoginState) changePassword(old, new string) error {
-	if !s.verify(s.credsUsername(), old) {
-		return errors.New("invalid current password")
-	}
-	if len(new) < 4 {
-		return errors.New("new password must be at least 4 characters")
-	}
-
-	// Generate bcrypt hash for new password
-	hash, err := bcrypt.GenerateFromPassword([]byte(new), bcrypt.DefaultCost)
-	if err != nil {
-		return errors.New("failed to hash password")
+	if err := ValidatePassword(new); err != nil {
+		return err
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.creds.PasswordSHA = string(hash)
+
+	if s.creds == nil {
+		return errors.New("login: no credentials loaded")
+	}
+
+	ph := NewPasswordHashFromStored(s.creds.PasswordSHA)
+	if !ph.Verify(old, nil) {
+		return errors.New("invalid current password")
+	}
+
+	newHash, err := Generate(new)
+	if err != nil {
+		return errors.New("failed to hash password")
+	}
+
+	s.creds.PasswordSHA = newHash
 	s.creds.UpdatedAtUnix = time.Now().Unix()
 	return s.saveLocked()
 }

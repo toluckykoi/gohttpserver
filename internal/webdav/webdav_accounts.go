@@ -2,10 +2,7 @@ package webdav
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -14,8 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/crypto/bcrypt"
-
+	"github.com/codeskyblue/gohttpserver/internal/auth"
 	storedb "github.com/codeskyblue/gohttpserver/internal/store"
 )
 
@@ -172,7 +168,17 @@ func generateWebdavID() (string, error) {
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
 	}
-	return "wd_" + hex.EncodeToString(b[:]), nil
+	// Use simple hex encoding without importing encoding/hex
+	const hexChars = "0123456789abcdef"
+	result := make([]byte, 7) // "wd_" + 6 chars
+	result[0] = 'w'
+	result[1] = 'd'
+	result[2] = '_'
+	for i := 0; i < 3; i++ {
+		result[3+i*2] = hexChars[b[i]>>4]
+		result[4+i*2] = hexChars[b[i]&0x0f]
+	}
+	return string(result), nil
 }
 
 // IsEnabled returns whether the WebDAV server should accept connections.
@@ -231,8 +237,8 @@ func (s *WebdavAccountState) CreateAccount(req CreateAccountRequest, loginUserna
 	if err != nil {
 		return WebdavAccount{}, "", fmt.Errorf("generate password: %w", err)
 	}
-	// Use bcrypt for password hashing
-	hash, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
+	// Use shared password hashing
+	hash, err := auth.Generate(pw)
 	if err != nil {
 		return WebdavAccount{}, "", fmt.Errorf("hash password: %w", err)
 	}
@@ -241,7 +247,7 @@ func (s *WebdavAccountState) CreateAccount(req CreateAccountRequest, loginUserna
 		ID:                 id,
 		Remark:             req.Remark,
 		Username:           loginUsername,
-		PasswordSHA:        string(hash),
+		PasswordSHA:        hash,
 		RootPath:           root,
 		ReadOnly:           req.ReadOnly,
 		ProtectSystemFiles: req.ProtectSystemFiles,
@@ -340,12 +346,12 @@ func (s *WebdavAccountState) ResetPassword(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Use bcrypt for password hashing
-	hash, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
+	// Use shared password hashing
+	hash, err := auth.Generate(pw)
 	if err != nil {
 		return "", err
 	}
-	s.data.Accounts[idx].PasswordSHA = string(hash)
+	s.data.Accounts[idx].PasswordSHA = hash
 	s.data.Accounts[idx].UpdatedAtUnix = time.Now().Unix()
 	if err := s.saveLocked(); err != nil {
 		return "", err
@@ -450,24 +456,15 @@ func (s *WebdavAccountState) VerifyWebdav(username, password string) (WebdavAcco
 			continue
 		}
 		userMatched++
-		// Check password based on hash format
-		if isBcryptHash(acc.PasswordSHA) {
-			// New bcrypt format
-			if err := bcrypt.CompareHashAndPassword([]byte(acc.PasswordSHA), []byte(password)); err == nil {
-				matched = acc
-				found = true
-				break
-			}
-		} else if isLegacySHA256Hash(acc.PasswordSHA) {
-			// Legacy SHA-256 format
-			givenHash := sha256Hex(password)
-			if subtle.ConstantTimeCompare([]byte(givenHash), []byte(acc.PasswordSHA)) == 1 {
-				matched = acc
-				found = true
-				// Upgrade to bcrypt in background
-				go s.upgradeWebdavPasswordHash(acc.ID, password)
-				break
-			}
+		// Use shared password hash verification
+		ph := auth.NewPasswordHashFromStored(acc.PasswordSHA)
+		if ph.Verify(password, func(newHash string) {
+			// Async upgrade to bcrypt
+			go s.upgradeWebdavPasswordHash(acc.ID, newHash)
+		}) {
+			matched = acc
+			found = true
+			break
 		}
 	}
 	if !found {
@@ -489,7 +486,7 @@ func (s *WebdavAccountState) VerifyWebdav(username, password string) (WebdavAcco
 
 // upgradeWebdavPasswordHash upgrades a legacy SHA-256 hash to bcrypt after
 // successful WebDAV login. Runs in a goroutine to avoid blocking the response.
-func (s *WebdavAccountState) upgradeWebdavPasswordHash(accountID, password string) {
+func (s *WebdavAccountState) upgradeWebdavPasswordHash(accountID, newHash string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -506,17 +503,12 @@ func (s *WebdavAccountState) upgradeWebdavPasswordHash(accountID, password strin
 	}
 
 	// Double-check we still have legacy hash (might have been changed concurrently)
-	if !isLegacySHA256Hash(s.data.Accounts[idx].PasswordSHA) {
+	ph := auth.NewPasswordHashFromStored(s.data.Accounts[idx].PasswordSHA)
+	if ph.Algorithm() != auth.HashLegacySHA256 {
 		return
 	}
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		log.Printf("webdav: failed to upgrade password hash to bcrypt for account %q: %v", accountID, err)
-		return
-	}
-
-	s.data.Accounts[idx].PasswordSHA = string(hash)
+	s.data.Accounts[idx].PasswordSHA = newHash
 	s.data.Accounts[idx].UpdatedAtUnix = time.Now().Unix()
 	if err := s.saveLocked(); err != nil {
 		log.Printf("webdav: failed to save upgraded password hash for account %q: %v", accountID, err)
@@ -610,30 +602,4 @@ func isProtectedFilename(name string) bool {
 	// (showHidden is false by default) and prevents accidentally
 	// exposing or clobbering configuration.
 	return strings.HasPrefix(name, ".")
-}
-
-// isBcryptHash reports whether the stored hash is a bcrypt hash.
-// bcrypt hashes start with "$2a$", "$2b$", or "$2y$".
-func isBcryptHash(hash string) bool {
-	return strings.HasPrefix(hash, "$2a$") || strings.HasPrefix(hash, "$2b$") || strings.HasPrefix(hash, "$2y$")
-}
-
-// isLegacySHA256Hash reports whether the stored hash is a legacy SHA-256 hex digest.
-// SHA-256 hex digests are 64 characters long and contain only hex characters.
-func isLegacySHA256Hash(hash string) bool {
-	if len(hash) != 64 {
-		return false
-	}
-	for _, c := range hash {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-			return false
-		}
-	}
-	return true
-}
-
-// sha256Hex returns the hex-encoded SHA-256 of s (kept for legacy hash verification).
-func sha256Hex(s string) string {
-	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:])
 }

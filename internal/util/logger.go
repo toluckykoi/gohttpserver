@@ -2,10 +2,64 @@ package util
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
+	"strings"
 	"sync/atomic"
 )
+
+// LogFormat 日志输出格式
+type LogFormat string
+
+const (
+	LogFormatJSON LogFormat = "json"
+	LogFormatText LogFormat = "text"
+)
+
+// LogLevel 日志级别
+type LogLevel string
+
+const (
+	LogLevelDebug LogLevel = "debug"
+	LogLevelInfo  LogLevel = "info"
+	LogLevelWarn  LogLevel = "warn"
+	LogLevelError LogLevel = "error"
+)
+
+// LoggerConfig 日志配置
+type LoggerConfig struct {
+	Level  LogLevel
+	Format LogFormat
+}
+
+// ParseLogLevel 解析日志级别字符串
+func ParseLogLevel(s string) (slog.Level, error) {
+	switch strings.ToLower(s) {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn", "warning":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return slog.LevelInfo, nil
+	}
+}
+
+// ParseLogFormat 解析日志格式字符串
+func ParseLogFormat(s string) (LogFormat, error) {
+	switch strings.ToLower(s) {
+	case "json":
+		return LogFormatJSON, nil
+	case "text":
+		return LogFormatText, nil
+	default:
+		return LogFormatJSON, nil
+	}
+}
 
 // RequestIDKey is the context key for request ID
 type RequestIDKey struct{}
@@ -30,6 +84,25 @@ func InitLogger(opts *slog.HandlerOptions) {
 	handler := slog.NewJSONHandler(os.Stdout, opts)
 	defaultLogger = slog.New(handler)
 	slog.SetDefault(defaultLogger)
+}
+
+// InitLoggerWithConfig 使用配置初始化日志器
+func InitLoggerWithConfig(cfg LoggerConfig) {
+	level, _ := ParseLogLevel(string(cfg.Level))
+	format, _ := ParseLogFormat(string(cfg.Format))
+
+	var handler slog.Handler
+	opts := &slog.HandlerOptions{Level: level}
+
+	if format == LogFormatText {
+		handler = slog.NewTextHandler(os.Stdout, opts)
+	} else {
+		handler = slog.NewJSONHandler(os.Stdout, opts)
+	}
+
+	defaultLogger = slog.New(handler)
+	slog.SetDefault(defaultLogger)
+	loggerInit.Store(true)
 }
 
 // Logger returns the default structured logger.
@@ -88,4 +161,10 @@ func LatencyAttr(ms int64) slog.Attr {
 // ErrorAttr creates a slog.Attr for error.
 func ErrorAttr(err error) slog.Attr {
 	return slog.String("error", err.Error())
+}
+
+// PrettyJSON 返回格式化的 JSON 字符串，用于调试
+func PrettyJSON(v any) string {
+	b, _ := json.MarshalIndent(v, "", "  ")
+	return string(b)
 }

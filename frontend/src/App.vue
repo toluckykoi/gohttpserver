@@ -200,17 +200,31 @@
         </footer>
       </main>
 
-      <QRCodeModal
-        v-model:visible="showQrCodeModal"
-        :file="currentQrFile"
-        :current-path="currentPath"
-      />
+      <Suspense>
+        <template #default>
+          <QRCodeModal
+            v-model:visible="showQrCodeModal"
+            :file="currentQrFile"
+            :current-path="currentPath"
+          />
+        </template>
+        <template #fallback>
+          <div class="modal-loading" aria-hidden="true">Loading…</div>
+        </template>
+      </Suspense>
 
-      <AdminPanel
-        v-if="showAdminPanel"
-        @close="showAdminPanel = false"
-        @username-changed="handleUsernameChanged"
-      />
+      <Suspense>
+        <template #default>
+          <AdminPanel
+            v-if="showAdminPanel"
+            @close="showAdminPanel = false"
+            @username-changed="handleUsernameChanged"
+          />
+        </template>
+        <template #fallback>
+          <div class="modal-loading" aria-hidden="true">Loading…</div>
+        </template>
+      </Suspense>
     </div>
   </el-config-provider>
 </template>
@@ -221,11 +235,9 @@ import { useFileStore } from './stores/fileStore'
 import { useTheme } from './composables/useTheme'
 import FileList from './components/FileList.vue'
 import Login from './views/Login.vue'
-import AdminPanel from './views/AdminPanel.vue'
 import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
-// Lazy-load QR modal: it's only shown when the user explicitly
-// taps the "view on phone" chip in the header. Pulling qrcode + its
-// canvas dependencies up front for that one tap would be wasteful.
+// Lazy-load modals/panels used directly in App.vue
+const AdminPanel = defineAsyncComponent(() => import('./views/AdminPanel.vue'))
 const QRCodeModal = defineAsyncComponent(() => import('./components/QrCodeModal.vue'))
 import type { FileItem } from './types'
 import {
@@ -998,6 +1010,16 @@ onBeforeUnmount(() => {
 
 @media (max-width: 360px) {
   .header-titles { display: none; }
+}
+
+/* Modal loading state for Suspense fallback */
+.modal-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  color: var(--el-text-color-placeholder);
+  font-size: 13px;
 }
 </style>
 

@@ -84,6 +84,9 @@ type Configure struct {
 		LocalPort  int    `yaml:"localPort"`
 		RemotePort int    `yaml:"remotePort"`
 	} `yaml:"frp"`
+	// Logging
+	LogLevel  string `yaml:"log-level"`  // debug, info, warn, error
+	LogFormat string `yaml:"log-format"` // json, text
 }
 
 var (
@@ -158,6 +161,8 @@ func parseFlags() error {
 	kingpin.Flag("login", "enable username/password login gate (independent of --auth-type). When enabled, upload/delete/edit are automatically enabled too. Default credentials: admin/admin.").BoolVar(&gcfg.Login)
 	kingpin.Flag("db", "path to the SQLite database file (default: ./gohttpserver.db in the working directory). Only used when --login is enabled.").StringVar(&gcfg.DB)
 	kingpin.Flag("session-ttl", "how long a logged-in session stays valid before requiring re-login (default 12h). Set to 0 for browser-session cookies (expire when the browser closes).").Default("12h").DurationVar(&gcfg.SessionTTL)
+	kingpin.Flag("log-level", "log level (debug, info, warn, error)").Default("info").StringVar(&gcfg.LogLevel)
+	kingpin.Flag("log-format", "log output format (json, text)").Default("json").StringVar(&gcfg.LogFormat)
 
 	kingpin.Parse() // first parse conf
 
@@ -258,15 +263,20 @@ func multiBasicAuth(auths []string) func(http.Handler) http.Handler {
 }
 
 func main() {
-	// Initialize structured logger early
-	util.InitLogger(&slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	})
-
+	// Parse flags first to get log config
 	if err := parseFlags(); err != nil {
+		// Use default logger for early errors
+		util.InitLogger(&slog.HandlerOptions{Level: slog.LevelInfo})
 		slog.Error("parse flags failed", util.ErrorAttr(err))
 		os.Exit(1)
 	}
+
+	// Initialize structured logger with configured level and format
+	util.InitLoggerWithConfig(util.LoggerConfig{
+		Level:  util.LogLevel(gcfg.LogLevel),
+		Format: util.LogFormat(gcfg.LogFormat),
+	})
+
 	// --login implies upload/delete/edit: an authenticated operator
 	// should be able to manage files without separately passing those
 	// flags. This runs after flag parsing, so passing --no-upload

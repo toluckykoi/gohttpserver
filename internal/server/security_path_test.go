@@ -155,9 +155,8 @@ func TestHistoryDirSizePopulatesSubtree(t *testing.T) {
 	mk("a/b/c/f3.bin", 30)
 
 	s := NewHTTPStaticServer(root, true)
-	dirInfoSize.mutex.Lock()
-	dirInfoSize.size = make(map[string]int64)
-	dirInfoSize.mutex.Unlock()
+	// Reset sharded cache
+	dirInfoSize = shardedDirSize{}
 
 	if got := s.historyDirSize("a"); got != 60 {
 		t.Errorf("historyDirSize(a) = %d, want 60", got)

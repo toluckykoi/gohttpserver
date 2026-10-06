@@ -79,9 +79,145 @@ type IndexFileItem struct {
 	Lower string
 }
 
-type Directory struct {
-	size  map[string]int64
-	mutex *sync.RWMutex
+// dirSizeShards 是分片数量，必须是 2 的幂次方以便用位掩码取模
+const dirSizeShards = 32
+
+// shardedDirSize 将目录大小缓存分片，减少并发争用。
+// key 为相对根目录的斜杠规范化路径（"." 表示根目录）。
+type shardedDirSize struct {
+	shards [dirSizeShards]dirSizeShard
+}
+
+type dirSizeShard struct {
+	mu   sync.RWMutex
+	data map[string]int64
+}
+
+func (s *shardedDirSize) shard(key string) *dirSizeShard {
+	// FNV-1a 哈希，速度快且分布均匀
+	h := uint32(2166136261)
+	for i := 0; i < len(key); i++ {
+		h ^= uint32(key[i])
+		h *= 16777619
+	}
+	return &s.shards[h&(dirSizeShards-1)]
+}
+
+// peek 读取缓存，不存在返回 (0, false)
+func (s *shardedDirSize) peek(key string) (int64, bool) {
+	sh := s.shard(key)
+	sh.mu.RLock()
+	v, ok := sh.data[key]
+	sh.mu.RUnlock()
+	return v, ok
+}
+
+// mergeIn 仅填充不存在的键（用于首次全量走目录时）
+func (s *shardedDirSize) mergeIn(totals map[string]int64) {
+	if len(totals) == 0 {
+		return
+	}
+	// 按分片分组写入，减少锁范围
+	byShard := make(map[*dirSizeShard]map[string]int64, dirSizeShards)
+	for k, v := range totals {
+		sh := s.shard(k)
+		if byShard[sh] == nil {
+			byShard[sh] = make(map[string]int64)
+		}
+		byShard[sh][k] = v
+	}
+	for sh, m := range byShard {
+		sh.mu.Lock()
+		if sh.data == nil {
+			sh.data = make(map[string]int64)
+		}
+		for k, v := range m {
+			if _, exists := sh.data[k]; !exists {
+				sh.data[k] = v
+			}
+		}
+		sh.mu.Unlock()
+	}
+}
+
+// addDelta 给 key 及其所有祖先目录加上 delta（key 为文件相对路径）
+func (s *shardedDirSize) addDelta(relFile string, delta int64) {
+	if delta == 0 {
+		return
+	}
+	dir := path.Dir(filepath.ToSlash(filepath.Clean(relFile)))
+	for {
+		sh := s.shard(dir)
+		sh.mu.Lock()
+		if sh.data != nil {
+			if _, ok := sh.data[dir]; ok {
+				sh.data[dir] += delta
+			}
+		}
+		sh.mu.Unlock()
+		if dir == "." || dir == "/" {
+			break
+		}
+		parent := path.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+}
+
+// invalidatePath 删除 key 及其所有祖先的缓存
+func (s *shardedDirSize) invalidatePath(relPath string) {
+	dir := filepath.ToSlash(filepath.Clean(relPath))
+	for {
+		sh := s.shard(dir)
+		sh.mu.Lock()
+		if sh.data != nil {
+			delete(sh.data, dir)
+		}
+		sh.mu.Unlock()
+		if dir == "." || dir == "/" || dir == "" {
+			break
+		}
+		parent := path.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+}
+
+// dropSubtree 删除 key 及其所有子孙缓存（递归删除后调用）
+func (s *shardedDirSize) dropSubtree(dir string) {
+	dir = filepath.ToSlash(filepath.Clean(dir))
+	prefix := dir + "/"
+	for _, sh := range &s.shards {
+		sh.mu.Lock()
+		if sh.data != nil {
+			for k := range sh.data {
+				if k == dir || strings.HasPrefix(k, prefix) {
+					delete(sh.data, k)
+				}
+			}
+		}
+		sh.mu.Unlock()
+	}
+}
+
+// removedSize 返回即将被删除的字节数，以及是否已知
+func (s *shardedDirSize) removedSize(realPath string, root string) (int64, bool) {
+	info, err := os.Stat(realPath)
+	if err != nil {
+		return 0, false
+	}
+	if !info.IsDir() {
+		return info.Size(), true
+	}
+	rel := filepath.ToSlash(filepath.Clean(strings.TrimPrefix(realPath, root)))
+	if rel == "" {
+		rel = "."
+	}
+	return s.peek(rel)
 }
 
 type HTTPStaticServer struct {
@@ -376,7 +512,7 @@ func (s *HTTPStaticServer) hDelete(w http.ResponseWriter, req *http.Request) {
 
 	// Remember how much is about to disappear so the cached directory sizes
 	// can be adjusted instead of being thrown away wholesale.
-	removed, sizeKnown := s.removedSize(realPath)
+	removed, sizeKnown := dirInfoSize.removedSize(realPath, s.Root)
 
 	err := os.RemoveAll(realPath)
 	if err != nil {
@@ -1739,7 +1875,7 @@ func (s *HTTPStaticServer) hJSONList(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-var dirInfoSize = Directory{size: make(map[string]int64), mutex: &sync.RWMutex{}}
+var dirInfoSize = shardedDirSize{}
 
 func (s *HTTPStaticServer) makeIndex() error {
 	var indexes = make([]IndexFileItem, 0)
@@ -1766,9 +1902,7 @@ func (s *HTTPStaticServer) makeIndex() error {
 	// size stays pinned to whatever the very first walk observed —
 	// uploads, deletes, and edits are invisible until the server
 	// restarts. Cheap to do: the cache rebuilds lazily on demand.
-	dirInfoSize.mutex.Lock()
-	dirInfoSize.size = make(map[string]int64)
-	dirInfoSize.mutex.Unlock()
+	dirInfoSize = shardedDirSize{}
 	return err
 }
 
@@ -1822,128 +1956,6 @@ func (s *HTTPStaticServer) historyDirSize(dir string) int64 {
 		return size
 	}
 	return totals[dir]
-}
-
-// peek returns the cached size for a slash-normalised directory key.
-func (d *Directory) peek(dir string) (int64, bool) {
-	d.mutex.RLock()
-	defer d.mutex.RUnlock()
-	size, ok := d.size[dir]
-	return size, ok
-}
-
-// mergeIn fills in cache entries that are not present yet, leaving already
-// known (and possibly delta-adjusted) values untouched.
-func (d *Directory) mergeIn(totals map[string]int64) {
-	if len(totals) == 0 {
-		return
-	}
-	d.mutex.Lock()
-	defer d.mutex.Unlock()
-	if d.size == nil {
-		d.size = make(map[string]int64)
-	}
-	for k, v := range totals {
-		if _, exists := d.size[k]; !exists {
-			d.size[k] = v
-		}
-	}
-}
-
-// invalidatePath drops the cached size for a path and all of its ancestors, so
-// the next read recomputes that chain from disk. Much cheaper than wiping the
-// whole cache (which forced a full re-walk of every directory in the share)
-// while still being exact, because a stale ancestor can never be trusted.
-func (d *Directory) invalidatePath(relPath string) {
-	dir := filepath.ToSlash(filepath.Clean(relPath))
-
-	d.mutex.Lock()
-	defer d.mutex.Unlock()
-	if d.size == nil {
-		return
-	}
-	for {
-		delete(d.size, dir)
-		if dir == "." || dir == "/" || dir == "" {
-			break
-		}
-		parent := path.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-}
-
-// removedSize reports how many bytes are about to be removed at realPath, and
-// whether that number is known. A regular file's size is exact; a directory's
-// size is only known if its entry is already cached (otherwise the caller must
-// invalidate the ancestor chain instead of applying a delta).
-func (s *HTTPStaticServer) removedSize(realPath string) (int64, bool) {
-	info, err := os.Stat(realPath)
-	if err != nil {
-		return 0, false
-	}
-	if !info.IsDir() {
-		return info.Size(), true
-	}
-	return dirInfoSize.peek(s.relFromRoot(realPath))
-}
-
-// invalidateDirSizeCache drops every cached size entry. Prefer the targeted
-// addDelta / dropSubtree / invalidatePath helpers on mutation paths; this is
-// the big hammer for cases where the whole tree may have changed.
-func invalidateDirSizeCache() {
-	dirInfoSize.mutex.Lock()
-	dirInfoSize.size = make(map[string]int64)
-	dirInfoSize.mutex.Unlock()
-}
-
-// addDelta adjusts the cached size of the directory holding relFile and
-// every cached ancestor by delta. Paths are slash-normalised paths
-// relative to Root ("." for the root itself). Ancestors that were never
-// read (absent from the cache) are skipped: historyDirSize computes them
-// lazily from disk on the next read, so the cache can only ever be
-// under-populated, never wrong.
-func (d *Directory) addDelta(relFile string, delta int64) {
-	if delta == 0 {
-		return
-	}
-	dir := path.Dir(filepath.ToSlash(filepath.Clean(relFile)))
-
-	d.mutex.Lock()
-	if d.size != nil {
-		for {
-			if _, ok := d.size[dir]; ok {
-				d.size[dir] += delta
-			}
-			if dir == "." || dir == "/" {
-				break
-			}
-			parent := path.Dir(dir)
-			if parent == dir {
-				break
-			}
-			dir = parent
-		}
-	}
-	d.mutex.Unlock()
-}
-
-// dropSubtree removes the cache entry for dir and every descendant entry.
-// Called after a recursive delete so the deleted subtree's sizes don't
-// linger and get re-used for a directory that no longer exists.
-func (d *Directory) dropSubtree(dir string) {
-	dir = filepath.ToSlash(filepath.Clean(dir))
-	prefix := dir + "/"
-
-	d.mutex.Lock()
-	for k := range d.size {
-		if k == dir || strings.HasPrefix(k, prefix) {
-			delete(d.size, k)
-		}
-	}
-	d.mutex.Unlock()
 }
 
 func (s *HTTPStaticServer) findIndex(text string) []IndexFileItem {
