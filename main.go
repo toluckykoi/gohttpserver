@@ -388,7 +388,9 @@ func main() {
 
 	// Parse local address for FRP auto-configuration
 	// When binding to 0.0.0.0 or ::, use util.GetLocalIP() to get the real LAN IP
-	// When binding to a specific IP, use that IP
+	// When binding to a specific IP, use that IP only if it is a 10/8 or
+	// 192.168/16 LAN address; otherwise fall back to auto-detection or
+	// 127.0.0.1 so the admin panel never shows an unreachable/non-LAN IP.
 	localIP := "127.0.0.1"
 	localPort := gcfg.Port
 	if gcfg.Addr != "" {
@@ -398,9 +400,11 @@ func main() {
 				if lanIP := util.GetLocalIP(); lanIP != "" {
 					localIP = lanIP
 				}
-			} else {
-				// Binding to a specific IP, use it directly
+			} else if parsed := net.ParseIP(host); parsed != nil && util.IsLANAddress(parsed) {
+				// Binding to a specific LAN IP, use it directly
 				localIP = host
+			} else if lanIP := util.GetLocalIP(); lanIP != "" {
+				localIP = lanIP
 			}
 			if p, err := strconv.Atoi(portStr); err == nil {
 				localPort = p
@@ -467,6 +471,17 @@ func main() {
 		// No config file settings, use database config
 		frpCfg = dbFRPCfg
 		frpEnabled = dbFRPEnabled
+		// LocalIP/LocalPort are user-editable in the admin panel and
+		// persisted to the DB. Only auto-fill from the program's
+		// listening address when the DB has no value yet (first run
+		// or operator never set one) — once the operator has entered a
+		// value, respect it across restarts so manual edits stick.
+		if frpCfg.LocalIP == "" || frpCfg.LocalIP == "127.0.0.1" {
+			frpCfg.LocalIP = localIP
+		}
+		if frpCfg.LocalPort == 0 {
+			frpCfg.LocalPort = localPort
+		}
 	}
 
 	// Apply FRP config if available

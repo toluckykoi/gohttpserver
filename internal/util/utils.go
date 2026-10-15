@@ -22,36 +22,35 @@ func SanitizeLogInput(s string) string {
 	}, s)
 }
 
-// GetLocalIP returns the non loopback local IP of the host
+// GetLocalIP returns the non loopback local IP of the host.
+//
+// Only returns a private LAN address in 10.0.0.0/8 or 192.168.0.0/16 —
+// the two ranges a browser on the same office/home network can reach as a
+// "share this URL" address. Other interfaces (CGNAT/Tailscale 100.64/10,
+// link-local, VPN, public) are ignored; if no qualifying address is
+// found, "" is returned so the caller (admin panel Local IP) shows the
+// fallback 127.0.0.1 rather than an unreachable address.
 func GetLocalIP() string {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
 		return ""
 	}
-	// Prefer a private LAN address over anything else: the first non-loopback
-	// IPv4 on a typical developer/host machine is often a Tailscale/CGNAT
-	// (100.64.0.0/10) or VPN address, which is useless as the "share this URL
-	// with your colleagues" address the admin panel shows.
-	fallback := ""
 	for _, address := range addrs {
 		ipnet, ok := address.(*net.IPNet)
 		if !ok || ipnet.IP.IsLoopback() || ipnet.IP.To4() == nil {
 			continue
 		}
-		if isLANAddress(ipnet.IP) {
+		if IsLANAddress(ipnet.IP) {
 			return ipnet.IP.String()
 		}
-		if fallback == "" {
-			fallback = ipnet.IP.String()
-		}
 	}
-	return fallback
+	return ""
 }
 
-// isLANAddress reports whether ip is in one of the LAN/CGNAT ranges a browser
-// on the same network could actually reach.
-func isLANAddress(ip net.IP) bool {
-	for _, cidr := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"} {
+// IsLANAddress reports whether ip is in one of the LAN ranges the admin
+// panel considers a shareable "Local IP": 10/8 and 192.168/16 only.
+func IsLANAddress(ip net.IP) bool {
+	for _, cidr := range []string{"10.0.0.0/8", "192.168.0.0/16"} {
 		if _, network, err := net.ParseCIDR(cidr); err == nil && network.Contains(ip) {
 			return true
 		}

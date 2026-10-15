@@ -60,7 +60,6 @@
               v-model="form.authToken"
               :type="passwordVisible ? 'text' : 'password'"
               :placeholder="authTokenPlaceholder"
-              clearable
             >
               <template #suffix>
                 <el-icon class="token-eye" @click="handleToggleTokenVisible">
@@ -105,34 +104,28 @@
           </el-form-item>
         </div>
 
-        <!-- Local settings (auto-detected, read-only) -->
+        <!-- Local settings (auto-detected, editable) -->
         <div class="form-group">
-          <h3 class="group-title">Local Service (Auto-detected)</h3>
+          <h3 class="group-title">Local Service (Auto-detected, editable)</h3>
           <el-form-item label="Local IP">
             <el-input
-              :model-value="form.localIP"
-              readonly
-              disabled
+              v-model="form.localIP"
+              placeholder="127.0.0.1"
             >
               <template #append>
-                <el-tooltip content="Automatically obtained from program startup configuration" placement="top">
+                <el-tooltip content="Auto-detected from program startup configuration; editable if you need a different address" placement="top">
                   <el-icon><InfoFilled /></el-icon>
                 </el-tooltip>
               </template>
             </el-input>
           </el-form-item>
           <el-form-item label="Local Port">
-            <el-input
-              :model-value="form.localPort"
-              readonly
-              disabled
-            >
-              <template #append>
-                <el-tooltip content="Automatically obtained from program startup configuration" placement="top">
-                  <el-icon><InfoFilled /></el-icon>
-                </el-tooltip>
-              </template>
-            </el-input>
+            <el-input-number
+              v-model="form.localPort"
+              :min="1"
+              :max="65535"
+              controls-position="right"
+            />
           </el-form-item>
         </div>
 

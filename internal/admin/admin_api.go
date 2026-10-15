@@ -513,16 +513,25 @@ func (api *API) handleFRPUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		RemotePort:           req.RemotePort,
 		ProxyProtocolVersion: req.ProxyProtocolVersion,
 	}
-	// Auto-fill local address from program's listening address if not specified
-	if cfg.LocalIP == "" || cfg.LocalIP == "127.0.0.1" {
-		if api.LocalAddr != "" {
-			if host, portStr, err := net.SplitHostPort(api.LocalAddr); err == nil {
-				if host != "" && host != "0.0.0.0" && host != "::" {
+	// LocalIP/LocalPort are auto-detected defaults but user-editable:
+	// only fill from the program's listening address when the operator
+	// left them at the default (empty / 127.0.0.1 / port 0), so a
+	// manual edit is respected and persisted. Only 10/8 and 192.168/16
+	// LAN addresses are kept when auto-filling; anything else falls back
+	// to 127.0.0.1 so the panel never shows an unreachable/non-LAN IP.
+	if (cfg.LocalIP == "" || cfg.LocalIP == "127.0.0.1") && api.LocalAddr != "" {
+		if host, portStr, err := net.SplitHostPort(api.LocalAddr); err == nil {
+			if host != "" && host != "0.0.0.0" && host != "::" {
+				if parsed := net.ParseIP(host); parsed != nil && util.IsLANAddress(parsed) {
 					cfg.LocalIP = host
 				} else if lanIP := util.GetLocalIP(); lanIP != "" {
 					cfg.LocalIP = lanIP
 				}
-				if p, err := strconv.Atoi(portStr); err == nil && cfg.LocalPort == 0 {
+			} else if lanIP := util.GetLocalIP(); lanIP != "" {
+				cfg.LocalIP = lanIP
+			}
+			if cfg.LocalPort == 0 {
+				if p, err := strconv.Atoi(portStr); err == nil {
 					cfg.LocalPort = p
 				}
 			}
