@@ -1,21 +1,42 @@
 package util
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
-// SecurityHeaders 给每个响应加上安全响应头；csp 由文件服务包提供，是匹配内嵌前端的唯一来源。
+// CSPNonceKey 是每请求 CSP nonce 在 context 中的键。
+type CSPNonceKey struct{}
+
+// CSPNonceFromContext 返回本请求的 CSP nonce；未设置时返回空串。
+func CSPNonceFromContext(ctx context.Context) string {
+	if v := ctx.Value(CSPNonceKey{}); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// SecurityHeaders 给每个响应加上安全响应头。csp 中的 nonce 占位符（'nonce-…'）
+// 会在每请求替换为随机值，并同时写入 context 供内嵌页面（renderHTML）使用。
+// csp 为空表示不下发 CSP。
 func SecurityHeaders(csp string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			h := w.Header()
-			h.Set("Content-Security-Policy", csp)
+			if csp != "" {
+				nonce := cspNonce()
+				h.Set("Content-Security-Policy", strings.ReplaceAll(csp, "{CSP_NONCE}", nonce))
+				r = r.WithContext(context.WithValue(r.Context(), CSPNonceKey{}, nonce))
+			}
 			h.Set("X-Content-Type-Options", "nosniff")
 			h.Set("X-Frame-Options", "DENY")
 			h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
@@ -27,6 +48,16 @@ func SecurityHeaders(csp string) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// cspNonce 生成 128 位随机 nonce（base64 标准编码可安全用于 CSP 指令）。
+func cspNonce() string {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		// crypto/rand 失败几乎不可能；退化为时间戳保证非空且每请求不同。
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return hex.EncodeToString(buf[:])
 }
 
 // RequestIDMiddleware 为每个请求生成唯一 ID，写入 context 与 X-Request-ID 响应头。

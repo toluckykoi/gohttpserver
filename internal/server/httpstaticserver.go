@@ -21,14 +21,14 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"regexp"
 
 	"github.com/go-yaml/yaml"
 	"github.com/gorilla/mux"
@@ -43,7 +43,13 @@ import (
 const YAMLCONF = ".ghs.yml"
 
 // ContentSecurityPolicy 由最外层安全响应头中间件应用于每个响应。
-const ContentSecurityPolicy = "default-src 'self'; script-src 'self' 'unsafe-inline' https://www.google-analytics.com https://www.googletagmanager.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://www.google-analytics.com https://www.googletagmanager.com; font-src 'self' data:; media-src 'self'; connect-src 'self' https://www.google-analytics.com https://www.googletagmanager.com; form-action 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'"
+// script-src 不含 'unsafe-inline'：内嵌前端全部为外链脚本，两个内嵌页面
+// （ipa-install / video-player）的脚本改由 per-request nonce 授权（见 renderHTML）。
+const ContentSecurityPolicy = "default-src 'self'; script-src 'self' 'nonce-{CSP_NONCE}' https://www.google-analytics.com https://www.googletagmanager.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://www.google-analytics.com https://www.googletagmanager.com; font-src 'self' data:; media-src 'self'; connect-src 'self' https://www.google-analytics.com https://www.googletagmanager.com; form-action 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'"
+
+// cspNoncePlaceholder 是 CSP 中的 nonce 占位符：SecurityHeaders 中间件在每请求
+// 生成随机 nonce 后替换它，并把同一个 nonce 通过 context 传给 renderHTML。
+const cspNoncePlaceholder = "{CSP_NONCE}"
 
 // maxUploadSize 限制单个上传文件；maxUploadBytes 限制整个 multipart 请求体，使超限请求在解析并缓冲到 os.TempDir() 之前就被拒绝。
 const maxUploadSize int64 = 10 * 1024 * 1024 * 1024
@@ -173,7 +179,9 @@ func (s *shardedDirSize) invalidatePath(relPath string) {
 func (s *shardedDirSize) dropSubtree(dir string) {
 	dir = filepath.ToSlash(filepath.Clean(dir))
 	prefix := dir + "/"
-	for _, sh := range &s.shards {
+	// 按索引遍历：for _, sh := range &s.shards 会值拷贝含 sync.RWMutex 的分片（go vet 报错）。
+	for i := range s.shards {
+		sh := &s.shards[i]
 		sh.mu.Lock()
 		if sh.data != nil {
 			for k := range sh.data {
@@ -391,16 +399,54 @@ func (s *HTTPStaticServer) hIndex(w http.ResponseWriter, r *http.Request) {
 		w.Write(data)
 	} else {
 		// SECURITY: 访问控制文件绝不通过 HTTP 提供——其内容包含所有 users[].token，
-		// 正是 canUploadByToken 接受的凭据。
-		if filepath.Base(path) == YAMLCONF {
+		// 正是 canUploadByToken 接受的凭据。比较必须大小写不敏感并覆盖 8.3 短名，
+		// 否则 Windows 上 /.GHS.YML 或 /GHS~1.YML 能读出全部 token。
+		if isAccessConfName(filepath.Base(path)) {
 			http.Error(w, "Not found", http.StatusNotFound)
 			return
 		}
-		if r.FormValue("download") == "true" {
+		// SECURITY: accessTables 的 allow:false 在列表接口隐藏文件，直接下载也必须同样拒绝，
+		// 否则配置的“隐藏”形同虚设（曾可经 GET、?op=info 与打包下载绕过）。
+		if !s.canAccessPath(r, realPath, filepath.Base(path)) {
+			http.Error(w, "Not found", http.StatusNotFound)
+			return
+		}
+		// SECURITY: 上传的 HTML/SVG 同源执行可借 'self' 脚本发起到管理 API 的已认证请求
+		// （CSP nonce 只保护服务端自己的内嵌页面）。强制 attachment 使浏览器下载
+		// 而非渲染，封死存储型 XSS → 会话劫持链。
+		if forcesAttachment(realPath) {
+			w.Header().Set("Content-Disposition", downloadDisposition(filepath.Base(path)))
+		} else if r.FormValue("download") == "true" {
 			w.Header().Set("Content-Disposition", downloadDisposition(filepath.Base(path)))
 		}
 		http.ServeFile(w, r, realPath)
 	}
+}
+
+// riskyInlineExts 是同源渲染时会执行内联脚本/事件的扩展名。
+var riskyInlineExts = map[string]bool{
+	".html": true, ".htm": true, ".xhtml": true,
+	".svg": true, ".svgz": true,
+	".xml": true, ".xsl": true, ".xslt": true,
+	".swf": true,
+}
+
+// forcesAttachment 判断该路径是否必须以附件形式下发（按扩展名，大小写不敏感）。
+func forcesAttachment(realPath string) bool {
+	ext := strings.ToLower(filepath.Ext(realPath))
+	return riskyInlineExts[ext]
+}
+
+// canAccessPath 按目标路径所在目录的 .ghs.yml 判断请求者能否访问该文件名。
+// 供列表之外的全部文件读取通道（raw 下载、info、打包）统一调用。
+func (s *HTTPStaticServer) canAccessPath(r *http.Request, realPath, baseName string) bool {
+	dir := filepath.Dir(realPath)
+	if !s.insideRoot(dir) {
+		// Root 之外无配置可读；保守起见拒绝。
+		return false
+	}
+	ac := s.readAccessConf(dir)
+	return ac.canAccess(baseName)
 }
 
 // downloadDisposition 构造 RFC 6266 的 Content-Disposition：ASCII 回退名加 RFC 5987 的
@@ -437,7 +483,7 @@ func (s *HTTPStaticServer) hDelete(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// 先记下即将消失的字节数，以便按增量修正目录大小缓存，而不是整体丢弃。
-	removed, sizeKnown := dirInfoSize.removedSize(realPath, s.Root)
+	removed, sizeKnown := dirInfoSize().removedSize(realPath, s.Root)
 
 	err := os.RemoveAll(realPath)
 	if err != nil {
@@ -448,12 +494,12 @@ func (s *HTTPStaticServer) hDelete(w http.ResponseWriter, req *http.Request) {
 	}
 	rel := s.relFromRoot(realPath)
 	if sizeKnown {
-		dirInfoSize.addDelta(rel, -removed)
+		dirInfoSize().addDelta(rel, -removed)
 	}
 	// 删除子树自身条目；若其大小原本未知，则连祖先一起失效，下次读取时从磁盘重算。
-	dirInfoSize.dropSubtree(rel)
+	dirInfoSize().dropSubtree(rel)
 	if !sizeKnown {
-		dirInfoSize.invalidatePath(rel)
+		dirInfoSize().invalidatePath(rel)
 	}
 	s.invalidateAccessConf()
 	w.Write([]byte("Success"))
@@ -466,15 +512,16 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 		return
 	}
 
+	// SECURITY: 必须在鉴权之前限制请求体——canUpload 内部的 r.FormValue("token")
+	// 会触发 multipart 全量解析（超 32 MiB 的部分写入 os.TempDir()），
+	// 限制放在解析之后无法阻止未认证客户端占满临时文件系统。
+	req.Body = http.MaxBytesReader(w, req.Body, maxUploadBytes)
+
 	auth := s.readAccessConf(dirpath)
 	if !auth.canUpload(req) {
 		http.Error(w, "Upload forbidden", http.StatusForbidden)
 		return
 	}
-
-	// SECURITY: 必须在 multipart 解析前限制请求体——解析会把超过 32 MiB 的部分
-	// 写入 os.TempDir()，解析后再检查无法阻止客户端占满临时文件系统。
-	req.Body = http.MaxBytesReader(w, req.Body, maxUploadBytes)
 
 	file, header, err := req.FormFile("file")
 	if req.MultipartForm != nil {
@@ -572,7 +619,7 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
 
 	// 按精确增量修正目录大小缓存，而不是丢弃整个缓存。
-	dirInfoSize.addDelta(s.relFromRoot(dstPath), written-oldSize)
+	dirInfoSize().addDelta(s.relFromRoot(dstPath), written-oldSize)
 	s.invalidateAccessConf()
 
 	if req.FormValue("unzip") == "true" {
@@ -598,7 +645,7 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 			os.Remove(dstPath)
 		}
 		// 解压写入了大量文件，此目录及其祖先的缓存已失效：丢掉整条链，下次列表时重新遍历。
-		dirInfoSize.invalidatePath(s.relFromRoot(dirpath))
+		dirInfoSize().invalidatePath(s.relFromRoot(dirpath))
 		message := "success"
 		if err != nil {
 			message = err.Error()
@@ -676,8 +723,8 @@ func (s *HTTPStaticServer) hEdit(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "Invalid path", http.StatusBadRequest)
 		return
 	}
-	// 访问控制文件不可通过 HTTP 写入。
-	if filepath.Base(dstPath) == YAMLCONF {
+	// 访问控制文件不可通过 HTTP 写入（大小写不敏感 + 8.3 短名，见 isAccessConfName）。
+	if isAccessConfName(filepath.Base(dstPath)) {
 		http.Error(w, "Not editable", http.StatusForbidden)
 		return
 	}
@@ -741,7 +788,7 @@ func (s *HTTPStaticServer) hEdit(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	dirInfoSize.addDelta(s.relFromRoot(dstPath), written-oldSize)
+	dirInfoSize().addDelta(s.relFromRoot(dstPath), written-oldSize)
 	s.invalidateAccessConf()
 
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
@@ -918,7 +965,7 @@ func (s *HTTPStaticServer) hFetch(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	dirInfoSize.addDelta(s.relFromRoot(dstPath), written-oldSize)
+	dirInfoSize().addDelta(s.relFromRoot(dstPath), written-oldSize)
 	s.invalidateAccessConf()
 
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
@@ -1005,6 +1052,11 @@ func (s *HTTPStaticServer) hInfo(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// SECURITY: accessTables 隐藏的文件同样不能暴露元数据与哈希。
+	if !fi.IsDir() && !s.canAccessPath(r, relPath, fi.Name()) {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
 	fji := &FileJSONInfo{
 		Name:    fi.Name(),
 		Size:    fi.Size(),
@@ -1050,11 +1102,37 @@ func (s *HTTPStaticServer) hZip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Stat 先行：根目录无法 lstat 时 filepath.Walk 会向回调传入 nil 的 os.FileInfo。
-	if _, err := os.Stat(target); err != nil {
+	fi, err := os.Stat(target)
+	if err != nil {
 		http.Error(w, "Not found", http.StatusNotFound)
 		return
 	}
-	zipx.CompressToZip(w, target)
+	// SECURITY: accessTables 隐藏的文件不能经单文件打包绕过导出。
+	if !fi.IsDir() && !s.canAccessPath(r, target, fi.Name()) {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+	s.compressToZipFiltered(w, r, target)
+}
+
+// compressToZipFiltered 在 CompressToZip 的基础上按访问规则逐文件过滤：
+// 被各目录 .ghs.yml 的 accessTables 拒绝的文件不写入归档。
+func (s *HTTPStaticServer) compressToZipFiltered(w http.ResponseWriter, r *http.Request, rootDir string) {
+	filter := func(path string, fi os.FileInfo) bool {
+		if fi.Name() == YAMLCONF || isAccessConfName(fi.Name()) {
+			return false
+		}
+		if fi.IsDir() {
+			return true
+		}
+		dir := filepath.Dir(path)
+		if !s.insideRoot(dir) {
+			return false
+		}
+		ac := s.readAccessConf(dir)
+		return ac.canAccess(fi.Name())
+	}
+	zipx.CompressToZipFiltered(w, rootDir, filter)
 }
 
 // zipMultiRequest 是前端多选下载提交的请求体：URL 解码后的路径，每个可为文件或目录。
@@ -1102,6 +1180,12 @@ func (s *HTTPStaticServer) hZipMulti(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		// SECURITY: accessTables 隐藏的条目（或其父目录配置了拒绝规则）不得经打包下载导出。
+		if !info.IsDir() && !s.canAccessPath(r, realPath, entryName) {
+			log.Printf("zip-multi access denied: %q", util.SanitizeLogInput(realPath))
+			continue
+		}
+
 		if info.IsDir() {
 			dirName := entryName + "/"
 			walkErr := filepath.Walk(realPath, func(path string, fi os.FileInfo, err error) error {
@@ -1110,8 +1194,17 @@ func (s *HTTPStaticServer) hZipMulti(w http.ResponseWriter, r *http.Request) {
 					log.Printf("zip-multi walk skip %q: %v", util.SanitizeLogInput(path), err)
 					return nil
 				}
-				if fi.Name() == YAMLCONF {
+				if fi.Name() == YAMLCONF || isAccessConfName(fi.Name()) {
 					return nil
+				}
+				// 逐文件执行访问控制：目录级规则由 readAccessConf 沿父链合并而来。
+				if !fi.IsDir() {
+					if dir := filepath.Dir(path); s.insideRoot(dir) {
+						ac := s.readAccessConf(dir)
+						if !ac.canAccess(fi.Name()) {
+							return nil
+						}
+					}
 				}
 				rel, relErr := filepath.Rel(realPath, path)
 				if relErr != nil {
@@ -1223,7 +1316,7 @@ func (s *HTTPStaticServer) hIpaLink(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html")
 	log.Println("PlistURL:", plistUrl)
-	renderHTML(w, "ipa-install", ipaInstallHTML, map[string]string{
+	renderHTML(w, r, "ipa-install", ipaInstallHTML, map[string]string{
 		"Name":      filepath.Base(path),
 		"PlistLink": plistUrl,
 	})
@@ -1575,7 +1668,23 @@ func (s *HTTPStaticServer) hJSONList(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-var dirInfoSize = shardedDirSize{}
+// dirInfoSizeRef 以原子指针持有目录大小缓存：makeIndex 需要整体替换缓存，
+// 裸变量赋值与并发请求的 peek/mergeIn 存在数据竞争（-race 实证），指针替换可保证
+// 读者原子地看到完整的新旧缓存之一。
+var dirInfoSizeRef atomic.Pointer[shardedDirSize]
+
+func dirInfoSize() *shardedDirSize {
+	return dirInfoSizeRef.Load()
+}
+
+func init() {
+	dirInfoSizeRef.Store(&shardedDirSize{})
+}
+
+// resetDirInfoSize 用全新空缓存替换当前缓存。
+func resetDirInfoSize() {
+	dirInfoSizeRef.Store(&shardedDirSize{})
+}
 
 func (s *HTTPStaticServer) makeIndex() error {
 	var indexes = make([]IndexFileItem, 0)
@@ -1595,7 +1704,7 @@ func (s *HTTPStaticServer) makeIndex() error {
 	})
 	// 原子发布快照，使并发的 findIndex 读者不会看到写了一半的切片头；同时清空大小缓存，下次读取时重算。
 	s.indexes.Store(&indexes)
-	dirInfoSize = shardedDirSize{}
+	resetDirInfoSize()
 	return err
 }
 
@@ -1603,7 +1712,10 @@ func (s *HTTPStaticServer) historyDirSize(dir string) int64 {
 	// 统一为斜杠，使缓存键与各失效路径写入的键一致。
 	dir = filepath.ToSlash(filepath.Clean(dir))
 
-	if size, ok := dirInfoSize.peek(dir); ok {
+	// 整个读-算-写过程固定在同一份缓存快照上：makeIndex 中途替换指针也不会让
+	// totals 写进已被弃用的实例（最坏情况是这次遍历结果作废，下次重算）。
+	cache := dirInfoSize()
+	if size, ok := cache.peek(dir); ok {
 		return size
 	}
 
@@ -1636,8 +1748,8 @@ func (s *HTTPStaticServer) historyDirSize(dir string) int64 {
 		return nil
 	})
 
-	dirInfoSize.mergeIn(totals)
-	if size, ok := dirInfoSize.peek(dir); ok {
+	cache.mergeIn(totals)
+	if size, ok := cache.peek(dir); ok {
 		return size
 	}
 	return totals[dir]
@@ -1768,7 +1880,7 @@ const ipaInstallHTML = `<!DOCTYPE html>
   <title>[[.Name]] install</title>
   <meta http-equiv="Content-Type" content="text/HTML; charset=utf-8">
   <meta content="target-densitydpi=device-dpi,width=640" name="viewport" id="viewport">
-  <script>
+  <script nonce="[[.CSPNonce]]">
     function showById(name) {
       document.getElementById(name).style.display = 'block';
     }
@@ -1804,7 +1916,7 @@ const ipaInstallHTML = `<!DOCTYPE html>
   <div id="android" style="display:none">
     This is IPA install page, not for android.
   </div>
-  <script>checkBrowerAndDownload();</script>
+  <script nonce="[[.CSPNonce]]">checkBrowerAndDownload();</script>
 </body>
 </html>`
 
@@ -1828,7 +1940,7 @@ const videoPlayerHTML = `<!DOCTYPE html>
             Your browser does not support the video tag.
         </video>
     </div>
-    <script>
+    <script nonce="[[.CSPNonce]]">
         document.addEventListener('DOMContentLoaded', function() {
             document.getElementById('videoPlayer').focus();
         });
@@ -1843,7 +1955,7 @@ var funcMap = template.FuncMap{
 // _tmpls 按名称缓存已编译的 HTML 模板；用 sync.Map 因为 renderHTML 会被多个处理器协程并发调用。
 var _tmpls sync.Map
 
-func renderHTML(w http.ResponseWriter, name, content string, v any) {
+func renderHTML(w http.ResponseWriter, r *http.Request, name, content string, v any) {
 	var t *template.Template
 	if v, ok := _tmpls.Load(name); ok {
 		t = v.(*template.Template)
@@ -1851,6 +1963,17 @@ func renderHTML(w http.ResponseWriter, name, content string, v any) {
 		t = template.Must(template.New(name).Funcs(funcMap).Delims("[[", "]]").Parse(content))
 		actual, _ := _tmpls.LoadOrStore(name, t)
 		t = actual.(*template.Template)
+	}
+	// 把当前请求的 CSP nonce 注入数据（模板里的 <script nonce="[[.CSPNonce]]">），
+	// 使内联脚本在去 unsafe-inline 的 CSP 下仍能执行。
+	if m, ok := v.(map[string]any); ok {
+		if _, exists := m["CSPNonce"]; !exists {
+			m["CSPNonce"] = util.CSPNonceFromContext(r.Context())
+		}
+	} else if m, ok := v.(map[string]string); ok {
+		if _, exists := m["CSPNonce"]; !exists {
+			m["CSPNonce"] = util.CSPNonceFromContext(r.Context())
+		}
 	}
 	t.Execute(w, v)
 }
@@ -1860,10 +1983,54 @@ func checkFilename(name string) error {
 		return errors.New("name should not contain \\/:*<>|")
 	}
 	// SECURITY: .ghs.yml 不允许通过 HTTP 写入——否则仅有上传权限的用户可为自己授予 delete/edit。
-	if name == YAMLCONF {
+	if isAccessConfName(name) {
 		return errors.New("reserved file name")
 	}
+	// 拒绝尾部点与空格：Windows 落盘时会剥离，".ghs.yml." 会变成 ".ghs.yml"。
+	if name != strings.TrimRight(name, ". ") {
+		return errors.New("name should not end with dot or space")
+	}
 	return nil
+}
+
+// isAccessConfName 判断 name 是否指向访问控制文件。必须大小写不敏感（Windows 文件系统
+// 不区分大小写，".GHS.YML" 与 ".ghs.yml" 是同一个文件），并识别 Windows 8.3 短名
+// （".ghs.yml" 的短名形如 "GHS~1.YML"，曾可借此读取甚至改写配置实现提权）。
+func isAccessConfName(name string) bool {
+	if strings.EqualFold(name, YAMLCONF) {
+		return true
+	}
+	if runtime.GOOS == "windows" {
+		base := strings.ToUpper(name)
+		// 8.3 短名模式：<不超过 8 位的不含点前缀>~<单数字>.<3 位扩展名>
+		if idx := strings.IndexByte(base, '~'); idx > 0 && idx <= 7 && len(base) <= 12 {
+			rest := base[idx+1:]
+			dot := strings.IndexByte(rest, '.')
+			if dot == 1 && rest[0] >= '0' && rest[0] <= '9' {
+				// 短名也可能带 ~2/~3 等序号；首位 ~<digit> 已覆盖常见形态，
+				// 再放宽到 ~<digits> 以防多文件冲突时生成 ~10。
+				if allDigits(rest[:dot]) {
+					ext := rest[dot+1:]
+					if strings.EqualFold(ext, "yml") || strings.EqualFold(ext, "yaml") {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // isUnderRoot 在双方共同 Clean 后判断 path 是 root 本身还是其子孙——破坏性文件操作前的纵深防御。
@@ -1886,9 +2053,12 @@ func checkPathSegment(seg string) error {
 	if strings.ContainsAny(seg, "\\:*<>|\"\x00") {
 		return errors.New("path segment should not contain \\:*<>|\"")
 	}
-	// 同 checkFilename：.ghs.yml 绝不允许通过 HTTP 写入。
-	if seg == YAMLCONF {
+	// 同 checkFilename：.ghs.yml 绝不允许通过 HTTP 写入（含大小写与尾点变体）。
+	if isAccessConfName(seg) {
 		return errors.New("reserved file name")
+	}
+	if seg != strings.TrimRight(seg, ". ") {
+		return errors.New("path segment should not end with dot or space")
 	}
 	return nil
 }
@@ -1911,7 +2081,7 @@ func (s *HTTPStaticServer) hVideoPlayer(w http.ResponseWriter, r *http.Request) 
 	}
 	videoURL := fmt.Sprintf("%s://%s/%s", scheme, r.Host, path)
 
-	renderHTML(w, "video-player", videoPlayerHTML, map[string]any{
+	renderHTML(w, r, "video-player", videoPlayerHTML, map[string]any{
 		"FileName":  fileName,
 		"VideoURL":  videoURL,
 		"Extension": extension,

@@ -9,14 +9,13 @@
   <meta name="color-scheme" content="light dark">
   <meta name="description" content="GoHTTP File Server - Browse, upload, and manage files over HTTP">
   <title>Go HTTP File Server</title>
-  <!-- media="print" + onload 让字体异步加载，避免阻塞渲染 -->
+  <!-- 字体异步加载：不再用内联 onload（与 CSP 去 unsafe-inline 兼容），
+       改为媒体查询锁屏 + noscript 回退。 -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link
     rel="stylesheet"
     href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
-    media="print"
-    onload="this.media='all'"
   >
   <noscript>
     <link

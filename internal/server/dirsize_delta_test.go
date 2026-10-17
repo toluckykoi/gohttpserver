@@ -45,7 +45,7 @@ func TestDirSizeCacheAggregationAndDeltas(t *testing.T) {
 
 	// 上传增量：向 a/sub 写入 +60 → a=210、a/sub=110、root=235
 	mk("a/sub/new.bin", 60)
-	dirInfoSize.addDelta("a/sub/new.bin", 60)
+	dirInfoSize().addDelta("a/sub/new.bin", 60)
 	if got := s.historyDirSize("a"); got != 210 {
 		t.Errorf("after upload: a = %d, want 210", got)
 	}
@@ -54,8 +54,8 @@ func TestDirSizeCacheAggregationAndDeltas(t *testing.T) {
 	}
 
 	// 删除增量：移除 a/sub（缓存 110）→ a=100、root=125
-	dirInfoSize.addDelta("a/sub", -110)
-	dirInfoSize.dropSubtree("a/sub")
+	dirInfoSize().addDelta("a/sub", -110)
+	dirInfoSize().dropSubtree("a/sub")
 	os.RemoveAll(filepath.Join(root, "a", "sub"))
 	if got := s.historyDirSize("a"); got != 100 {
 		t.Errorf("after delete: a = %d, want 100", got)
@@ -94,9 +94,9 @@ func TestDirSizeLazyFallback(t *testing.T) {
 	os.WriteFile(filepath.Join(p, "f.bin"), make([]byte, 42), 0o644)
 
 	// 用全新的空分片缓存替换
-	saved := dirInfoSize
-	dirInfoSize = shardedDirSize{}
-	defer func() { dirInfoSize = saved }()
+	saved := dirInfoSize()
+	resetDirInfoSize()
+	defer func() { dirInfoSizeRef.Store(saved) }()
 
 	s := NewHTTPStaticServer(root, true)
 	if got := s.historyDirSize("x"); got != 42 {

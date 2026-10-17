@@ -461,6 +461,9 @@ func handleLoginUI(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleLoginSubmit(state *LoginState, w http.ResponseWriter, r *http.Request) {
+	// SECURITY: 先限流请求体再解析表单——登录页无需大请求，未认证客户端
+	// 不应能借 multipart 解析把数据缓冲到磁盘。
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	// ParseMultipartForm 同时兼容 multipart 与 url-encoded 表单。
 	if err := r.ParseMultipartForm(32 << 20); err != nil && err != http.ErrNotMultipart {
 		http.Error(w, "Invalid form", http.StatusBadRequest)

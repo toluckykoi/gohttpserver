@@ -147,25 +147,25 @@ func TestHistoryDirSizePopulatesSubtree(t *testing.T) {
 
 	s := NewHTTPStaticServer(root, true)
 	// 重置分片缓存
-	dirInfoSize = shardedDirSize{}
+	resetDirInfoSize()
 
 	if got := s.historyDirSize("a"); got != 60 {
 		t.Errorf("historyDirSize(a) = %d, want 60", got)
 	}
 	// b 与 b/c 必须已由那次遍历缓存。
-	if size, ok := dirInfoSize.peek("a/b"); !ok || size != 50 {
+	if size, ok := dirInfoSize().peek("a/b"); !ok || size != 50 {
 		t.Errorf("a/b not populated by the walk: size=%d ok=%v, want 50", size, ok)
 	}
-	if size, ok := dirInfoSize.peek("a/b/c"); !ok || size != 30 {
+	if size, ok := dirInfoSize().peek("a/b/c"); !ok || size != 30 {
 		t.Errorf("a/b/c not populated by the walk: size=%d ok=%v, want 30", size, ok)
 	}
 
 	// invalidatePath 删除该目录及其祖先，但不影响兄弟目录。
-	dirInfoSize.invalidatePath("a/b/c")
-	if _, ok := dirInfoSize.peek("a/b/c"); ok {
+	dirInfoSize().invalidatePath("a/b/c")
+	if _, ok := dirInfoSize().peek("a/b/c"); ok {
 		t.Error("invalidatePath left the entry for a/b/c")
 	}
-	if _, ok := dirInfoSize.peek("a"); ok {
+	if _, ok := dirInfoSize().peek("a"); ok {
 		t.Error("invalidatePath left the ancestor entry for a")
 	}
 }

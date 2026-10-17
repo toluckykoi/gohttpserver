@@ -84,6 +84,13 @@ func (z *Zip) Add(relpath, abspath string) error {
 
 // CompressToZip 将 rootDir 以 .zip 附件形式流式发送给客户端。
 func CompressToZip(w http.ResponseWriter, rootDir string) {
+	CompressToZipFiltered(w, rootDir, nil)
+}
+
+// CompressToZipFiltered 与 CompressToZip 相同，但可选 filter：返回 false 的条目
+// 不写入归档。filter 为 nil 等价于「除 .ghs.yml 外全部收录」。filter 收到目录时
+// 返回 false 仅跳过该目录条目本身，其下文件仍会 walk（逐文件过滤）。
+func CompressToZipFiltered(w http.ResponseWriter, rootDir string, filter func(path string, fi os.FileInfo) bool) {
 	rootDir = filepath.Clean(rootDir)
 	zipFileName := filepath.Base(rootDir) + ".zip"
 
@@ -99,6 +106,9 @@ func CompressToZip(w http.ResponseWriter, rootDir string) {
 			return nil
 		}
 		if info.Name() == ".ghs.yml" {
+			return nil
+		}
+		if filter != nil && !filter(path, info) {
 			return nil
 		}
 		zipPath := path[len(rootDir):]
