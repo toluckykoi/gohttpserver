@@ -492,9 +492,12 @@ func (s *WebdavAccountState) saveLocked() error {
 }
 
 // isProtectedFilename 判断文件名在开启 ProtectSystemFiles 时是否禁止写入/删除。
+// 大小写不敏感：Windows 上 "GOHTTPSERVER.DB" 与 "gohttpserver.db" 是同一个文件。
 func isProtectedFilename(name string) bool {
-	if systemFileNames[name] {
-		return true
+	for sysName := range systemFileNames {
+		if strings.EqualFold(name, sysName) {
+			return true
+		}
 	}
 	// 点文件同样受保护。
 	return strings.HasPrefix(name, ".")

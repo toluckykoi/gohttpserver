@@ -399,10 +399,42 @@ func isUnderDir(path, dir string) bool {
 		cleanDir+string(filepath.Separator))
 }
 
-// checkWriteAllowed 实施账号写限制：.ghs.yml（HTTP 访问控制文件）永远禁止写入；开启 ProtectSystemFiles 时系统文件与点文件同样受保护。
+// isAccessConfNameWindows 判断 base 是否为 .ghs.yml 的 Windows 等价名
+// （大小写不敏感 + 8.3 短名 GHS~1.YML）。与 server 包的 isAccessConfName 规则一致。
+func isAccessConfNameWindows(base string) bool {
+	if strings.EqualFold(base, ".ghs.yml") {
+		return true
+	}
+	upper := strings.ToUpper(base)
+	// 8.3 短名模式：<前缀>~<数字>.<3 位扩展名>；.ghs.yml 的短名形如 GHS~1.YML。
+	idx := strings.IndexByte(upper, '~')
+	if idx <= 0 || idx > 7 {
+		return false
+	}
+	rest := upper[idx+1:]
+	dot := strings.IndexByte(rest, '.')
+	if dot < 1 {
+		return false
+	}
+	digits := rest[:dot]
+	if digits == "" {
+		return false
+	}
+	for _, c := range digits {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	ext := rest[dot+1:]
+	return ext == "YML" || ext == "YAML"
+}
+
+// checkWriteAllowed 实施账号写限制：.ghs.yml（HTTP 访问控制文件）永远禁止写入
+// （Windows 上大小写不敏感且存在 8.3 短名，精确匹配曾可被 .GHS.YML / GHS~1.YML 绕过）；
+// 开启 ProtectSystemFiles 时系统文件与点文件同样受保护。
 func (q *quotaFileSystem) checkWriteAllowed(name string) error {
 	base := filepath.Base(filepath.FromSlash(name))
-	if base == ".ghs.yml" {
+	if isAccessConfNameWindows(base) {
 		return errors.New("webdav: .ghs.yml is protected")
 	}
 	if q.protectSystemFiles && isProtectedFilename(base) {

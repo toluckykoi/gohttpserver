@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/codeskyblue/gohttpserver/internal/util"
 	gdav "golang.org/x/net/webdav"
@@ -18,16 +20,99 @@ type WebdavServer struct {
 	accounts *WebdavAccountState
 	usage    *UsageState
 	lockSys  gdav.LockSystem
+	// verifyLimiter 按 IP 对 Basic Auth 失败计数并临时锁定，防暴力破解。
+	verifyLimiter *authRateLimiter
 }
 
 // NewWebdavServer 构造服务器；账号状态为共享引用，每次请求惰性读取，开关/账号变更无需重启即生效。
 func NewWebdavServer(root string, accounts *WebdavAccountState, usage *UsageState) *WebdavServer {
-	return &WebdavServer{
-		root:     root,
-		accounts: accounts,
-		usage:    usage,
-		lockSys:  gdav.NewMemLS(),
+	s := &WebdavServer{
+		root:          root,
+		accounts:      accounts,
+		usage:         usage,
+		lockSys:       gdav.NewMemLS(),
+		verifyLimiter: newAuthRateLimiter(5, 15*time.Minute),
 	}
+	// 后台清理过期的限流条目，防止 attempts 无界增长。
+	s.verifyLimiter.startCleanupLoop()
+	return s
+}
+
+// authRateLimiter 是轻量的按 IP 失败计数器：maxFail 次失败后锁定 lockDuration。
+// 结构与 --login 的限流一致；只统计失败，成功即清零。
+type authRateLimiter struct {
+	mu           sync.Mutex
+	attempts     map[string]*authAttempt
+	maxFail      int
+	lockDuration time.Duration
+}
+
+type authAttempt struct {
+	count       int
+	lockedUntil time.Time
+}
+
+func newAuthRateLimiter(maxFail int, lockDuration time.Duration) *authRateLimiter {
+	return &authRateLimiter{
+		attempts:     make(map[string]*authAttempt),
+		maxFail:      maxFail,
+		lockDuration: lockDuration,
+	}
+}
+
+func (l *authRateLimiter) allow(ip string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	a, ok := l.attempts[ip]
+	if !ok {
+		return true
+	}
+	if !a.lockedUntil.IsZero() {
+		if time.Now().Before(a.lockedUntil) {
+			return false
+		}
+		// 锁定已过期：清零重新计数。
+		delete(l.attempts, ip)
+	}
+	return true
+}
+
+func (l *authRateLimiter) fail(ip string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	a, ok := l.attempts[ip]
+	if !ok {
+		a = &authAttempt{}
+		l.attempts[ip] = a
+	}
+	a.count++
+	if a.count >= l.maxFail {
+		a.lockedUntil = time.Now().Add(l.lockDuration)
+	}
+}
+
+func (l *authRateLimiter) reset(ip string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.attempts, ip)
+}
+
+// startCleanupLoop 定期清理过期条目，防止 attempts 无界增长。
+func (l *authRateLimiter) startCleanupLoop() {
+	go func() {
+		ticker := time.NewTicker(15 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			l.mu.Lock()
+			now := time.Now()
+			for ip, a := range l.attempts {
+				if !a.lockedUntil.IsZero() && now.After(a.lockedUntil) {
+					delete(l.attempts, ip)
+				}
+			}
+			l.mu.Unlock()
+		}
+	}()
 }
 
 // ServeHTTP 在底层 gdav.Handler 前做 Basic Auth 与配额检查；顶层 PROPFIND 自行处理以注入配额属性，超额 PUT 返回 507。
@@ -48,14 +133,23 @@ func (s *WebdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "WebDAV authentication required", http.StatusUnauthorized)
 		return
 	}
-	acc, ok := s.accounts.VerifyWebdav(user, pass)
-	if !ok {
-		log.Printf("webdav: auth failed for user=%q from %s (%s %s)",
-			user, util.GetClientIP(r), r.Method, r.URL.Path)
+	// 暴力破解防护：与 --login 一致的按 IP 失败计数与锁定（5 次 / 15 分钟）。
+	if !s.verifyLimiter.allow(util.GetClientIP(r)) {
+		log.Printf("webdav: rate limited for IP %s", util.SanitizeLogInput(util.GetClientIP(r)))
 		writeBasicChallenge(w)
 		http.Error(w, "WebDAV authentication required", http.StatusUnauthorized)
 		return
 	}
+	acc, ok := s.accounts.VerifyWebdav(user, pass)
+	if !ok {
+		s.verifyLimiter.fail(util.GetClientIP(r))
+		log.Printf("webdav: auth failed for user=%q from %s (%s %s)",
+			util.SanitizeLogInput(user), util.GetClientIP(r), r.Method, r.URL.Path)
+		writeBasicChallenge(w)
+		http.Error(w, "WebDAV authentication required", http.StatusUnauthorized)
+		return
+	}
+	s.verifyLimiter.reset(util.GetClientIP(r))
 
 	// 只记录写操作：只读方法在浏览时高频触发，会刷爆日志。
 	switch r.Method {

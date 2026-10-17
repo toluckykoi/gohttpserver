@@ -34,28 +34,19 @@ export const useAdminStore = defineStore('admin', () => {
   const frpLoaded = ref(false)
   const frpLoading = ref(false)
 
-  // 本地缓存 WebDAV 明文密码：服务端只在创建/重置时返回一次密码，之后只存哈希，
-  // 因此按账号 id 存进 localStorage 以便再次查看。
+  // WebDAV 明文密码只在内存中保存：服务端只在创建/重置时返回一次密码，之后只存哈希。
+  // 不再写入 localStorage——共享机器上残留全部凭据的风险远大于刷新后需重新创建的代价。
+  // 旧版本写入的 webdav_passwords 条目在加载时清除。
   const WEBDAV_PW_KEY = 'webdav_passwords'
-  function loadWebdavPasswords(): Record<string, string> {
-    try {
-      const raw = localStorage.getItem(WEBDAV_PW_KEY)
-      return raw ? JSON.parse(raw) : {}
-    } catch {
-      return {}
-    }
+  // 清理旧版本残留的 localStorage 密码缓存。
+  try {
+    localStorage.removeItem(WEBDAV_PW_KEY)
+  } catch {
+    /* 忽略隐私模式 */
   }
-  const webdavPasswords = ref<Record<string, string>>(loadWebdavPasswords())
-  function persistWebdavPasswords() {
-    try {
-      localStorage.setItem(WEBDAV_PW_KEY, JSON.stringify(webdavPasswords.value))
-    } catch {
-      // 忽略配额/隐私模式下的写入失败。
-    }
-  }
+  const webdavPasswords = ref<Record<string, string>>({})
   function setWebdavPassword(id: string, password: string) {
     webdavPasswords.value = { ...webdavPasswords.value, [id]: password }
-    persistWebdavPasswords()
   }
   function getWebdavPassword(id: string): string {
     return webdavPasswords.value[id] || ''
@@ -65,7 +56,6 @@ export const useAdminStore = defineStore('admin', () => {
     const next = { ...webdavPasswords.value }
     delete next[id]
     webdavPasswords.value = next
-    persistWebdavPasswords()
   }
 
   async function loadProfile() {

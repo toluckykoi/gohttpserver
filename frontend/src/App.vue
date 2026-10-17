@@ -257,7 +257,11 @@ const showLoginGate = computed(() => {
 const pendingPath = computed(() => {
   const params = new URLSearchParams(window.location.search)
   const next = params.get('next')
-  if (next && next.startsWith('/')) return next
+  // 与服务端 safeNextURL 同规则：仅允许站内相对路径。
+  // 拒绝 "//"（协议相对 URL）与 "\"（浏览器会归一化为 "/"，"//evil.com"）。
+  if (next && next.startsWith('/') && !next.startsWith('//') && !next.includes('\\')) {
+    return next
+  }
   return window.location.pathname || '/'
 })
 
