@@ -238,7 +238,7 @@ export function highlight(code: string, language: PreviewLanguage): string {
   const tag = (text: string, type: TokenType) => {
     const idx = stash.length
     stash.push(`<span class="tk-${type}">${escapeHtml(text)}</span>`)
-    return `TK${idx}`
+    return ` ${idx} `
   }
 
   let work = code
@@ -252,15 +252,15 @@ export function highlight(code: string, language: PreviewLanguage): string {
   }
 
   // 未命中 token 的空隙做转义。
-  const parts = work.split(/(TK\d+)/)
+  const parts = work.split(/( \d+ )/)
   for (let i = 0; i < parts.length; i++) {
-    if (!/^TK\d+$/.test(parts[i])) {
+    if (!/^ \d+ $/.test(parts[i])) {
       parts[i] = escapeHtml(parts[i])
     }
   }
 
   // 还原暂存的 token。
-  return parts.join('').replace(/TK(\d+)/g, (_, n) => stash[Number(n)])
+  return parts.join('').replace(/ (\d+) /g, (_, n) => stash[Number(n)] ?? escapeHtml(' ' + n + ' '))
 }
 
 /** 按行高亮，避免跨行 token 的颜色串到其它行。 */

@@ -82,13 +82,20 @@ export const useFileStore = defineStore('file', () => {
     () => selectedCount.value > 0 && selectedCount.value === sortedFiles.value.length
   )
 
+  // 目录列表请求序号：慢响应不得覆盖后发起的新视图（旧数据覆盖新目录会
+  // 造成界面显示 A 目录、删除/上传却打到 B 目录的错位）。
+  let loadFilesSeq = 0
+
   async function loadFiles(path?: string, search?: string, options: { silent?: boolean } = {}) {
+    const seq = ++loadFilesSeq
     if (!options.silent) {
       loading.value = true
     }
     try {
       const targetPath = path || currentPath.value || '/'
       const response = await fileApi.fetchFiles(targetPath, search)
+      // 已有更新的请求发出：本次响应作废。
+      if (seq !== loadFilesSeq) return
       files.value = response.files
       auth.value = response.auth
       // 切换目录时清空选中；同路径的搜索重跑保留选中。
@@ -103,10 +110,11 @@ export const useFileStore = defineStore('file', () => {
         searchQuery.value = search
       }
     } catch (error) {
+      if (seq !== loadFilesSeq) return
       ElMessage.error(`Failed to load files: ${error}`)
       console.error(error)
     } finally {
-      if (!options.silent) {
+      if (seq === loadFilesSeq && !options.silent) {
         loading.value = false
       }
     }

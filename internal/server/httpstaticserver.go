@@ -1425,6 +1425,10 @@ func (raw *rawAccessConf) mergeInto(ac *AccessConf) {
 }
 
 // reCache 缓存已编译的访问表正则，用 RWMutex 保护，因为处理器协程会并发读取。
+// reCacheMax 防止无界增长：pattern 完全来自用户可上传的 .ghs.yml，
+// 攻击者曾可用无限多不同 pattern 把缓存撑成内存泄漏。
+const reCacheMax = 1024
+
 var (
 	reCache   = make(map[string]*regexp.Regexp)
 	reCacheMu sync.RWMutex
@@ -1442,10 +1446,14 @@ func compileCached(pattern string) *regexp.Regexp {
 	reCacheMu.Lock()
 	// 可能已有协程并发写入同一 key；保留先到者，维持调用方已拿到指针的一致性。
 	if existing, ok := reCache[pattern]; ok {
-		re = existing
-	} else {
-		reCache[pattern] = re
+		reCacheMu.Unlock()
+		return existing
 	}
+	// 容量上限：超限时整体重置（.ghs.yml 是低频配置，重建的成本可忽略）。
+	if len(reCache) >= reCacheMax {
+		reCache = make(map[string]*regexp.Regexp)
+	}
+	reCache[pattern] = re
 	reCacheMu.Unlock()
 	return re
 }

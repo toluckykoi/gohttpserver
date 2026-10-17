@@ -185,7 +185,7 @@ import { useFileApi } from '@/composables/useFileApi'
 import { formatBytes } from '@/utils/formatBytes'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Reading,
   Document,
@@ -357,6 +357,19 @@ function enterEditMode() {
 
 function cancelEditMode() {
   if (dirty.value) {
+    // 未保存的修改：确认后放弃，避免误点 Cancel 静默丢内容。
+    ElMessageBox.confirm(
+      'Discard unsaved changes?',
+      'Confirm',
+      { confirmButtonText: 'Discard', cancelButtonText: 'Keep editing', type: 'warning' }
+    )
+      .then(() => {
+        editMode.value = false
+        editContent.value = ''
+        dirty.value = false
+      })
+      .catch(() => { /* 用户选择继续编辑 */ })
+    return
   }
   editMode.value = false
   editContent.value = ''
