@@ -13,27 +13,27 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// HashAlgorithm 标识密码哈希算法
+// HashAlgorithm 标识存储哈希所用的算法。
 type HashAlgorithm int
 
 const (
-	// HashBcrypt 当前推荐算法
+	// HashBcrypt 是当前使用的算法。
 	HashBcrypt HashAlgorithm = iota
-	// HashLegacySHA256 遗留 SHA-256 十六进制
+	// HashLegacySHA256 是旧数据库中遗留的十六进制 SHA-256。
 	HashLegacySHA256
 )
 
-// PasswordHash 统一密码哈希接口，封装算法识别、验证、升级
+// PasswordHash 包装存储的哈希，负责校验与升级。
 type PasswordHash struct {
-	hash string // 存储的哈希值（bcrypt 或十六进制 SHA-256）
+	hash string // bcrypt 哈希，旧行为十六进制 SHA-256
 }
 
-// NewPasswordHashFromStored 从数据库读取的哈希创建对象
+// NewPasswordHashFromStored 包装从数据库原样读出的哈希。
 func NewPasswordHashFromStored(storedHash string) *PasswordHash {
 	return &PasswordHash{hash: storedHash}
 }
 
-// Generate 生成新密码的 bcrypt 哈希
+// Generate 为新密码生成 bcrypt 哈希。
 func Generate(password string) (string, error) {
 	h, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -42,7 +42,7 @@ func Generate(password string) (string, error) {
 	return string(h), nil
 }
 
-// Verify 验证密码，支持 bcrypt 和遗留 SHA-256；验证成功且为遗留算法时自动异步升级
+// Verify 校验密码；命中旧版 SHA-256 时通过 onUpgrade 回调新 bcrypt 哈希供调用方持久化。
 func (ph *PasswordHash) Verify(password string, onUpgrade func(newHash string)) bool {
 	if ph.hash == "" {
 		return false
@@ -55,7 +55,6 @@ func (ph *PasswordHash) Verify(password string, onUpgrade func(newHash string)) 
 	if isLegacySHA256Hash(ph.hash) {
 		expected := sha256Hex(password)
 		if subtle.ConstantTimeCompare([]byte(expected), []byte(ph.hash)) == 1 {
-			// 遗留算法匹配，触发升级回调
 			if onUpgrade != nil {
 				newHash, err := Generate(password)
 				if err == nil {
@@ -70,7 +69,7 @@ func (ph *PasswordHash) Verify(password string, onUpgrade func(newHash string)) 
 	return false
 }
 
-// Algorithm 返回当前哈希算法类型
+// Algorithm 报告存储哈希所用算法；未知格式回退为 HashBcrypt（我们只写出这一种格式）。
 func (ph *PasswordHash) Algorithm() HashAlgorithm {
 	if isBcryptHash(ph.hash) {
 		return HashBcrypt
@@ -78,15 +77,13 @@ func (ph *PasswordHash) Algorithm() HashAlgorithm {
 	if isLegacySHA256Hash(ph.hash) {
 		return HashLegacySHA256
 	}
-	return HashBcrypt // 默认按 bcrypt 处理
+	return HashBcrypt
 }
 
-// IsDefaultPassword 检查是否为默认密码 admin/admin
+// IsDefaultPassword 判断存储哈希是否仍是 admin/admin。
 func (ph *PasswordHash) IsDefaultPassword() bool {
 	return ph.Verify(defaultPassword, nil)
 }
-
-// ─── 内部辅助函数 ───
 
 const defaultPassword = "admin"
 
@@ -111,19 +108,17 @@ func sha256Hex(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// ─── 线程安全的升级器 ───
-
-// Upgrader 管理遗留哈希到 bcrypt 的异步升级，避免并发重复升级
+// Upgrader 串行化旧哈希升级，避免并发登录时对同一行反复 bcrypt。
 type Upgrader struct {
 	mu      sync.Mutex
-	pending map[string]time.Time // key -> 升级开始时间
+	pending map[string]time.Time // key -> upgrade start time
 }
 
 func NewUpgrader() *Upgrader {
 	return &Upgrader{pending: make(map[string]time.Time)}
 }
 
-// TryUpgrade 尝试升级；若已在升级中或 5 分钟内已升级过则跳过
+// TryUpgrade 经 saveFn 重哈希旧行；已升级或 5 分钟内重试过的 key 直接跳过。
 func (u *Upgrader) TryUpgrade(key string, currentHash string, password string, saveFn func(newHash string) error) bool {
 	if !isLegacySHA256Hash(currentHash) {
 		return false
@@ -132,7 +127,6 @@ func (u *Upgrader) TryUpgrade(key string, currentHash string, password string, s
 	u.mu.Lock()
 	now := time.Now()
 	if startTime, exists := u.pending[key]; exists {
-		// 5 分钟内已尝试过，跳过
 		if now.Sub(startTime) < 5*time.Minute {
 			u.mu.Unlock()
 			return false
@@ -141,7 +135,7 @@ func (u *Upgrader) TryUpgrade(key string, currentHash string, password string, s
 	u.pending[key] = now
 	u.mu.Unlock()
 
-	// 双重检查：升级期间可能已被其他 goroutine 更新
+	// 二次检查：其他 goroutine 可能已并发升级该行。
 	if !isLegacySHA256Hash(currentHash) {
 		u.mu.Lock()
 		delete(u.pending, key)
@@ -173,10 +167,10 @@ func (u *Upgrader) TryUpgrade(key string, currentHash string, password string, s
 	return true
 }
 
-// ErrInvalidPassword 密码不符合策略
+// ErrInvalidPassword 表示密码不满足强度策略。
 var ErrInvalidPassword = errors.New("password must be at least 4 characters")
 
-// ValidatePassword 校验密码强度（最小长度 4）
+// ValidatePassword 校验最小长度策略。
 func ValidatePassword(password string) error {
 	if len(password) < 4 {
 		return ErrInvalidPassword

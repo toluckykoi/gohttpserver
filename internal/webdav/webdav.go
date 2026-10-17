@@ -12,46 +12,15 @@ import (
 	gdav "golang.org/x/net/webdav"
 )
 
-// WebdavServer wraps the standard golang.org/x/net/webdav handler with
-// HTTP Basic Auth, a master enable switch, per-account chroot, and
-// per-account quota enforcement.
-//
-// The upstream gdav.Handler is responsible for OPTIONS / PROPFIND /
-// PUT / DELETE / MKCOL / MOVE / COPY / PROPPATCH / LOCK / UNLOCK per
-// RFC 4918. We extend it in three places:
-//
-//  1. handlePropfindRoot (webdav_quota.go) — top-level PROPFIND is
-//     self-handled so we can inject DAV:quota-used-bytes and
-//     DAV:quota-available-bytes (RFC 4331). All other PROPFIND
-//     requests pass through to upstream.
-//  2. quotaFileSystem (webdav_quota.go) — replaces the bare
-//     gdav.Dir so writes are intercepted for quota enforcement
-//     and byte-level accounting.
-//  3. preflightQuota check in ServeHTTP — fast rejection of
-//     over-quota PUTs based on Content-Length before delegating to
-//     upstream.
+// WebdavServer 在 golang.org/x/net/webdav 外层提供 Basic Auth、每账号 chroot 与配额限制。
 type WebdavServer struct {
 	root     string
 	accounts *WebdavAccountState
 	usage    *UsageState
-	// lockSys is the shared in-memory WebDAV lock system.
-	//
-	// LOGIC FIX: Previously gdav.NewMemLS() was called inside
-	// ServeHTTP, creating a fresh empty lock table for EVERY request.
-	// This meant WebDAV locking was completely broken — a LOCK from
-	// client A was invisible to the subsequent PUT from client A
-	// (different request, new map), and concurrent writers were never
-	// blocked. The fix is to create ONE lock system at construction
-	// time and share it across all requests.
-	lockSys gdav.LockSystem
+	lockSys  gdav.LockSystem
 }
 
-// NewWebdavServer constructs the server. The returned handler is safe
-// to register on a router immediately; it reads the enabled flag and
-// account list from `accounts` lazily on every request.
-//
-// `root` is the --root filesystem root; the per-account chroot is
-// applied at the file-system layer by joining onto RootPath.
+// NewWebdavServer 构造服务器；账号状态为共享引用，每次请求惰性读取，开关/账号变更无需重启即生效。
 func NewWebdavServer(root string, accounts *WebdavAccountState, usage *UsageState) *WebdavServer {
 	return &WebdavServer{
 		root:     root,
@@ -61,28 +30,14 @@ func NewWebdavServer(root string, accounts *WebdavAccountState, usage *UsageStat
 	}
 }
 
-// ServeHTTP gates the upstream gdav.Handler behind HTTP Basic Auth
-// and per-account quota enforcement.
-//
-// The first account whose username + password matches the
-// Authorization header is used; if no match is found we return 401
-// with a Basic challenge so the client prompts for credentials. The
-// upstream gdav.Handler takes care of OPTIONS / PROPFIND / PUT /
-// DELETE / MKCOL / MOVE / COPY / PROPPATCH / LOCK / UNLOCK per
-// RFC 4918, except:
-//
-//   - Top-level PROPFIND is intercepted to inject quota properties.
-//   - PUTs that exceed the per-account quota return 507.
-//   - Per-account chroot is applied via quotaFileSystem.
+// ServeHTTP 在底层 gdav.Handler 前做 Basic Auth 与配额检查；顶层 PROPFIND 自行处理以注入配额属性，超额 PUT 返回 507。
 func (s *WebdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !s.accounts.IsEnabled() {
 		http.Error(w, "WebDAV is disabled", http.StatusServiceUnavailable)
 		return
 	}
 
-	// Normalise the trailing-slash-less collection path ("/dav" → "/dav/").
-	// GNOME/gvfs probes "/dav" during discovery; without this the upstream
-	// handler (Prefix "/dav/") can't strip the prefix and returns 404.
+	// 补全 "/dav" 的末尾斜杠：GNOME/gvfs 发现阶段会探测 "/dav"，缺斜杠时底层 handler（Prefix "/dav/"）无法剥离前缀而返回 404。
 	if r.URL.Path == "/dav" {
 		r.URL.Path = "/dav/"
 	}
@@ -102,31 +57,19 @@ func (s *WebdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Log only mutating operations (uploads / deletes / moves etc.) so
-	// operators see meaningful WebDAV activity. Read-only browsing
-	// methods (PROPFIND / OPTIONS / GET / HEAD / LOCK / UNLOCK) fire
-	// constantly during navigation and would flood the log, so they're
-	// skipped.
+	// 只记录写操作：只读方法在浏览时高频触发，会刷爆日志。
 	switch r.Method {
 	case "PUT", "DELETE", "MKCOL", "MOVE", "COPY", "PROPPATCH":
 		log.Printf("webdav: %s %s by user=%q (remark=%q) from %s",
 			r.Method, r.URL.Path, acc.Username, acc.Remark, util.GetClientIP(r))
 	}
 
-	// Per-account chroot: mount the inner gdav.Dir at
-	//   filepath.Join(s.root, acc.RootPath)
-	// so all subsequent file operations are confined to the account's
-	// root_path. The upstream handler still strips the configured
-	// /dav/ Prefix before reaching the FileSystem, so the path
-	// rewriting is correct.
+	// 每账号 chroot：把文件操作限制在账号的 root_path 内。
 	accountRoot := filepath.Join(s.root, acc.RootPath)
 	if !strings.HasSuffix(accountRoot, string(filepath.Separator)) {
 		accountRoot += string(filepath.Separator)
 	}
 
-	// Stash the matched account's quota state so handlePropfindRoot
-	// (and any other downstream reader) can look it up via the
-	// request pointer. Cleared by defer below.
 	setQuotaContext(r, quotaContext{
 		accountID:  acc.ID,
 		quotaBytes: acc.QuotaBytes,
@@ -134,15 +77,12 @@ func (s *WebdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 	defer clearQuotaContext(r)
 
-	// Top-level PROPFIND is self-handled for quota injection.
 	if r.Method == "PROPFIND" && isWebdavRootPath(r.URL.Path) {
 		s.handlePropfindRoot(w, r)
 		return
 	}
 
-	// Pre-flight quota check for PUT: use Content-Length if the client
-	// declared one. The post-check inside quotaFileSystem.OpenFile
-	// catches clients that lied or used chunked transfer.
+	// 用 Content-Length 预检配额；谎报长度或分块传输的客户端由 quotaFileSystem 的写入后检查兜底。
 	if r.Method == "PUT" && acc.QuotaBytes > 0 {
 		if err := s.preflightPut(r, acc, accountRoot); err != nil {
 			status := http.StatusInternalServerError
@@ -154,11 +94,7 @@ func (s *WebdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Build a request-scoped handler with the account's chroot and
-	// quota wrapper. The handler is constructed per request because
-	// the FileSystem closure needs the matched account's id + quota.
-	// The LockSystem is shared across requests (s.lockSys) so that
-	// WebDAV locks actually prevent concurrent writes.
+	// handler 为请求级，但 LockSystem 跨请求共享以维持 WebDAV 锁语义。
 	inner := gdav.Dir(accountRoot)
 	qfs := &quotaFileSystem{
 		inner:              inner,
@@ -177,16 +113,13 @@ func (s *WebdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	handler.ServeHTTP(w, r)
 }
 
-// preflightPut runs a fast quota check using the request's
-// Content-Length. The FileSystem wrapper handles the post-write
-// accounting; this is just to fail-fast on declared sizes.
+// preflightPut 用 Content-Length 做快速配额预检，写入后的记账由 FileSystem 包装层完成。
 func (s *WebdavServer) preflightPut(r *http.Request, acc WebdavAccount, accountRoot string) error {
 	if s.usage == nil || r.ContentLength < 0 {
 		return nil
 	}
 	used := s.usage.Get(acc.ID)
-	// Look up the old file size so overwriting a 2GB file with 1KB
-	// doesn't get rejected as +2GB.
+	// 扣除旧文件大小：用 1KB 覆盖 2GB 文件时不应按 +2GB 拒绝。
 	var oldSize int64
 	target := filepath.Join(accountRoot, urlPathClean(r.URL.Path))
 	if info, err := os.Stat(target); err == nil && info != nil {
@@ -195,17 +128,14 @@ func (s *WebdavServer) preflightPut(r *http.Request, acc WebdavAccount, accountR
 	return preflightQuota(used, acc.QuotaBytes, oldSize, r.ContentLength)
 }
 
-// writeBasicChallenge sets the headers needed to make Windows / Finder /
-// RaiDrive prompt for credentials rather than fail silently.
+// writeBasicChallenge 设置质询响应头，让 Windows/Finder/RaiDrive 弹出凭据输入框而不是静默失败。
 func writeBasicChallenge(w http.ResponseWriter) {
 	w.Header().Set("WWW-Authenticate", `Basic realm="gohttpserver webdav"`)
 	w.Header().Set("DAV", "1, 2")
 	w.Header().Set("MS-Author-Via", "DAV")
 }
 
-// urlPathClean strips the /dav/ prefix from p and runs filepath.Clean
-// on the remainder, producing a safe relative path for the inner
-// gdav.Dir. Empty result means "the chroot root itself".
+// urlPathClean 去掉 /dav/ 前缀并 Clean，得到供 gdav.Dir 使用的安全相对路径；返回 "." 表示 chroot 根目录本身。
 func urlPathClean(p string) string {
 	const prefix = "/dav/"
 	switch {

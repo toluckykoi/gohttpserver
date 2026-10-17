@@ -4,14 +4,11 @@ import type {
   WebdavStatus,
 } from '@/types'
 
-/** Result type for admin API calls. Errors are returned as { ok: false,
- *  error } rather than thrown so callers can destructure without
- *  try/catch — matches the convention used by useFileApi.ts. */
+/** 错误以 { ok: false, error } 返回而非抛出，调用方无需 try/catch 即可解构。 */
 type ApiResult<T> =
   | { ok: true; data: T }
   | { ok: false; error: string }
 
-/** Helper: turns a fetch failure into a structured ApiResult. */
 async function send<T>(
   url: string,
   init: RequestInit,
@@ -41,7 +38,6 @@ async function send<T>(
 }
 
 export function useAdminApi() {
-  /** Fetch the current user's profile + version. */
   async function fetchProfile(): Promise<ApiResult<AdminProfile>> {
     return send(
       '/-/api/admin/profile',
@@ -50,8 +46,6 @@ export function useAdminApi() {
     )
   }
 
-  /** Change the login username. Gated by the authenticated session
-   *  itself — no current password required. */
   async function changeUsername(
     newUsername: string,
   ): Promise<ApiResult<{ username: string }>> {
@@ -67,8 +61,6 @@ export function useAdminApi() {
     )
   }
 
-  /** Change the login password. Re-exposed here under the admin
-   *  namespace; the old /-/api/auth/password endpoint still works. */
   async function changePassword(
     oldPassword: string,
     newPassword: string,
@@ -83,7 +75,6 @@ export function useAdminApi() {
     )
   }
 
-  /** Fetch WebDAV server status + account list in one round-trip. */
   async function fetchWebdavStatus(): Promise<ApiResult<WebdavStatus>> {
     return send(
       '/-/api/admin/webdav/status',
@@ -92,7 +83,6 @@ export function useAdminApi() {
     )
   }
 
-  /** Enable or disable the WebDAV server. */
   async function setWebdavEnabled(enabled: boolean): Promise<ApiResult<{ enabled: boolean }>> {
     return send(
       '/-/api/admin/webdav/enabled',
@@ -104,14 +94,11 @@ export function useAdminApi() {
     )
   }
 
-  /** Create a new WebDAV account. Returns the account + the plaintext
-   *  password, which the UI must show exactly once. */
   async function createWebdavAccount(req: {
     remark: string
     root_path: string
     readonly: boolean
     protect_system_files: boolean
-    /** Storage cap in bytes; 0 = unlimited. */
     quota_bytes: number
   }): Promise<ApiResult<WebdavAccountWithPassword>> {
     return send(
@@ -124,9 +111,6 @@ export function useAdminApi() {
     )
   }
 
-  /** Partial update of an existing account. Pass undefined for fields
-   *  you don't want to change. Pass quota_bytes=0 to make the account
-   *  unlimited; pass a positive value to apply a cap. */
   async function updateWebdavAccount(
     id: string,
     req: {
@@ -147,10 +131,6 @@ export function useAdminApi() {
     )
   }
 
-  /** Force-recalculate the byte counter for every WebDAV account by
-   *  walking each account's chroot. Mirrors the Cloudreve admin
-   *  "calibrate storage" button (inventory/user.go CalculateStorage).
-   *  Returns per-account results with the new used_bytes. */
   async function recalculateWebdavUsage(): Promise<ApiResult<{
     success: boolean
     results: Array<{ id: string; ok: boolean; used_bytes: number; error?: string }>
@@ -165,7 +145,6 @@ export function useAdminApi() {
     )
   }
 
-  /** Delete a WebDAV account. Idempotent. */
   async function deleteWebdavAccount(id: string): Promise<ApiResult<null>> {
     return send(
       `/-/api/admin/webdav/accounts/${encodeURIComponent(id)}`,
@@ -174,8 +153,6 @@ export function useAdminApi() {
     )
   }
 
-  /** Reset a WebDAV account's password. Returns the new plaintext
-   *  password — same "show once" contract as createWebdavAccount. */
   async function resetWebdavPassword(id: string): Promise<ApiResult<{ password: string }>> {
     return send(
       `/-/api/admin/webdav/accounts/${encodeURIComponent(id)}/reset-password`,
@@ -184,7 +161,6 @@ export function useAdminApi() {
     )
   }
 
-  /** Fetch FRP client status including enabled state, running state, and config. */
   async function fetchFRPStatus(): Promise<ApiResult<{
     enabled: boolean
     running: boolean
@@ -209,10 +185,7 @@ export function useAdminApi() {
     )
   }
 
-  /** Fetch the plaintext FRP auth token on demand. The status endpoint
-   *  only reports whether a token is set (authTokenSet); this is the
-   *  explicit "show me the stored secret" call backing the reveal
-   *  button next to the password field. */
+  /** 按需拉取 FRP auth token 明文（status 接口只返回 authTokenSet）。 */
   async function fetchFRPAuthToken(): Promise<ApiResult<{ authToken: string; authTokenSet: boolean }>> {
     return send(
       '/-/api/admin/frp/auth-token',
@@ -221,7 +194,6 @@ export function useAdminApi() {
     )
   }
 
-  /** Enable or disable the FRP client. */
   async function setFRPEnabled(enabled: boolean): Promise<ApiResult<{ enabled: boolean }>> {
     return send(
       '/-/api/admin/frp/enabled',
@@ -233,7 +205,6 @@ export function useAdminApi() {
     )
   }
 
-  /** Update FRP client configuration. */
   async function updateFRPConfig(req: {
     serverAddr: string
     serverPort: number
@@ -272,10 +243,7 @@ export function useAdminApi() {
   }
 }
 
-/** Local-only helper: generate a random 10-char password on the client.
- *  Used to pre-fill the create-account form so the user can preview the
- *  password before submitting — the server is the source of truth and
- *  will return its own generated password in the response. */
+/** 本地生成随机密码，用于预填创建账号表单。 */
 export function previewRandomPassword(length = 10): string {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
   const buf = new Uint8Array(length)

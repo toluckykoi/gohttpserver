@@ -80,17 +80,11 @@ const visible = computed({
   set: (val) => emit('update:visible', val)
 })
 
-// Disable submit until both fields look plausible. We do the strict
-// URL/filename validation server-side; this is just a "don't let the
-// user click Fetch on an empty form" guard.
 const canSubmit = computed(() => {
   if (downloading.value) return false
   const u = url.value.trim()
   const f = filename.value.trim()
   if (!u || !f) return false
-  // Same scheme allowlist the server enforces, so the user gets
-  // immediate feedback for typos like "example.com/file" instead
-  // of waiting for a server-side 400.
   return /^https?:\/\//i.test(u)
 })
 

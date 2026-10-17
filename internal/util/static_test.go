@@ -9,9 +9,8 @@ import (
 	"testing"
 )
 
-// SecurityHeaders must cover every response, including the login page and the
-// SPA assets, which are served outside the file-server package and therefore
-// used to go out with no CSP / X-Frame-Options at all.
+// SecurityHeaders 须覆盖所有响应，包括登录页与内嵌 SPA 资源——
+// 它们由文件服务包之外提供，曾完全不携带 CSP / X-Frame-Options。
 func TestSecurityHeadersAppliedToEveryResponse(t *testing.T) {
 	const csp = "default-src 'self'"
 	h := SecurityHeaders(csp)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -31,8 +30,7 @@ func TestSecurityHeadersAppliedToEveryResponse(t *testing.T) {
 			t.Errorf("%s = %q, want %q", header, got, want)
 		}
 	}
-	// HSTS only over TLS: sending it from a plain-HTTP server would pin
-	// browsers to https on a host that cannot serve it.
+	// 仅 TLS 下才发 HSTS：明文 HTTP 服务发它会把浏览器钉在无法提供的 https 上
 	if got := rec.Header().Get("Strict-Transport-Security"); got != "" {
 		t.Errorf("HSTS set on a non-TLS request: %q", got)
 	}
@@ -52,9 +50,9 @@ func TestStaticAssetsCacheControl(t *testing.T) {
 	h := staticAssetServer()
 
 	cases := map[string]string{
-		// Content-hashed bundle files may be cached forever.
+		// 带内容哈希的产物文件可以永久缓存
 		"/-/frontend/assets/index-DT3XY-O7.js": "public, max-age=31536000, immutable",
-		// Anything whose name can stay the same must revalidate.
+		// 文件名可能不变的内容必须重新验证
 		"/-/frontend/favicon.png": "no-cache, max-age=60",
 	}
 	for path, want := range cases {
@@ -99,8 +97,7 @@ func TestStaticAssetsGzip(t *testing.T) {
 	}
 }
 
-// A range request must be answered identity-encoded: byte ranges of the
-// compressed stream are not ranges of the file the client asked for.
+// Range 请求必须以 identity 编码应答：压缩流的字节区间不等于客户端所请求文件的区间。
 func TestStaticAssetsSkipsGzipForRangeAndHead(t *testing.T) {
 	h := staticAssetServer()
 

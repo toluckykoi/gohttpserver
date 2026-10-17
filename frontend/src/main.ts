@@ -6,15 +6,8 @@ import './styles/global.css'
 import 'element-plus/es/components/message/style/css'
 import 'element-plus/es/components/message-box/style/css'
 
-// Element Plus is loaded on demand via unplugin-vue-components:
-//   - <el-button> etc. in templates get imported automatically
-//   - ElMessage / ElMessageBox etc. are imported explicitly below
-//     because they're command-style APIs (no template usage)
-//   - Per-component CSS is bundled only for the components we use,
-//     so the wire size reflects actual usage.
-//
-// We deliberately do NOT call `app.use(ElementPlus)` — the full
-// library would re-introduce the 700+ KiB bundle this is avoiding.
+// Element Plus 由 unplugin-vue-components 按需加载（只为用到的组件打包各组件 CSS）；
+// ElMessage / ElMessageBox 属于命令式 API，由调用方显式 import。
 
 const app = createApp(App)
 

@@ -19,7 +19,7 @@ import (
 	"github.com/fatedier/frp/pkg/config/v1"
 )
 
-// FRPClient manages the FRP client lifecycle
+// FRPClient 管理 FRP 客户端的生命周期。
 type FRPClient struct {
 	mu         sync.Mutex
 	enabled    bool
@@ -29,23 +29,23 @@ type FRPClient struct {
 	service    *client.Service
 	stopCh     chan struct{}
 	db         *sql.DB
-	nameSuffix string // random per-process suffix for proxy name uniqueness
+	nameSuffix string // 进程级后缀，用于保证代理名唯一
 }
 
-// FRPConfig holds the FRP client configuration
+// FRPConfig 保存 FRP 客户端配置。
 type FRPConfig struct {
-	ServerAddr           string
-	ServerPort           int
-	AuthToken            string
-	ProxyName            string
-	ProxyType            string
-	LocalIP              string
-	LocalPort            int
-	RemotePort           int
-	ProxyProtocolVersion string // v1 or v2, empty means disabled
+	ServerAddr           string // frps 主机（不含端口）
+	ServerPort           int    // frps 端口
+	AuthToken            string // frps 认证 token，落库前加密
+	ProxyName            string // 注册到 frps 的代理名，不含进程级后缀
+	ProxyType            string // frp 代理类型，如 "tcp"
+	LocalIP              string // 代理转发到的本地地址
+	LocalPort            int    // 代理转发到的本地端口
+	RemotePort           int    // 在 frps 上开放的端口
+	ProxyProtocolVersion string // v1 或 v2，为空表示禁用
 }
 
-// NewFRPClient creates a new FRP client manager
+// NewFRPClient 创建 FRP 客户端管理器。
 func NewFRPClient(db *sql.DB) *FRPClient {
 	return &FRPClient{
 		enabled:    false,
@@ -55,20 +55,12 @@ func NewFRPClient(db *sql.DB) *FRPClient {
 	}
 }
 
-// randomProxySuffix returns a 3-char random alphanumeric string (e.g.
-// "a3f"). FRP requires proxy names to be globally unique on a server,
-// so two gohttpserver instances using the default "gohttpserver"
-// against the same frps collide with "proxy [...] already exists".
-// The suffix is generated once per process and reused for the life of
-// that process: re-saves within one run keep the same name (so frps
-// doesn't accumulate stale proxies), while a restart picks a new one
-// (so a stale proxy from the previous run can't collide).
+// randomProxySuffix 返回 3 位随机字母数字串；frps 要求代理名全局唯一，
+// 该后缀可避免共用同一 frps 的多个实例互相冲突。
 func randomProxySuffix() string {
 	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
 	var b [3]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand failing is unrealistic; a fixed fallback keeps
-		// the proxy name valid instead of blocking FRP startup.
 		return "xxx"
 	}
 	for i := range b {
@@ -77,11 +69,8 @@ func randomProxySuffix() string {
 	return string(b[:])
 }
 
-// registeredProxyName returns the proxy name actually sent to the FRP
-// server: the configured base name plus the per-process random suffix.
-// The configured ProxyName is preserved as-is for display/editing; only
-// the value registered with frps is suffixed, so re-saves never
-// accumulate extra suffixes.
+// registeredProxyName 返回发给 FRP 服务器的代理名（配置名 + 进程随机后缀）；
+// 配置的 ProxyName 原样保留用于展示，只有注册值带后缀，避免重复保存时后缀叠加。
 func (c *FRPClient) registeredProxyName() string {
 	if c.cfg == nil {
 		return ""
@@ -93,24 +82,20 @@ func (c *FRPClient) registeredProxyName() string {
 	return name + "-" + c.nameSuffix
 }
 
-// getOrCreateEncryptionKey loads or creates the FRP encryption key
 func (c *FRPClient) getOrCreateEncryptionKey() ([]byte, error) {
 	keyFile := "frp-encryption.key"
 
-	// Try to load existing key
 	if data, err := os.ReadFile(keyFile); err == nil {
 		if len(data) == 32 {
 			return data, nil
 		}
 	}
 
-	// Generate new 256-bit key
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
 		return nil, fmt.Errorf("generate encryption key: %w", err)
 	}
 
-	// Save to file with restricted permissions
 	if err := os.WriteFile(keyFile, key, 0600); err != nil {
 		return nil, fmt.Errorf("save encryption key: %w", err)
 	}
@@ -118,7 +103,6 @@ func (c *FRPClient) getOrCreateEncryptionKey() ([]byte, error) {
 	return key, nil
 }
 
-// encryptToken encrypts the auth token using AES-GCM
 func (c *FRPClient) encryptToken(plaintext string) (string, error) {
 	if plaintext == "" {
 		return "", nil
@@ -148,20 +132,18 @@ func (c *FRPClient) encryptToken(plaintext string) (string, error) {
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
-// decryptToken decrypts the auth token using AES-GCM
 func (c *FRPClient) decryptToken(encoded string) (string, error) {
 	if encoded == "" {
 		return "", nil
 	}
 
-	// If it doesn't look like base64-encoded ciphertext, treat as plaintext (legacy)
+	// 过短或非 base64 的值按明文处理（旧格式）。
 	if len(encoded) < 32 {
 		return encoded, nil
 	}
 
 	ciphertext, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		// Not valid base64, treat as plaintext (legacy)
 		return encoded, nil
 	}
 
@@ -182,7 +164,7 @@ func (c *FRPClient) decryptToken(encoded string) (string, error) {
 
 	nonceSize := aesGCM.NonceSize()
 	if len(ciphertext) < nonceSize {
-		return encoded, nil // Too short, treat as plaintext
+		return encoded, nil
 	}
 
 	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
@@ -194,7 +176,7 @@ func (c *FRPClient) decryptToken(encoded string) (string, error) {
 	return string(plaintext), nil
 }
 
-// LoadFromDB loads FRP configuration from database
+// LoadFromDB 从数据库加载 FRP 配置及启用状态。
 func (c *FRPClient) LoadFromDB() (*FRPConfig, bool, error) {
 	if c.db == nil {
 		return nil, false, nil
@@ -218,13 +200,11 @@ func (c *FRPClient) LoadFromDB() (*FRPConfig, bool, error) {
 		return nil, false, err
 	}
 
-	// Decrypt auth token
+	// 明文 token 就地迁移为加密格式。
 	cfg.AuthToken, err = c.decryptToken(encryptedToken)
 	if err != nil {
 		return nil, false, fmt.Errorf("decrypt auth token: %w", err)
 	}
-
-	// Migrate plaintext to encrypted if needed
 	if encryptedToken != "" && encryptedToken == cfg.AuthToken {
 		if err := c.SaveToDB(&cfg, enabled); err != nil {
 			log.Printf("frp: failed to migrate auth token to encrypted format: %v", err)
@@ -236,13 +216,12 @@ func (c *FRPClient) LoadFromDB() (*FRPConfig, bool, error) {
 	return &cfg, enabled, nil
 }
 
-// SaveToDB saves FRP configuration to database
+// SaveToDB 将 FRP 配置保存到数据库。
 func (c *FRPClient) SaveToDB(cfg *FRPConfig, enabled bool) error {
 	if c.db == nil {
 		return nil
 	}
 
-	// Encrypt auth token before saving
 	encryptedToken, err := c.encryptToken(cfg.AuthToken)
 	if err != nil {
 		return fmt.Errorf("encrypt auth token: %w", err)
@@ -259,34 +238,30 @@ func (c *FRPClient) SaveToDB(cfg *FRPConfig, enabled bool) error {
 	return err
 }
 
-// UpdateConfig updates the FRP configuration and restarts if needed
+// UpdateConfig 更新 FRP 配置，必要时重启客户端。
 func (c *FRPClient) UpdateConfig(cfg *FRPConfig) error {
-	// First stop any existing client and wait for it to finish
 	c.Stop()
 
 	c.mu.Lock()
 	c.cfg = cfg
 	c.mu.Unlock()
 
-	// Save to database
 	if err := c.SaveToDB(cfg, c.enabled); err != nil {
 		log.Printf("FRP save config to DB error: %v", err)
 	}
 
-	// Start if enabled
 	if c.enabled && cfg != nil {
 		return c.Start()
 	}
 	return nil
 }
 
-// SetEnabled enables or disables the FRP client
+// SetEnabled 启用或禁用 FRP 客户端。
 func (c *FRPClient) SetEnabled(enabled bool) error {
 	c.mu.Lock()
 
 	c.enabled = enabled
 
-	// Save to database
 	if c.cfg != nil {
 		if err := c.SaveToDB(c.cfg, enabled); err != nil {
 			log.Printf("FRP save enabled state to DB error: %v", err)
@@ -303,7 +278,7 @@ func (c *FRPClient) SetEnabled(enabled bool) error {
 	return nil
 }
 
-// Start starts the FRP client
+// Start 启动 FRP 客户端。
 func (c *FRPClient) Start() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -316,7 +291,6 @@ func (c *FRPClient) Start() error {
 		return fmt.Errorf("FRP config not set")
 	}
 
-	// Build FRP client common configuration
 	clientCfg := &v1.ClientCommonConfig{
 		ServerAddr: c.cfg.ServerAddr,
 		ServerPort: c.cfg.ServerPort,
@@ -327,9 +301,6 @@ func (c *FRPClient) Start() error {
 	}
 	clientCfg.Complete()
 
-	// Build proxy configuration. The name sent to frps is suffixed with
-	// hostname + port so multiple gohttpserver instances can share one
-	// frps without "proxy already exists" collisions.
 	proxyCfg := &v1.TCPProxyConfig{
 		ProxyBaseConfig: v1.ProxyBaseConfig{
 			Name: c.registeredProxyName(),
@@ -343,12 +314,10 @@ func (c *FRPClient) Start() error {
 	proxyCfg.LocalIP = c.cfg.LocalIP
 	proxyCfg.LocalPort = c.cfg.LocalPort
 
-	// Create context with cancel
 	ctx, cancel := context.WithCancel(context.Background())
 	c.cancel = cancel
 	c.stopCh = make(chan struct{})
 
-	// Create config source and set proxies
 	configSource := source.NewConfigSource()
 	if err := configSource.ReplaceAll([]v1.ProxyConfigurer{proxyCfg}, nil); err != nil {
 		cancel()
@@ -356,10 +325,8 @@ func (c *FRPClient) Start() error {
 		return fmt.Errorf("failed to set FRP proxies: %w", err)
 	}
 
-	// Create aggregator
 	aggregator := source.NewAggregator(configSource)
 
-	// Create FRP service
 	svc, err := client.NewService(client.ServiceOptions{
 		Common:                 clientCfg,
 		ConfigSourceAggregator: aggregator,
@@ -371,15 +338,13 @@ func (c *FRPClient) Start() error {
 	}
 	c.service = svc
 
-	// Start FRP client in goroutine
-	// Save stopCh to local variable to avoid race condition with Stop()
+	// stopCh 先存局部变量再进 goroutine，避免与 Stop() 竞争（直接关 c.stopCh 不安全）。
 	stopCh := c.stopCh
 	go func() {
 		defer func() {
 			c.mu.Lock()
 			c.running = false
 			c.mu.Unlock()
-			// Close the local stopCh, not c.stopCh (which might be nil after Stop())
 			if stopCh != nil {
 				close(stopCh)
 			}
@@ -392,7 +357,6 @@ func (c *FRPClient) Start() error {
 			c.cfg.LocalIP, c.cfg.LocalPort,
 			c.cfg.ServerAddr, c.cfg.RemotePort, c.registeredProxyName())
 
-		// Run FRP service
 		if err := svc.Run(ctx); err != nil {
 			log.Printf("FRP client error: %v", err)
 		}
@@ -403,20 +367,17 @@ func (c *FRPClient) Start() error {
 	return nil
 }
 
-// stopLocked stops the FRP client (must be called with lock held)
-// This version does NOT wait for the goroutine to avoid deadlock
+// stopLocked 停止 FRP 客户端；调用方必须持有锁。
 func (c *FRPClient) stopLocked() {
 	if !c.running {
 		return
 	}
 
-	// Cancel context to signal goroutine to stop
 	if c.cancel != nil {
 		c.cancel()
 		c.cancel = nil
 	}
 
-	// Close service
 	if c.service != nil {
 		c.service.Close()
 		c.service = nil
@@ -426,7 +387,7 @@ func (c *FRPClient) stopLocked() {
 	log.Printf("FRP client stop signal sent")
 }
 
-// Stop stops the FRP client and waits for it to finish
+// Stop 停止 FRP 客户端并等待其退出。
 func (c *FRPClient) Stop() {
 	c.mu.Lock()
 
@@ -435,13 +396,11 @@ func (c *FRPClient) Stop() {
 		return
 	}
 
-	// Cancel context to signal goroutine to stop
 	if c.cancel != nil {
 		c.cancel()
 		c.cancel = nil
 	}
 
-	// Close service
 	if c.service != nil {
 		c.service.Close()
 		c.service = nil
@@ -449,12 +408,12 @@ func (c *FRPClient) Stop() {
 
 	c.running = false
 
-	// Get stopCh before releasing lock
+	// 释放锁前先取出 stopCh。
 	stopCh := c.stopCh
 	c.stopCh = nil
 	c.mu.Unlock()
 
-	// Wait for goroutine to finish (outside lock to avoid deadlock)
+	// 在锁外等待，避免死锁。
 	if stopCh != nil {
 		select {
 		case <-stopCh:
@@ -465,7 +424,7 @@ func (c *FRPClient) Stop() {
 	}
 }
 
-// Status returns the current FRP client status
+// Status 返回 FRP 客户端当前状态。
 func (c *FRPClient) Status() map[string]interface{} {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -476,13 +435,7 @@ func (c *FRPClient) Status() map[string]interface{} {
 	}
 
 	if c.cfg != nil {
-		// Never expose the auth token's value over the API — only
-		// report whether one is configured. Returning a placeholder
-		// such as "********" is unsafe: the SPA echoes the config back
-		// on save, so a masked value would be re-encrypted and persisted
-		// as the real token, breaking FRP authentication after a
-		// restart. authTokenSet lets the UI show "configured, leave
-		// blank to keep" without ever holding the secret client-side.
+		// 绝不通过 API 暴露 token 值；authTokenSet 让界面无需持有密钥即可显示"已配置"。
 		status["config"] = map[string]interface{}{
 			"serverAddr":           c.cfg.ServerAddr,
 			"serverPort":           c.cfg.ServerPort,

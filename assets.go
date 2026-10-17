@@ -9,7 +9,7 @@ import (
 //go:embed frontend/dist
 var frontendDistFS embed.FS
 
-// FrontendAssets contains the Vue 3 frontend build output.
+// FrontendAssets 是内嵌的 Vue 3 前端构建产物。
 var FrontendAssets = http.FS(func() fs.FS {
 	sub, err := fs.Sub(frontendDistFS, "frontend/dist")
 	if err != nil {

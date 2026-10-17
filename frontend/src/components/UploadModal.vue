@@ -50,13 +50,8 @@
       </template>
     </el-upload>
 
-    <!-- Hidden native file input for folder picking. Element Plus's
-         el-upload is a thin wrapper around <input type="file"> and
-         doesn't expose the webkitdirectory attribute, so we keep a
-         parallel native input just for the folder-pick flow. The
-         picked File objects carry their directory position via
-         File.webkitRelativePath (e.g. "MyFolder/sub/foo.txt"), which
-         we forward to the server as the `path` form field. -->
+    <!-- 文件夹选择用原生 input（el-upload 不暴露 webkitdirectory），
+         选中的文件自带相对路径。 -->
     <input
       ref="folderInput"
       type="file"
@@ -66,9 +61,7 @@
       @change="handleFolderChange"
     />
 
-    <!-- Upload progress -->
-    <div v-if="uploading" class="upload-progress">
-      <div class="progress-file-name">{{ displayFileName }}</div>
+    <div v-if="uploading" class="upload-progress">      <div class="progress-file-name">{{ displayFileName }}</div>
       <el-progress
         :percentage="displayPercent"
         :status="progressStatus"
@@ -128,26 +121,18 @@ const uploadRef = ref()
 const fileList = ref<UploadUserFile[]>([])
 const uploading = ref(false)
 
-// `webkitdirectory` is supported by Chromium-based browsers and Firefox,
-// but not by Safari. Detect once at component setup; the template uses
-// this to either render the active picker link or a disabled link with
-// a tooltip explaining the limitation.
+// webkitdirectory 仅 Chromium / Firefox 支持，Safari 不支持。
 const supportsFolderPick = 'webkitdirectory' in document.createElement('input')
 const folderInput = ref<HTMLInputElement | null>(null)
 const unzipAfterUpload = ref(false)
 
-// Progress state
 const currentFileIndex = ref(0)
 const currentFileName = ref('')
 const currentPercent = ref(0)
 const uploadedBytes = ref(0)
 const totalBytes = ref(0)
 
-// Unzip phase state. Only populated when the user ticked "Unzip after
-// upload". `unzipPhase` mirrors the server's progress stream:
-//   'uploading' — bytes are flowing into the server
-//   'unzipping' — server is extracting the zip; we update current/total/file
-//   'done'      — terminal line received, extraction finished
+// 服务端以 NDJSON 逐行推送解压进度。
 type UnzipPhase = 'idle' | 'uploading' | 'unzipping' | 'done' | 'error'
 const unzipPhase = ref<UnzipPhase>('idle')
 const unzipCurrent = ref(0)
@@ -165,8 +150,7 @@ const progressStatus = computed(() => {
   return ''
 })
 
-// During the unzipping phase the progress bar shows file-count progress
-// (current / total). Otherwise it shows byte-upload percent.
+// 解压阶段进度条走文件数（current/total），否则走字节上传百分比。
 const displayPercent = computed(() => {
   if (unzipPhase.value === 'unzipping' || unzipPhase.value === 'done') {
     if (unzipTotal.value === 0) return 0
@@ -175,7 +159,6 @@ const displayPercent = computed(() => {
   return currentPercent.value
 })
 
-// File-name line: file being uploaded, or file currently being extracted.
 const displayFileName = computed(() => {
   if (unzipPhase.value === 'unzipping' || unzipPhase.value === 'done') {
     return unzipFileName.value || currentFileName.value
@@ -183,11 +166,7 @@ const displayFileName = computed(() => {
   return currentFileName.value
 })
 
-// Stats line: "1 / 1 files · 5.2 MB / 6.9 MB" while uploading, then
-// "Extracting 5 / 12" while the server is unpacking. The denominator
-// is the flattened file count, not fileList.length, so a folder entry
-// showing "1 / 1 files" still ticks correctly while it expands to
-// hundreds of underlying uploads.
+// 分母用展开后的文件数而非 fileList.length：一个文件夹条目可能展开成上百个上传。
 const uploadTotalCount = ref(0)
 const displayStatsLine = computed(() => {
   if (unzipPhase.value === 'unzipping' || unzipPhase.value === 'done') {
@@ -196,9 +175,7 @@ const displayStatsLine = computed(() => {
   return `${currentFileIndex.value} / ${uploadTotalCount.value} files · ${formatSize(uploadedBytes.value)} / ${formatSize(totalBytes.value)}`
 })
 
-// Folder entry extension on top of Element Plus's UploadUserFile.
-// The picker produces one of these per top-level folder chosen,
-// carrying the raw File[] so the upload loop can iterate them.
+// 每个被选中的顶层文件夹一个条目，携带其原始 File[]。
 type FolderEntryData = {
   isFolder: true
   folderName: string
@@ -225,10 +202,7 @@ function handleFileRemove(file: UploadUserFile) {
   }
 }
 
-// Folder-picker plumbing. `webkitdirectory` is only set on the input
-// when the browser supports it — Safari ignores the attribute and
-// degrades to a regular file picker, so we gate entry on
-// `supportsFolderPick` (see template + ref).
+// Safari 会忽略 webkitdirectory 而退化成普通文件选择器，因此入口处先判定 supportsFolderPick。
 function triggerFolderPicker() {
   if (!supportsFolderPick) return
   folderInput.value?.click()
@@ -239,13 +213,7 @@ function handleFolderChange(event: Event) {
   const files = Array.from(input.files ?? [])
   if (files.length === 0) return
 
-  // Group by top-level folder. webkitRelativePath looks like
-  // "MyFolder/sub/foo.txt" — the first segment is the folder the
-  // user picked. We push ONE list entry per top-level folder so a
-  // folder with hundreds of files doesn't bloat the upload list
-  // (the user only needs to see what they're uploading, not every
-  // leaf path). The individual files stay attached to the entry
-  // for the upload loop to iterate.
+  // 每个顶层文件夹只列一个条目，避免上百个文件撑爆列表；文件仍挂在条目上供遍历。
   const groups = new Map<string, File[]>()
   for (const f of files) {
     const rel = (f as unknown as { webkitRelativePath?: string }).webkitRelativePath
@@ -262,8 +230,7 @@ function handleFolderChange(event: Event) {
   for (const [folderName, group] of groups) {
     const totalBytes = group.reduce((sum, f) => sum + f.size, 0)
     const entry = {
-      // Negative + random so uids never collide with el-upload's own
-      // positive monotonic counter.
+      // 取负并加随机，避免与 el-upload 自己递增的正数 uid 冲突。
       uid: -Date.now() - Math.floor(Math.random() * 1_000_000),
       name:
         `${folderName}  ` +
@@ -277,9 +244,7 @@ function handleFolderChange(event: Event) {
     fileList.value.push(entry)
   }
 
-  // Reset the input so picking the same folder again still fires
-  // `change`. Without this, browsers treat the second pick as a
-  // no-op because the file list reference hasn't changed.
+  // 清空 input，否则再次选同一文件夹不会触发 change。
   input.value = ''
 }
 
@@ -296,12 +261,7 @@ async function handleUpload() {
     return
   }
 
-  // Flatten fileList into a per-file upload sequence. Single-file
-  // entries contribute one pair; folder entries (see handleFolderChange)
-  // contribute one pair per underlying file, in the order the picker
-  // returned them. The flattened length is what the progress UI shows
-  // as the denominator — fileList.length would only count entries,
-  // which is misleading when one folder entry hides hundreds of files.
+  // 把 fileList 展开成逐文件上传序列；进度 UI 用展开后的长度作分母（见 uploadTotalCount）。
   const uploadList: Array<{ file: File; relativePath?: string }> = []
   for (const entry of fileList.value) {
     if (isFolderEntry(entry)) {
@@ -336,31 +296,19 @@ async function handleUpload() {
       currentFileIndex.value = i + 1
       currentFileName.value = it.relativePath || file.name
       currentPercent.value = 0
-      // Reset every per-file piece of state, including the phase.
-      // Leaving `unzipPhase` at 'done' from the previous iteration
-      // would make the progress display computeds read the stale
-      // unzip counters (current/total) instead of currentPercent —
-      // and with current/total both 0, the bar would pin at 0% for
-      // the entire upload of this file, looking like a hang.
+      // 必须重置 unzipPhase：残留的 'done' 会让进度条读旧解压计数（0/0）而卡在 0%，像卡死。
       unzipPhase.value = 'uploading'
       unzipFileName.value = ''
       unzipCurrent.value = 0
       unzipTotal.value = 0
 
       const fileSize = file.size
-      // Only zips go through the unzip streaming path. The checkbox
-      // label already says "for .zip files", but the code used to
-      // route every file through it, which had two visible
-      // consequences: (1) non-zip files hit a server-side unzip
-      // failure that the user couldn't act on, and (2) the progress
-      // UI mixed zip and non-zip state in confusing ways.
+      // 仅 .zip 走解压流：非 zip 会在服务端解压失败，且进度状态会互相干扰。
       const isZip = file.name.toLowerCase().endsWith('.zip')
       const useUnzip = unzipAfterUpload.value && isZip
 
       if (useUnzip) {
-        // Streaming path: server returns NDJSON with one line per file
-        // during extraction, then a terminal "done" line. The upload
-        // bytes progress and the unzip progress share the same modal.
+        // 流式路径：上传字节进度与解压进度共用同一进度条。
         const result = await fileApi.uploadFileWithUnzipProgress(
           fileStore.currentPath,
           file,
@@ -370,8 +318,7 @@ async function handleUpload() {
               uploadedBytes.value = completedBytes + Math.round((percent / 100) * fileSize)
             },
             onUnzipProgress: (current, total, name) => {
-              // First unzip event flips the phase so the display
-              // computeds switch to file-count progress.
+              // 首个解压事件翻转阶段，让显示切换为文件数进度。
               if (unzipPhase.value === 'uploading') {
                 unzipPhase.value = 'unzipping'
                 currentPercent.value = 100
@@ -385,8 +332,7 @@ async function handleUpload() {
         )
         unzipPhase.value = result.success ? 'done' : 'error'
       } else {
-        // Legacy path: server returns a single JSON object when done.
-        // No unzip progress is observable from the client.
+        // 传统路径：服务端完成后返回单个 JSON，客户端观测不到解压进度。
         await fileApi.uploadFileWithProgress(
           fileStore.currentPath,
           file,
@@ -438,10 +384,7 @@ function handleClosed() {
 </script>
 
 <style scoped>
-/* The folder-pick input is hidden but still in the DOM so its
-   ref + click() still work. Using display:none (the obvious choice)
-   breaks <input type="file"> in some browsers; visibility:hidden
-   + absolute positioning keeps it functional and out of layout. */
+/* 隐藏但仍留在 DOM，ref + click() 才有效；display:none 会让部分浏览器的 file input 失效。 */
 .folder-input-hidden {
   position: absolute;
   width: 0;
@@ -450,12 +393,7 @@ function handleClosed() {
   pointer-events: none;
 }
 
-/* el-link ships with display:inline-flex + vertical-align:middle,
-   which floats a few pixels above the baseline of the surrounding
-   text. Force baseline alignment so "Or", "choose a folder", and
-   "(preserves folder structure)" all sit on the same line. The
-   link keeps its primary blue colour from type="primary" — the
-   visual distinction is the point. */
+/* el-link 自带 inline-flex + vertical-align:middle，会浮在基线之上；强制 baseline 使其与周围文字对齐。 */
 :deep(.folder-link) {
   vertical-align: baseline;
 }

@@ -25,7 +25,6 @@ export const useFileStore = defineStore('file', () => {
   const { currentTheme } = useTheme()
   const fileApi = useFileApi()
 
-  // State
   const currentPath = ref('')
   const files = ref<FileItem[]>([])
   const auth = ref<AuthInfo>({ upload: false, delete: false, edit: false })
@@ -37,18 +36,14 @@ export const useFileStore = defineStore('file', () => {
   const savedSort = loadSortPreference()
   const sortProp = ref(savedSort.prop)
   const sortOrder = ref<'ascending' | 'descending'>(savedSort.order)
-  // Multi-select state. Keyed by FileItem.path (URL-encoded).
-  // Selection is cleared automatically on navigation (see loadFiles).
+  // 选中项以 URL 编码后的 path 为键，导航时清空。
   const selectedFiles = ref<Set<string>>(new Set())
-  // Mobile-only: when true, every card shows its checkbox and tapping a
-  // card toggles selection instead of navigating. Desktop ignores this.
+  // 仅移动端：每张卡片都显示复选框，点击切换选中而不跳转。
   const selectionMode = ref(false)
-  // Login flow: when loginEnabled is true, App.vue shows the login
-  // route instead of the file manager until `user` is populated.
+  // `user` 填充前 App.vue 一直显示登录路由。
   const loginEnabled = ref(false)
   const loginChecked = ref(false)
 
-  // Computed
   const sortedFiles = computed(() => {
     let result = [...files.value]
 
@@ -60,12 +55,10 @@ export const useFileStore = defineStore('file', () => {
     const order = sortOrder.value
 
     result.sort((a, b) => {
-      // Directories always first
       const aIsDir = a.type === 'dir' ? 1 : 0
       const bIsDir = b.type === 'dir' ? 1 : 0
       if (aIsDir !== bIsDir) return bIsDir - aIsDir
 
-      // Then sort by selected column
       let cmp = 0
       if (prop === 'name') {
         cmp = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
@@ -74,14 +67,7 @@ export const useFileStore = defineStore('file', () => {
       } else {
         cmp = a.mtime - b.mtime
       }
-      // Name tiebreaker. JS Array.sort is stable, so two items with
-      // the same primary key would otherwise keep whatever order the
-      // backend sent — which is "no particular order" because Go map
-      // iteration is intentionally randomised. Without this, rows
-      // sharing an mtime (files uploaded in the same second, files
-      // copied together and never touched) visibly shuffle on every
-      // refresh. Name is unique within a directory, so this gives a
-      // fully deterministic order regardless of backend behaviour.
+      // 用名称兜底排序：后端顺序是随机的（Go map 迭代顺序）。
       if (cmp === 0) {
         cmp = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
       }
@@ -92,13 +78,10 @@ export const useFileStore = defineStore('file', () => {
   })
 
   const selectedCount = computed(() => selectedFiles.value.size)
-  // "All selected" only makes sense when there's at least one row to select
-  // and every visible row is in the selection set.
   const isAllSelected = computed(
     () => selectedCount.value > 0 && selectedCount.value === sortedFiles.value.length
   )
 
-  // Actions
   async function loadFiles(path?: string, search?: string, options: { silent?: boolean } = {}) {
     if (!options.silent) {
       loading.value = true
@@ -108,8 +91,7 @@ export const useFileStore = defineStore('file', () => {
       const response = await fileApi.fetchFiles(targetPath, search)
       files.value = response.files
       auth.value = response.auth
-      // Clear selection when navigating to a different directory.
-      // Same-path search re-runs preserve selection.
+      // 切换目录时清空选中；同路径的搜索重跑保留选中。
       if (path !== undefined && path !== currentPath.value) {
         clearSelection()
         selectionMode.value = false
@@ -148,16 +130,14 @@ export const useFileStore = defineStore('file', () => {
     }
   }
 
-  /** Probe /-/api/auth/status to discover whether --login is enabled
-   *  and, if so, whether the current request already has a session.
-   *  Idempotent and safe to call from App.vue onMounted. */
+  /** 探测 /-/api/auth/status，判断是否启用了 --login、当前请求是否已有会话。
+   *  幂等，可安全地在 App.vue onMounted 中调用。 */
   async function loadLoginStatus() {
     try {
       const status = await fileApi.fetchAuthStatus()
       loginEnabled.value = status.login_enabled
-      // If login is enabled and the session is already valid the
-      // server reports the user — fold that into the user state so
-      // App.vue doesn't need to keep a parallel session object.
+      // 登录已启用且会话有效时服务端会返回用户信息，直接并入 user 状态，
+      // 这样 App.vue 不必再维护一份并行的 session 对象。
       if (status.login_enabled && status.authenticated) {
         user.value = { name: status.name || 'admin', provider: 'login' }
       }
@@ -168,13 +148,9 @@ export const useFileStore = defineStore('file', () => {
     }
   }
 
-  /** Submit credentials via POST /-/login. On success, record the
-   *  user locally so the caller can drive its own navigation flow.
-   *  We intentionally do NOT pre-fetch the file list here: Login.vue
-   *  follows a successful login with window.location.replace(target),
-   *  which hard-reloads the SPA and lets App.vue's onMounted issue
-   *  the first (and only) loadFiles. Pre-fetching here would race
-   *  with the reload and waste a request. */
+  /** POST /-/login 提交凭证；成功后只记录本地 user，不在这里预取文件列表——
+   *  Login.vue 随后会 window.location.replace(target) 硬刷新 SPA，由 App.vue
+   *  的 onMounted 发起第一次（也是唯一一次）loadFiles；在此预取会与刷新竞态且白费请求。 */
   async function loginWithCredentials(username: string, password: string) {
     const next = currentPath.value || '/'
     const res = await fileApi.submitLogin(username, password, next)
@@ -185,23 +161,19 @@ export const useFileStore = defineStore('file', () => {
     return { ok: false as const, error: res.error }
   }
 
-  /** Logout via /-/logout (GET clears the session cookie server-side),
-   *  then reset all authed UI state so App.vue re-mounts the login
-   *  page on the next render. */
+  /** GET /-/logout 由服务端清掉会话 cookie，随后重置本地认证态，
+   *  使 App.vue 下次渲染时挂回登录页。 */
   async function logout() {
     try {
-      // The cookie is cleared by the server response; the fetch with
-      // manual redirect surfaces the 302 without following it.
       await fetch('/-/logout', { method: 'GET', credentials: 'same-origin' })
     } catch {
-      // Even if the network call fails, locally clear state — the
-      // cookie may still be valid until the next reload.
+      // 网络失败也照样清本地状态；cookie 可能到下次刷新前仍然有效。
     }
     user.value = null
     files.value = []
   }
 
-  /** PUT /-/api/auth/password wrapper for the change-password UI. */
+  /** 改密码 UI 的 PUT /-/api/auth/password 包装。 */
   async function changePassword(oldPw: string, newPw: string) {
     const res = await fileApi.changePassword(oldPw, newPw)
     return res
@@ -232,12 +204,8 @@ export const useFileStore = defineStore('file', () => {
   async function deleteFile(filename: string) {
     const target = files.value.find(f => f.name === filename)
 
-    // Optimistic local removal. The previous flow waited on a full
-    // directory GET before updating the list, which — especially for
-    // large files in directories with many siblings — left the row
-    // visible behind the loading spinner for long enough to feel
-    // like the click was lost. Drop the row immediately on confirm,
-    // then reconcile with the server.
+    // 乐观删除：先本地移除该行，再与服务端对齐，避免等待整目录 GET
+    // 时行仍留在原地、让用户以为点击没生效。
     if (target) {
       files.value = files.value.filter(f => f.name !== filename)
       if (selectedFiles.value.size > 0) {
@@ -250,18 +218,14 @@ export const useFileStore = defineStore('file', () => {
     try {
       await fileApi.deleteFile(currentPath.value, filename)
       ElMessage.success('File deleted successfully')
-      // Silent background sync. Picks up anything that changed
-      // concurrently (another client uploading, etc.) without
-      // re-triggering the loading spinner over the list the user is
-      // already looking at. Errors are swallowed: the optimistic
-      // state already matches the server's confirmation.
+      // 静默后台同步：吸收并发变更（如其他客户端上传），且不在用户正在看的
+      // 列表上再触发一次 loading 转圈。失败可忽略——乐观状态已与服务端确认一致。
       loadFiles(undefined, undefined, { silent: true }).catch(err =>
         console.error('Background refresh after delete failed:', err)
       )
     } catch (error) {
-      // Server rejected the delete — pull the real list back so the
-      // UI reflects ground truth. Silent for the same reason as the
-      // success path: no spinner flash over the user's current view.
+      // 服务端拒绝删除，拉回真实列表还原 UI；静默的理由同成功路径——不在当前
+      // 视图上闪出转圈。
       loadFiles(undefined, undefined, { silent: true }).catch(() => {})
       ElMessage.error(`Failed to delete file: ${error}`)
       throw error
@@ -277,13 +241,12 @@ export const useFileStore = defineStore('file', () => {
       sortProp.value = prop
       sortOrder.value = order
     } else {
-      // Reset to default sort
       sortProp.value = 'name'
       sortOrder.value = 'ascending'
     }
   }
 
-  // Persist sort preference to localStorage so it survives page refresh
+  // 排序偏好持久化到 localStorage，刷新后仍生效。
   watch([sortProp, sortOrder], () => {
     try {
       localStorage.setItem(SORT_STORAGE_KEY, JSON.stringify({
@@ -293,8 +256,7 @@ export const useFileStore = defineStore('file', () => {
     } catch { /* ignore */ }
   })
 
-  // Multi-select actions. The Set is replaced wholesale on every change so
-  // Vue's reactivity reliably picks up the new contents.
+  // 每次变更都整体替换 Set，Vue 响应式才能可靠地感知新内容。
   function toggleSelect(path: string) {
     const next = new Set(selectedFiles.value)
     if (next.has(path)) {

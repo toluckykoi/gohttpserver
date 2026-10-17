@@ -11,7 +11,7 @@ import (
 	"log/slog"
 )
 
-// ShutdownManager handles graceful shutdown of the server.
+// ShutdownManager 负责服务的优雅退出。
 type ShutdownManager struct {
 	server          *http.Server
 	logger          *slog.Logger
@@ -19,7 +19,7 @@ type ShutdownManager struct {
 	cleanupFuncs    []func() error
 }
 
-// NewShutdownManager creates a new shutdown manager.
+// NewShutdownManager 创建退出管理器；logger 为 nil 时用 slog.Default()，timeout 为 0 时用 30s。
 func NewShutdownManager(server *http.Server, logger *slog.Logger, timeout time.Duration) *ShutdownManager {
 	if logger == nil {
 		logger = slog.Default()
@@ -34,39 +34,28 @@ func NewShutdownManager(server *http.Server, logger *slog.Logger, timeout time.D
 	}
 }
 
-// RegisterCleanup adds a cleanup function to be called on shutdown.
-// Cleanup functions are called in reverse order of registration (LIFO).
+// RegisterCleanup 注册退出时的清理函数，执行顺序为 LIFO。
 func (sm *ShutdownManager) RegisterCleanup(fn func() error) {
 	sm.cleanupFuncs = append(sm.cleanupFuncs, fn)
 }
 
-// WaitForShutdown blocks until a shutdown signal is received,
-// then gracefully shuts down the server and runs cleanup functions.
+// WaitForShutdown 阻塞等待退出信号，随后优雅关闭服务并执行清理函数。
 func (sm *ShutdownManager) WaitForShutdown() error {
-	// Create context that listens for interrupt signals
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Wait for shutdown signal
 	<-ctx.Done()
 	sm.logger.Info("shutdown signal received, starting graceful shutdown")
 	return sm.Shutdown()
 }
 
-// Shutdown gracefully drains the HTTP server and then runs every
-// registered cleanup function in reverse registration order (LIFO), so
-// resources that were opened first are torn down last. It is safe to
-// call directly when the caller owns the signal handling; cleanup runs
-// even if the HTTP drain itself fails.
+// Shutdown 排空 HTTP 服务后按注册逆序（LIFO）执行清理；即使排空失败清理也会执行。
 func (sm *ShutdownManager) Shutdown() error {
-	// Create shutdown context with timeout
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), sm.shutdownTimeout)
 	defer cancel()
 
-	// Shutdown HTTP server
 	if err := sm.server.Shutdown(shutdownCtx); err != nil {
 		sm.logger.Error("server shutdown failed", ErrorAttr(err))
-		// Force close if graceful shutdown fails
 		if closeErr := sm.server.Close(); closeErr != nil {
 			sm.logger.Error("server force close failed", ErrorAttr(closeErr))
 		}
@@ -79,7 +68,7 @@ func (sm *ShutdownManager) Shutdown() error {
 	return nil
 }
 
-// runCleanups executes registered cleanup functions newest-first.
+// runCleanups 逆序（最新注册者优先）执行清理函数，单个失败不影响其余执行。
 func (sm *ShutdownManager) runCleanups() {
 	for i := len(sm.cleanupFuncs) - 1; i >= 0; i-- {
 		if err := sm.cleanupFuncs[i](); err != nil {

@@ -31,7 +31,6 @@
       </div>
     </template>
 
-    <!-- Tabs (markdown only) + actions -->
     <div v-if="meta.previewable" class="preview-toolbar">
       <el-radio-group
         v-if="meta.renderable && !editMode"
@@ -97,13 +96,11 @@
       </div>
     </div>
 
-    <!-- Loading -->
     <div v-if="loading" class="preview-loading">
       <el-icon class="is-loading" :size="32"><Loading /></el-icon>
       <p>Loading preview…</p>
     </div>
 
-    <!-- Error -->
     <el-empty
       v-else-if="errorMessage"
       :description="errorMessage"
@@ -112,7 +109,6 @@
       <el-button type="primary" @click="loadContent">Retry</el-button>
     </el-empty>
 
-    <!-- Not previewable -->
     <el-empty
       v-else-if="!meta.previewable"
       description="This file format cannot be previewed"
@@ -121,7 +117,6 @@
       <el-button type="primary" @click="handleDownload">Download instead</el-button>
     </el-empty>
 
-    <!-- Truncation warning -->
     <div v-else-if="truncated" class="preview-warn">
       <el-icon><Warning /></el-icon>
       <span>
@@ -133,14 +128,12 @@
       </span>
     </div>
 
-    <!-- Rendered markdown -->
     <div
       v-else-if="meta.renderable && viewMode === 'rendered' && !editMode"
       class="preview-rendered"
       v-html="renderedMarkdown"
     />
 
-    <!-- Source view (with line numbers + syntax highlight) -->
     <div v-else-if="!editMode" class="preview-source">
       <div ref="sourceRef" class="preview-source-scroll">
         <div class="preview-source-grid">
@@ -163,8 +156,6 @@
       </div>
     </div>
 
-    <!-- Edit mode: textarea over the full source area. Saving
-         PUTs the text back to the server; cancel discards. -->
     <div v-else class="preview-edit">
       <el-input
         v-model="editContent"
@@ -226,22 +217,17 @@ const errorMessage = ref('')
 const content = ref('')
 const copied = ref(false)
 
-/** 1 MiB — anything bigger is truncated to keep the modal responsive. */
+/** 1 MiB：超出部分截断，避免大文件拖垮弹窗。 */
 const MAX_BYTES = 1024 * 1024
 const truncated = ref(false)
 
 const viewMode = ref<'rendered' | 'source'>('rendered')
 
-// Edit mode. `editContent` is the textarea backing value; it
-// diverges from `content` once the user starts typing. `dirty`
-// guards the "discard changes?" prompt on cancel/close. `saving`
-// drives the button spinner and disables Cancel mid-flight.
 const editMode = ref(false)
 const editContent = ref('')
 const dirty = ref(false)
 const saving = ref(false)
-/** Mirrors the server's hEdit cap (5 MiB). Beyond this the PUT
- *  request will be rejected with 413; the UI warns preemptively. */
+/** 服务端 hEdit 上限（5 MiB），前端提前警告。 */
 const MAX_EDIT_BYTES = 5 * 1024 * 1024
 const editSizeBytes = computed(() => new Blob([editContent.value]).size)
 
@@ -280,14 +266,8 @@ const highlightedLines = computed(() => {
 
 const renderedMarkdown = computed(() => {
   if (meta.value.language !== 'markdown' || !content.value) return ''
-  // marked does not strip HTML by default (v4 removed the built-in
-  // sanitize). Without DOMPurify, a malicious .md like
-  //   <img src=x onerror="stealToken()">
-  // would execute in the file-server origin when previewed. Sanitise
-  // the rendered HTML before injecting via v-html.
+  // marked 默认不剥离 HTML（v4 起去掉内置 sanitize），必须先用 DOMPurify 清洗再 v-html，否则 .md 里的 <img onerror=...> 会在本域执行。
   return DOMPurify.sanitize(marked.parse(content.value) as string, {
-    // Allow common markdown-rendered elements; strip scripts, event
-    // handlers, and anything that could fetch credentials.
     FORBID_TAGS: ['style', 'script', 'iframe', 'object', 'embed', 'form'],
     FORBID_ATTR: ['onerror', 'onload', 'onclick', 'onmouseover', 'onfocus', 'onblur']
   })
@@ -309,7 +289,7 @@ async function loadContent() {
 
     const contentLength = Number(response.headers.get('Content-Length') ?? 0)
     if (contentLength && contentLength > MAX_BYTES) {
-      // Server told us it's too big; only fetch what we need.
+      // 服务端声明的长度已超限：流式读取到上限即停，只取需要的部分。
       truncated.value = true
       const reader = response.body?.getReader()
       if (reader) {
@@ -326,7 +306,7 @@ async function loadContent() {
         try {
           await reader.cancel()
         } catch {
-          /* ignore */
+          /* 流已关闭时 cancel 会抛错，忽略 */
         }
         content.value = result
       } else {
@@ -362,10 +342,7 @@ function handleDownload() {
   fileApi.downloadFile(props.currentPath, props.file.name)
 }
 
-// Enter edit mode by copying the loaded preview content into the
-// textarea. We do NOT support editing truncated previews — the
-// textarea would silently drop the unread tail on save, which is
-// worse than refusing to edit at all.
+// 截断预览禁止编辑：保存会把未读取的尾部内容丢掉。
 function enterEditMode() {
   if (truncated.value) {
     ElMessage.warning(
@@ -380,11 +357,6 @@ function enterEditMode() {
 
 function cancelEditMode() {
   if (dirty.value) {
-    // Best-effort guard. el-message-box is async but we don't want
-    // the cancel button click handler to await — the user can
-    // dismiss the dialog and we're already on the close path.
-    // The server's idempotency on PUT means cancelling without
-    // saving never mutates the file, so this is informational.
   }
   editMode.value = false
   editContent.value = ''
@@ -410,8 +382,6 @@ async function saveEdit() {
       ElMessage.success('Saved')
       editMode.value = false
       dirty.value = false
-      // Re-pull the source from the server so we render the saved
-      // version (handles normalisation, e.g. trailing newline).
       await loadContent()
     } else {
       ElMessage.error('Save failed')
@@ -427,8 +397,6 @@ watch(
   () => props.visible,
   async (newVal) => {
     if (newVal) {
-      // Reset the view mode each time: markdown defaults to rendered,
-      // everything else is source-only.
       viewMode.value = meta.value.renderable ? 'rendered' : 'source'
       await nextTick()
       await loadContent()
@@ -437,8 +405,6 @@ watch(
       errorMessage.value = ''
       truncated.value = false
       copied.value = false
-      // Reset edit state too so the next open doesn't see stale
-      // textarea content from the previous file.
       editMode.value = false
       editContent.value = ''
       dirty.value = false
@@ -446,25 +412,19 @@ watch(
   }
 )
 
-// Track edits so we can warn on close. We don't currently block
-// close (vue's <el-dialog> would need :before-close to do that
-// cleanly); we just keep the flag for future use and so the
-// Cancel button can tell "user clicked cancel" from "user typed
-// then closed the dialog".
 watch(editContent, () => {
   dirty.value = true
 })
 </script>
 
 <style scoped>
-/* ── Header ── */
 .preview-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
   width: 100%;
-  padding-right: 32px; /* leave room for the close button */
+  padding-right: 32px;
   box-sizing: border-box;
 }
 
@@ -503,7 +463,6 @@ watch(editContent, () => {
   color: var(--el-text-color-placeholder);
 }
 
-/* ── Toolbar ── */
 .preview-toolbar {
   display: flex;
   align-items: center;
@@ -529,7 +488,6 @@ watch(editContent, () => {
   --el-button-text-color: var(--el-color-success);
 }
 
-/* ── Body states ── */
 .preview-loading,
 .preview-error {
   display: flex;
@@ -560,7 +518,6 @@ watch(editContent, () => {
   font-size: 14px;
 }
 
-/* ── Rendered markdown ── */
 .preview-rendered {
   padding: 18px 22px;
   background: var(--el-bg-color);
@@ -641,7 +598,6 @@ watch(editContent, () => {
   margin: 1.5em 0;
 }
 
-/* ── Source view ── */
 .preview-source {
   border: 1px solid var(--el-border-color-lighter);
   border-radius: var(--radius-md);
@@ -693,7 +649,6 @@ watch(editContent, () => {
   white-space: pre;
 }
 
-/* ── Syntax highlighting tokens ── */
 :deep(.tk-comment) { color: var(--el-text-color-placeholder); font-style: italic; }
 :deep(.tk-string) { color: #16a34a; }
 :deep(.tk-number) { color: #d97706; }
@@ -706,7 +661,6 @@ watch(editContent, () => {
 :deep(.tk-decorator) { color: #db2777; font-style: italic; }
 :deep(.tk-punct) { color: var(--el-text-color-secondary); }
 
-/* Dark theme overrides — same tokens, different palette. */
 :global([data-theme="black"]) :deep(.tk-string),
 :global([data-theme="green"]) :deep(.tk-string) { color: #4ade80; }
 :global([data-theme="black"]) :deep(.tk-number),
@@ -715,12 +669,10 @@ watch(editContent, () => {
 :global([data-theme="green"]) :deep(.tk-keyword) { color: #c084fc; }
 :global([data-theme="black"]) :deep(.tk-tag) { color: #60a5fa; }
 
-/* ── Dialog body padding ── */
 :deep(.preview-dialog .el-dialog__body) {
   padding: 4px 20px 22px;
 }
 
-/* ── Responsive ── */
 @media (max-width: 768px) {
   :deep(.preview-dialog) {
     width: calc(100vw - 32px) !important;
@@ -742,10 +694,7 @@ watch(editContent, () => {
   }
 }
 
-/* Edit mode: monospace textarea sized to match the preview area.
-   We override Element Plus's default textarea styles so the box
-   visually aligns with the .preview-source scroll container the
-   user just came from — same height family, same border radius. */
+/* 编辑框覆盖 Element Plus 默认样式，与刚才的预览源码区视觉对齐。 */
 .preview-edit {
   margin-top: 4px;
 }
@@ -754,8 +703,7 @@ watch(editContent, () => {
   font-size: 13px;
   line-height: 1.55;
   background: var(--el-fill-color-blank);
-  /* Reset the soft border-radius Element Plus applies so the edit
-     box reads as a serious input, not a chat field. */
+  /* 覆盖 Element Plus 的柔和圆角，避免看起来像聊天输入框。 */
   border-radius: var(--radius-md);
 }
 .preview-edit-warn {

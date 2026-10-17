@@ -8,29 +8,22 @@ import (
 	"time"
 )
 
-// ParseFunc converts raw file bytes into a value of type T.
+// ParseFunc 把文件原始字节解析为 T 类型值。
 type ParseFunc[T any] func(data []byte) (*T, error)
 
-// FileCache caches parsed file contents, invalidated by mtime.
-//
-// It is deliberately generic: the only caller that needs a config cache
-// lives in the server package (which owns AccessConf), and putting the
-// concrete type here would create an import cycle. The server supplies
-// the parser when constructing the cache.
+// FileCache 按 mtime 失效缓存文件解析结果；为避开与 server 包的 import 循环而做成泛型。
 type FileCache[T any] struct {
 	mu    sync.RWMutex
 	cache map[string]*cachedEntry[T]
 	parse ParseFunc[T]
 }
 
-// cachedEntry holds a parsed AccessConf with its filesystem metadata.
 type cachedEntry[T any] struct {
 	value   *T
 	modTime time.Time
 }
 
-// NewFileCache creates a cache that parses files with the given function.
-// If parse is nil, Get always re-reads and never caches.
+// NewFileCache 创建缓存；parse 为 nil 时 Get 每次重新读取且不缓存。
 func NewFileCache[T any](parse ParseFunc[T]) *FileCache[T] {
 	return &FileCache[T]{
 		cache: make(map[string]*cachedEntry[T]),
@@ -38,22 +31,13 @@ func NewFileCache[T any](parse ParseFunc[T]) *FileCache[T] {
 	}
 }
 
-// Get returns the cached value for filePath. If the file is missing it
-// returns (nil, false). If the file changed since it was cached (mtime
-// differs) it is re-parsed and the cache entry refreshed.
+// Get 返回 filePath 的缓存值；文件不存在时清除该缓存项，mtime 变化则重新解析并刷新。
 func (c *FileCache[T]) Get(filePath string) (*T, error) {
 	key := filepath.Clean(filePath)
 
-	// Stat before reading so the recorded mtime can only be older than
-	// the bytes we read. If the file is rewritten between the stat and
-	// the read, the entry is stored with the old mtime and the next Get
-	// sees the mismatch and refreshes — never a stale entry that looks
-	// fresh.
 	info, err := os.Stat(key)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// File deleted: drop any stale entry so a later re-create
-			// (possibly with the same mtime) is not served from cache.
 			c.mu.Lock()
 			delete(c.cache, key)
 			c.mu.Unlock()
@@ -79,7 +63,6 @@ func (c *FileCache[T]) Get(filePath string) (*T, error) {
 		return nil, err
 	}
 
-	// Parse and cache
 	value, err := c.parse(data)
 	if err != nil {
 		Logger().Warn("failed to parse cached file", ErrorAttr(err), slog.String("file", key))
@@ -96,7 +79,7 @@ func (c *FileCache[T]) Get(filePath string) (*T, error) {
 	return value, nil
 }
 
-// Invalidate removes a single path from the cache.
+// Invalidate 从缓存中移除单个路径。
 func (c *FileCache[T]) Invalidate(filePath string) {
 	key := filepath.Clean(filePath)
 	c.mu.Lock()
@@ -104,7 +87,7 @@ func (c *FileCache[T]) Invalidate(filePath string) {
 	c.mu.Unlock()
 }
 
-// InvalidateAll clears the entire cache.
+// InvalidateAll 清空整个缓存。
 func (c *FileCache[T]) InvalidateAll() {
 	c.mu.Lock()
 	c.cache = make(map[string]*cachedEntry[T])

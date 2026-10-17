@@ -1,8 +1,5 @@
 <template>
   <div class="profile-section">
-    <!-- Profile info card: shows the values fetched from
-         /-/api/admin/profile. The version is included so the operator
-         doesn't need to scroll to the footer to check it. -->
     <section class="profile-card">
       <h2 class="section-title">Basic Info</h2>
       <dl class="info-grid" v-if="store.profile">
@@ -24,8 +21,7 @@
       <el-skeleton v-else :rows="3" animated />
     </section>
 
-    <!-- Change username. The authenticated session is sufficient —
-         no current password is required. -->
+    <!-- 改用户名无需验证当前密码。 -->
     <section class="profile-card">
       <h2 class="section-title">Change Username</h2>
       <p class="section-hint">Enter a new username and save.</p>
@@ -51,8 +47,6 @@
       </el-form>
     </section>
 
-    <!-- Change password. Mirrors the old ChangePasswordDialog flow but
-         inlined into the panel. -->
     <section class="profile-card">
       <h2 class="section-title">Change Password</h2>
       <p class="section-hint">New password must be at least 4 characters.</p>
@@ -112,12 +106,10 @@ const emit = defineEmits<{
 
 const store = useAdminStore()
 
-// ─── Change username state ─────────────────────────────────────────
 const newUsername = ref('')
 const submittingUsername = ref(false)
 const usernameError = ref('')
 
-// ─── Change password state ─────────────────────────────────────────
 const oldPassword = ref('')
 const newPassword = ref('')
 const confirmPassword = ref('')
@@ -156,7 +148,6 @@ async function handleSubmitUsername() {
     if (res.ok) {
       ElMessage.success('Username updated')
       newUsername.value = ''
-      // Bubble up to App.vue so the header pill updates immediately.
       emit('username-changed', res.data.username)
     } else if (res.error === 'unauthorized') {
       usernameError.value = 'Session expired, please sign in again.'
@@ -206,9 +197,6 @@ onMounted(async () => {
   if (!store.profileLoaded) {
     await store.loadProfile()
   }
-  // Pre-fill the new-username field with the current value so the
-  // operator sees the starting point (but they still have to type the
-  // password — we never autofill that).
   if (store.profile) {
     newUsername.value = store.profile.username
   }
@@ -268,8 +256,6 @@ onMounted(async () => {
   font-size: 14px;
   color: #0f172a;
   font-weight: 500;
-  /* Long usernames / versions shouldn't overflow the card on narrow
-     screens. break-word handles the rare very-long-token case. */
   word-break: break-word;
 }
 
@@ -291,7 +277,6 @@ onMounted(async () => {
   font-size: 13px;
 }
 
-/* Phone: tighter spacing so the forms fit without excessive scrolling. */
 @media (max-width: 640px) {
   .profile-section {
     gap: 14px;
@@ -300,8 +285,6 @@ onMounted(async () => {
     padding: 14px 14px;
   }
   .info-grid {
-    /* Stack the info items vertically on very narrow screens — on a
-       360px viewport two columns of 180px each don't fit anyway. */
     grid-template-columns: 1fr;
     gap: 10px;
   }

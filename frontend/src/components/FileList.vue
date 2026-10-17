@@ -1,7 +1,5 @@
 <template>
   <div class="file-list-container">
-    <!-- Unified panel: breadcrumb + controls + stats + list share one
-         glass card instead of four stacked bands of different chrome. -->
     <div class="panel-card">
       <div class="toolbar">
         <Breadcrumb class="toolbar-breadcrumb" />
@@ -33,8 +31,6 @@
                 <span class="toolbar-label">{{ showHidden ? 'Hide' : 'Show' }} Hidden</span>
               </el-button>
             </el-tooltip>
-            <!-- Mobile only: enter / exit selection mode for card-based multi-select.
-                 Hidden on desktop where the table has built-in checkbox columns. -->
             <el-tooltip
               v-if="!loading && sortedFiles.length > 0"
               :content="fileStore.selectionMode ? 'Exit selection mode' : 'Select files'"
@@ -84,8 +80,6 @@
         </div>
       </div>
 
-      <!-- Directory stats: cheap to compute, makes the listing feel
-           alive and gives the toolbar card a second, quieter tier. -->
       <div v-if="!loading && sortedFiles.length > 0" class="panel-stats">
         <span>{{ sortedFiles.length }} {{ sortedFiles.length === 1 ? 'item' : 'items' }}</span>
         <span class="panel-stats-sep" aria-hidden="true">·</span>
@@ -94,7 +88,6 @@
         <span>Last modified {{ lastModified }}</span>
       </div>
 
-    <!-- Empty state -->
     <div v-if="!loading && sortedFiles.length === 0" class="empty-state">
       <span class="empty-icon" aria-hidden="true">
         <svg viewBox="0 0 64 64" width="40" height="40" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -112,9 +105,6 @@
     </div>
 
     <template v-else>
-      <!-- Multi-select bar: visible when at least one row is selected.
-           Sits between the toolbar and the file list so it's always in
-           reach and clearly contextual to the table/cards below. -->
       <div v-if="selectedCount > 0" class="selection-bar" role="status">
         <div class="selection-bar-left">
           <span class="selection-bar-badge" aria-hidden="true">
@@ -180,10 +170,6 @@
         </div>
       </div>
 
-    <!-- Desktop / tablet: table layout. Renders visibleFiles (an
-         incrementally-growing prefix of sortedFiles) instead of the
-         full list — mounting thousands of el-table rows at once froze
-         the page for seconds on large directories. -->
     <el-table
       class="file-table"
       :data="visibleFiles"
@@ -212,9 +198,6 @@
 
       <el-table-column label="Size" width="120" align="right" prop="size" sortable="custom">
         <template #default="{ row }">
-          <!-- Directory size is already computed server-side via
-               historyDirSize; just format it like a file. Empty dirs
-               come through as 0 → "0 B", which is honest. -->
           <span class="data-mono">{{ formatBytes(row.size) }}</span>
         </template>
       </el-table-column>
@@ -229,11 +212,6 @@
 
       <el-table-column label="Actions" width="120" class-name="col-actions">
         <template #default="{ row }">
-          <!-- Quiet actions: monochrome bare icons, always visible.
-               The chip border/bg appears on row hover; the accent
-               color on button hover. One contextual quick action +
-               Download + an overflow menu holding everything else
-               (incl. Delete, whose red lives only inside the menu). -->
           <div class="action-buttons action-desktop" @click.stop>
             <template v-if="row.type === 'dir'">
               <el-tooltip content="Download as ZIP" placement="top">
@@ -316,7 +294,6 @@
       </el-table-column>
     </el-table>
 
-    <!-- Mobile: card list layout (no horizontal scroll) -->
     <div class="mobile-file-list" :class="{ 'is-loading': loading }">
       <div
         v-for="row in visibleFiles"
@@ -329,9 +306,6 @@
         :title="rowClickLabel(row)"
         @click="handleRowClick(row)"
       >
-        <!-- Checkbox: always shown in selection mode, and on selected
-             cards even after exiting mode (so the user can see what's
-             still in their selection). -->
         <el-checkbox
           v-if="fileStore.selectionMode || fileStore.selectedFiles.has(row.path)"
           class="mobile-file-checkbox"
@@ -356,8 +330,6 @@
             <span>{{ formatMtime(row.mtime) }}</span>
           </div>
         </div>
-        <!-- Action dropdown: hidden in selection mode to avoid conflicting
-             controls (tapping the card already toggles selection). -->
         <div v-if="!fileStore.selectionMode" class="mobile-file-actions" @click.stop>
           <el-dropdown
             trigger="click"
@@ -393,10 +365,7 @@
       </div>
     </div>
 
-    <!-- Incremental-render sentinel. When it scrolls into view the next
-         PAGE_SIZE rows are appended automatically; the button is the
-         manual fallback. Always mounted (v-show semantics) so the
-         IntersectionObserver attaches exactly once. -->
+    <!-- 增量渲染哨兵：进入视口即扩大渲染窗口。 -->
     <div v-if="sortedFiles.length > 0" ref="sentinelRef" class="load-more-sentinel">
       <el-button
         v-if="hasMoreFiles"
@@ -473,10 +442,6 @@ import { copyText } from '@/utils/clipboard'
 import FileItem from './FileItem.vue'
 import Breadcrumb from './Breadcrumb.vue'
 
-// Modals are lazily loaded: each one pulls in its own chunk of
-// Element Plus components, the qrcode lib, marked, etc. Users that
-// never open "Preview" or "QR Code" never pay for those bundles.
-// Suspense isn't needed because each modal has its own v-if guard.
 const UploadModal = defineAsyncComponent(() => import('./UploadModal.vue'))
 const UrlDownloadModal = defineAsyncComponent(() => import('./UrlDownloadModal.vue'))
 const QrCodeModal = defineAsyncComponent(() => import('./QrCodeModal.vue'))
@@ -516,7 +481,6 @@ dayjs.extend(relativeTime)
 const fileStore = useFileStore()
 const fileApi = useFileApi()
 
-// State
 const showNewFolderDialog = ref(false)
 const showUploadModal = ref(false)
 const showUrlDownloadModal = ref(false)
@@ -532,13 +496,8 @@ const currentPreviewFile = ref<FileItemType | null>(null)
 const currentImageFile = ref<FileItemType | null>(null)
 const mtimeTypeFromNow = ref(false)
 const refreshing = ref(false)
-// el-table instance ref. Used to drive the table's built-in selection from
-// the selection bar's "Select All" / "Clear" buttons. Each toggleRowSelection
-// call updates the table's internal state and fires selection-change, which
-// then syncs back into the store — single round trip.
 const elTableRef = ref<TableInstance>()
 
-// Computed
 const currentPath = computed(() => fileStore.currentPath)
 const sortedFiles = computed(() => fileStore.sortedFiles)
 const auth = computed(() => fileStore.auth)
@@ -546,8 +505,7 @@ const loading = computed(() => fileStore.loading)
 const showHidden = computed(() => fileStore.showHidden)
 const selectedCount = computed(() => fileStore.selectedCount)
 const isAllSelected = computed(() => fileStore.isAllSelected)
-// Combined size of the current selection. Directories contribute 0,
-// so the figure reads as "payload you'd actually download/delete".
+// 选中项合计大小（目录计 0）。
 const selectedTotalSize = computed(() =>
   fileStore.files.reduce(
     (sum, f) => (fileStore.selectedFiles.has(f.path) ? sum + (f.size || 0) : sum),
@@ -556,13 +514,7 @@ const selectedTotalSize = computed(() =>
 )
 const defaultSort = computed(() => ({ prop: fileStore.sortProp, order: fileStore.sortOrder }))
 
-// ── Incremental rendering for huge directories ──
-// el-table mounts one row of DOM per data item; with several thousand
-// files that first mount blocked the main thread for seconds. We render
-// the first PAGE_SIZE rows and grow the window as the user scrolls
-// (IntersectionObserver on a sentinel div below the list), so the page
-// stays responsive no matter how large the directory is. Sorting and
-// stats still operate on the full sortedFiles list.
+// 增量渲染，避免超大目录卡顿。
 const PAGE_SIZE = 500
 const displayCount = ref(PAGE_SIZE)
 const visibleFiles = computed(() => sortedFiles.value.slice(0, displayCount.value))
@@ -570,9 +522,6 @@ const hasMoreFiles = computed(() => sortedFiles.value.length > displayCount.valu
 const sentinelRef = ref<HTMLElement>()
 let sentinelObserver: IntersectionObserver | null = null
 
-// ── Directory stats (toolbar card second tier) ──
-// Sum of the visible listing — directory sizes are already resolved
-// server-side, so this is a plain reduce with no extra requests.
 const totalSize = computed(() =>
   sortedFiles.value.reduce((sum, f) => sum + (f.size || 0), 0)
 )
@@ -582,7 +531,7 @@ const lastModified = computed(() => {
   return dayjs(latest).fromNow()
 })
 
-/** Per-type tinted chip for the mobile card icon (mirrors FileItem). */
+/** 移动端卡片图标按类型着色（与 FileItem 保持一致）。 */
 function iconTileStyle(file: FileItemType) {
   const color = getFileIconColor(file.name, file.type)
   return {
@@ -591,7 +540,7 @@ function iconTileStyle(file: FileItemType) {
   }
 }
 
-/** Image siblings for the prev/next carousel inside ImagePreviewModal. */
+/** 图片预览弹窗内上一张/下一张轮播的同级图片。 */
 const imageSiblings = computed(() =>
   sortedFiles.value.filter((f) => f.type !== 'dir' && isPreviewableImage(f.name))
 )
@@ -604,10 +553,7 @@ function goBack() {
 async function handleRefresh() {
   if (refreshing.value) return
   refreshing.value = true
-  // The store's loading flag is already wired to el-table's v-loading and
-  // the empty-state condition, so we don't need a separate table spinner.
-  // Keep the icon spinning for at least 400ms so users get clear visual
-  // feedback even on a fast local server.
+  // 图标至少转 400ms，保证刷新反馈可见。
   const startedAt = Date.now()
   try {
     await fileStore.loadFiles()
@@ -625,27 +571,21 @@ async function handleRefresh() {
 }
 
 function onKeyDown(e: KeyboardEvent) {
-  // F5 — refresh current directory. We intercept the default browser
-  // refresh so a file manager F5 doesn't reload the whole page.
+  // F5 改为刷新目录而非整页重载。
   if (e.key === 'F5' && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey) {
     e.preventDefault()
     handleRefresh()
   }
 }
 
-// Global Alt-key state. Tracked at the window level so the same signal
-// is available whether the delete was triggered by the desktop action
-// button (which sees the click event) or the mobile dropdown (which
-// synthesises its own click event with no modifier info).
+// 在 window 级跟踪 Alt 状态，桌面点击与移动端合成下拉事件都要用到。
 const isAltPressed = ref(false)
 
 function onAltChange(e: KeyboardEvent) {
   isAltPressed.value = e.altKey
 }
 
-// Belt-and-braces: if the window loses focus while Alt is held (alt-tab
-// away, dialog opens, etc.), drop the flag so a subsequent click doesn't
-// surprise the user by skipping confirmation.
+// 窗口失焦时 Alt 标记不会收到 keyup，需手动清除。
 function onWindowBlur() {
   isAltPressed.value = false
 }
@@ -655,9 +595,6 @@ onMounted(() => {
   window.addEventListener('keydown', onAltChange)
   window.addEventListener('keyup', onAltChange)
   window.addEventListener('blur', onWindowBlur)
-  // Grow the rendered window automatically when the sentinel nears the
-  // viewport. rootMargin preloads a screenful ahead so scrolling feels
-  // seamless rather than snapping at the boundary.
   sentinelObserver = new IntersectionObserver((entries) => {
     if (entries.some(e => e.isIntersecting) && hasMoreFiles.value) {
       displayCount.value += PAGE_SIZE
@@ -666,7 +603,7 @@ onMounted(() => {
   if (sentinelRef.value) {
     sentinelObserver.observe(sentinelRef.value)
   }
-  // Apply saved sort order after component is mounted
+  // 挂载后再套用已保存的排序。
   nextTick(() => {
     if (elTableRef.value && fileStore.files.length > 0) {
       elTableRef.value.sort(fileStore.sortProp, fileStore.sortOrder)
@@ -674,18 +611,14 @@ onMounted(() => {
   })
 })
 
-// The sentinel sits behind a v-if (hidden for empty listings), so Vue
-// swaps the element out on navigation. Re-attach the observer whenever
-// the template ref points at a fresh element, otherwise auto-loading
-// silently stops working after visiting an empty directory.
+// sentinel 元素会随导航被替换，需重新挂载 observer。
 watch(sentinelRef, (el, oldEl) => {
   if (oldEl) sentinelObserver?.unobserve(oldEl)
   if (el) sentinelObserver?.observe(el)
 }, { flush: 'post' })
 
-// Restore saved sort order when files change (navigation, refresh, etc.)
 watch(() => fileStore.files, (newFiles) => {
-  // New listing — restart the incremental window from the top.
+  // 新目录：渲染窗口重置回顶部。
   displayCount.value = PAGE_SIZE
   if (newFiles.length > 0 && elTableRef.value) {
     nextTick(() => {
@@ -731,8 +664,6 @@ function isVideo(file: FileItemType): boolean {
 }
 
 function isImage(file: FileItemType): boolean {
-  // Gate the "Preview image" button on formats the browser can actually
-  // decode into a native <img> — see isPreviewableImage's docstring.
   return isPreviewableImage(file.name)
 }
 
@@ -777,10 +708,7 @@ function handleNavigateImage(target: FileItemType) {
   currentImageFile.value = target
 }
 
-/**
- * Element Plus row-class-name hook. Keeps navigation/selection cursor hints
- * and applies the same selected state used by the checkbox column.
- */
+/** Element Plus 的 row-class-name 钩子：设置光标样式并同步勾选列的选中态。 */
 function rowClassName({ row }: { row: FileItemType }): string {
   const classes = [row.type === 'dir' ? 'row-action-navigate' : 'row-action-select']
   if (fileStore.selectedFiles.has(row.path)) {
@@ -797,15 +725,7 @@ function handleDownloadArchive(file: FileItemType) {
   fileApi.downloadArchive(currentPath.value, file.name)
 }
 
-/**
- * Bulk download from the selection bar. Picks the cheapest path that
- * still gives the user a single artefact:
- *   - 1 file: stream directly via downloadFile (no zip overhead)
- *   - 1 dir:  reuse the existing archive endpoint
- *   - N > 1:  POST /-/zip with every selected path
- * Selection is intentionally not cleared — the user might want to keep
- * the same set around while a large archive downloads in the background.
- */
+/** 选择栏批量下载：按选中数量走最省事的路径。 */
 async function handleDownloadSelected() {
   if (selectedCount.value === 0) return
   const selected = fileStore.files.filter((f) =>
@@ -886,8 +806,7 @@ async function handleCopyLink(file: FileItemType) {
 }
 
 async function handleDeleteFile(file: FileItemType) {
-  // Alt held at click time → skip the confirmation dialog. Documented in
-  // README_zh.md as the "power user" shortcut for batch cleanups.
+  // 按住 Alt 点击可跳过确认。
   if (isAltPressed.value) {
     await fileStore.deleteFile(file.name)
     return
@@ -904,7 +823,7 @@ async function handleDeleteFile(file: FileItemType) {
     )
     await fileStore.deleteFile(file.name)
   } catch {
-    // User cancelled
+    // 用户取消
   }
 }
 
@@ -912,24 +831,13 @@ function handleCreateDirectory() {
   showNewFolderDialog.value = true
 }
 
-// After a successful URL fetch, the listing has changed (a new file
-// landed on disk). Force a silent refresh so the new row appears
-// without re-triggering the loading spinner. The file API endpoint
-// has already invalidated the server-side size cache.
 function handleUrlDownloaded() {
   fileStore.loadFiles(undefined, undefined, { silent: true }).catch(err =>
     console.error('Refresh after URL fetch failed:', err)
   )
 }
 
-// ── Multi-select handlers ──
-
-/**
- * Batch delete. Bypasses fileStore.deleteFile on purpose: that helper
- * fires one success toast per file, which turns a 20-item batch into a
- * toast storm. Here we hit the API directly, reconcile the local list
- * once, and report a single summary.
- */
+/** 批量删除：直接调 API，避免每个文件弹一次提示。 */
 const deletingSelected = ref(false)
 async function handleDeleteSelected() {
   const selected = fileStore.files.filter((f) =>
@@ -949,7 +857,7 @@ async function handleDeleteSelected() {
       }
     )
   } catch {
-    return // user cancelled
+    return
   }
 
   deletingSelected.value = true
@@ -962,8 +870,7 @@ async function handleDeleteSelected() {
         .filter((_, i) => results[i].status === 'fulfilled')
         .map((f) => f.path)
     )
-    // Reconcile locally (same optimistic pattern as deleteFile), then
-    // silently re-sync with the server in the background.
+    // 先本地乐观更新，再静默与服务端重新同步。
     fileStore.files = fileStore.files.filter((f) => !okPaths.has(f.path))
     const remaining = new Set(fileStore.selectedFiles)
     okPaths.forEach((p) => remaining.delete(p))
@@ -983,12 +890,7 @@ async function handleDeleteSelected() {
   }
 }
 
-/**
- * Element Plus selection-change event. Fires for every individual toggle
- * and the final state is the full set of currently-selected rows. We mirror
- * the full set into the store so the rest of the UI (mobile cards, selection
- * bar) sees a single, consistent picture.
- */
+/** 把 Element Plus 的 selection-change 同步进 store。 */
 function handleSelectionChange(selection: FileItemType[]) {
   fileStore.setSelection(selection.map(r => r.path))
 }
@@ -996,18 +898,10 @@ function handleSelectionChange(selection: FileItemType[]) {
 function handleSelectAll() {
   const table = elTableRef.value
   if (table) {
-    // Drive the table's built-in "select all" toggle, which is exactly
-    // what clicking the header checkbox would do. clearSelection() first
-    // puts the table in a known "all deselected" state so the subsequent
-    // toggleAllSelection() always lands on "all selected" regardless of
-    // any prior partial selection. Each fired selection-change routes
-    // back to handleSelectionChange and ends with the store fully synced.
+    // 先 clear 再 toggleAll 才能落到“全选”状态。
     table.clearSelection()
     table.toggleAllSelection()
   } else {
-    // Fallback when the table is unmounted (mobile path): update the
-    // store directly. Mobile cards read from the store, so they stay in
-    // sync without needing the table.
     fileStore.selectAll(sortedFiles.value.map(f => f.path))
   }
 }
@@ -1021,11 +915,6 @@ function handleDeselectAll() {
   }
 }
 
-/**
- * Mobile-only: toggle the cards' selection-mode. Entering turns on every
- * card's checkbox; exiting also clears any pending selection so the user
- * starts clean next time.
- */
 function handleToggleSelectionMode() {
   fileStore.selectionMode = !fileStore.selectionMode
   if (!fileStore.selectionMode) {
@@ -1039,10 +928,6 @@ function handleToggleSelectionMode() {
   padding: 2px 0 24px;
 }
 
-/* ── Unified panel card ──
-   One glass surface for breadcrumb, controls, stats and the list.
-   Replaces the old stack of separate toolbar / table cards — four
-   horizontal bands of different chrome collapse into one. */
 .panel-card {
   background: color-mix(in srgb, var(--el-bg-color) 80%, transparent);
   border: 1px solid var(--el-border-color-lighter);
@@ -1055,7 +940,6 @@ function handleToggleSelectionMode() {
               border-color var(--transition-base);
 }
 
-/* ── Toolbar (top tier of the panel) ── */
 .toolbar {
   display: flex;
   align-items: center;
@@ -1066,9 +950,6 @@ function handleToggleSelectionMode() {
   flex-wrap: wrap;
 }
 
-/* Breadcrumb.vue ships its own page-level padding; zero it here.
-   The two-class selector keeps this scoped rule ahead of the child
-   component's own .breadcrumb padding regardless of style order. */
 .toolbar .toolbar-breadcrumb {
   flex: 1;
   min-width: 0;
@@ -1092,7 +973,6 @@ function handleToggleSelectionMode() {
   flex-shrink: 0;
 }
 
-/* Stats tier — quiet metadata line between toolbar and list */
 .panel-stats {
   display: flex;
   align-items: center;
@@ -1118,7 +998,6 @@ function handleToggleSelectionMode() {
   border-radius: var(--radius-md);
 }
 
-/* Action group: no chrome, primary CTA pops with accent. */
 .toolbar-group--actions {
   padding: 0;
   background: transparent;
@@ -1137,7 +1016,6 @@ function handleToggleSelectionMode() {
   scale: 0.97;
 }
 
-/* Segmented buttons: subtle hover/active inside the nav pill */
 .toolbar-group :deep(.el-button:not(.is-circle)) {
   padding: 6px 12px;
 }
@@ -1146,7 +1024,6 @@ function handleToggleSelectionMode() {
   background: var(--el-bg-color);
 }
 
-/* Primary CTA — Upload. Pops against the rest. */
 .toolbar-group--actions :deep(.el-button--primary) {
   background: var(--el-color-primary);
   color: #fff;
@@ -1171,8 +1048,6 @@ function handleToggleSelectionMode() {
   transform: translateY(0) scale(0.97);
 }
 
-/* Refresh button: icon spins while refreshing so the click feels
-   acknowledged even on a fast server. */
 .toolbar-refresh .el-icon {
   transition: transform 0.2s ease-out;
 }
@@ -1191,11 +1066,6 @@ function handleToggleSelectionMode() {
   to   { transform: rotate(360deg); }
 }
 
-/* ── Selection bar (sits between toolbar and file list) ──
-   Slim contextual bar that only appears when at least one item is
-   selected. Left: badge + count + combined size. Right: the two
-   batch actions as tinted pills (Download primary, Delete danger),
-   then quiet text controls for select-all / clear. */
 .selection-bar {
   display: flex;
   align-items: center;
@@ -1263,9 +1133,6 @@ function handleToggleSelectionMode() {
   gap: 6px;
 }
 
-/* Batch action pills — tinted, medium emphasis. Download is the
-   primary action; Delete carries the danger hue into the bar so the
-   irreversible action is unmistakable before it's clicked. */
 .selection-bar-action.el-button {
   height: 28px;
   padding: 0 12px;
@@ -1324,8 +1191,6 @@ function handleToggleSelectionMode() {
   margin-left: 2px;
 }
 
-/* Phones: collapse the pills to icon-only so the bar fits one row,
-   and drop the size figure — the count alone carries the message. */
 @media (max-width: 640px) {
   .selection-bar {
     padding: 6px 8px 6px 10px;
@@ -1356,27 +1221,20 @@ function handleToggleSelectionMode() {
   }
 }
 
-/* Mobile-only: the "Select" / "Done" toggle button in the toolbar.
-   Hidden on desktop where the table has built-in selection columns. */
 .toolbar-select-toggle {
   display: none;
 }
 
-/* ── Responsive: Tablet / phone ── */
 @media (max-width: 640px) {
   .toolbar {
     gap: 8px;
   }
 
-  /* Hide the textual label on every toolbar button — they're
-     self-explanatory via the tooltip wrappers added above. */
   .toolbar-label {
     display: none;
   }
 
-  /* Convert each button into a uniform square icon button.
-     40×40 meets both Apple HIG (44pt target — close) and
-     Material Design (48dp — also close) for touch ergonomics. */
+  /* 触屏用统一的 40×40 图标按钮。 */
   .toolbar-btn {
     width: 40px !important;
     min-width: 40px;
@@ -1391,31 +1249,22 @@ function handleToggleSelectionMode() {
     font-size: 18px;
   }
 
-  /* The desktop divider doesn't make sense once buttons are
-     uniform-sized icons. Use a small gap instead. */
   .toolbar-group--actions {
     padding-left: 0;
     margin-left: 0;
     border-left: none;
   }
 
-  /* Wrap toolbar groups onto their own line if the row is too
-     wide — but the action group should never be split. */
   .toolbar-group {
     flex-wrap: nowrap;
   }
 
-  /* On mobile, reveal the "Select" / "Done" toggle so users can
-     enter selection mode on cards. The table's built-in checkbox
-     column is hidden on mobile (the card list takes over), so
-     this is the only way to multi-select on phones. */
   .toolbar-select-toggle {
     display: inline-flex;
   }
 }
 
-/* On tiny phones we shrink the touch target a touch to fit more
-   icons in a single row when possible. */
+/* 超小屏缩小触摸目标，尽量单行容纳更多图标。 */
 @media (max-width: 400px) {
   .toolbar {
     gap: 6px;
@@ -1433,9 +1282,6 @@ function handleToggleSelectionMode() {
   }
 }
 
-/* ── Table ──
-   Lives INSIDE the panel card now: no own border/radius/shadow, the
-   card supplies the chrome. Hairline row separators stay. */
 .file-list-container :deep(.el-table) {
   --el-table-border-color: transparent;
   --el-table-border: none;
@@ -1444,8 +1290,6 @@ function handleToggleSelectionMode() {
     var(--el-color-primary) 4%,
     transparent
   );
-  /* Theme-aware selection row tint: stronger than Element Plus' default
-     so the highlight is visible against the row hover state too. */
   --el-table-selected-row-bg-color: color-mix(
     in srgb,
     var(--el-color-primary) 12%,
@@ -1472,15 +1316,11 @@ function handleToggleSelectionMode() {
 }
 
 .file-list-container :deep(.el-table__body td) {
-  /* 8px top + 8px bottom = 16px vertical padding, leaving ~25px of
-     content area inside the 43px row for 13px monospace data cells. */
   padding: 8px 0;
   border-bottom: 1px solid color-mix(in srgb, var(--el-border-color-lighter) 60%, transparent);
   background: transparent;
   transition: background-color var(--transition-base);
-  /* Element Plus distributes the tbody height across rows when the
-     table has a fixed/max height, leaving each cell expanded. Force
-     a 43px cell so the row settles to the requested compact size. */
+  /* 锁定 43px，让行高保持紧凑。 */
   height: 43px !important;
   max-height: 43px !important;
 }
@@ -1492,34 +1332,19 @@ function handleToggleSelectionMode() {
   max-height: 43px !important;
 }
 
-/* Element Plus drives the row height from the `.cell` wrapper's
-   line-height (default 23px) plus the td's padding + border. Setting
-   the line-height to 24px gives the body a tight 43px row
-   (8 padding + 24 line + 8 padding + 1 border = 41, with the extra
-   2px of breathing room absorbed by the row) without
-   fighting the table layout engine. */
+/* 紧凑行专用 line-height。 */
 .file-list-container :deep(.el-table .cell) {
   line-height: 24px;
-  /* Some mono-font glyphs exceed the line-height, padding them out by
-     ~1px. Hard-cap each cell to 24px so the row stays tight. */
   max-height: 24px;
   overflow: hidden;
 }
 
-/* Override the fixed heights Element Plus applies to specific column
-   cells (the selection column uses 23px, action buttons naturally
-   push the actions column taller). Cap them to 24px so the row
-   settles at 43px regardless of which column has the tallest
-   content. */
 .file-list-container :deep(.el-table-column--selection > .cell),
 .file-list-container :deep(.col-actions .cell) {
   height: 24px;
   max-height: 24px;
 }
 
-/* Action buttons inside the row: Element Plus defaults to 32px, which
-   alone exceeds our 43px row budget. Shrink to 24px and tighten
-   padding so the buttons still feel clickable but fit comfortably. */
 .file-list-container :deep(.col-actions .el-button) {
   height: 24px;
   min-height: 24px;
@@ -1530,19 +1355,12 @@ function handleToggleSelectionMode() {
   padding: 0 16px;
 }
 
-/* Tighten the gap between the leading selection checkbox and the
-   file name column. Keep 12px on the left of the checkbox so it
-   doesn't hug the table border, then 2px on the right + 4px on the
-   left of the name cell = 6px total — close, but still reads as a
-   deliberate separation between the control and the file name. */
+/* 收窄复选框与文件名之间的间距。 */
 .file-list-container :deep(.el-table__body td.el-table-column--selection .cell),
 .file-list-container :deep(.el-table__header th.el-table-column--selection .cell) {
   padding: 0 2px 0 12px;
 }
 
-/* Bump the desktop table checkbox a touch larger than Element Plus'
-   default 14px — the rows are 32px+ tall and the default size reads
-   as fiddly next to the larger file name text. */
 .file-list-container :deep(.el-table .el-checkbox__inner) {
   width: 18px;
   height: 18px;
@@ -1566,12 +1384,10 @@ function handleToggleSelectionMode() {
   border-bottom: none;
 }
 
-/* Row click feedback */
 .file-list-container :deep(.el-table__body tr:active) {
   background: var(--el-fill-color);
 }
 
-/* ── Data columns (mono) ── */
 .data-mono {
   font-family: var(--font-mono);
   font-size: 13px;
@@ -1593,14 +1409,12 @@ function handleToggleSelectionMode() {
   color: var(--el-color-primary);
 }
 
-/* ── Action buttons ── */
 .action-buttons {
   display: flex;
   gap: 4px;
   flex-wrap: nowrap;
 }
 
-/* ── Row interaction and selected state ── */
 .file-name-cell-wrap {
   display: flex;
   align-items: center;
@@ -1621,10 +1435,6 @@ function handleToggleSelectionMode() {
   background: color-mix(in srgb, var(--el-color-primary) 16%, transparent);
 }
 
-/* ── Action buttons: monochrome, always visible ──
-   Bare icons at rest (no chip chrome) so the column never reads as
-   an empty white strip; the chip border/bg fades in on row hover,
-   the accent color on button hover. */
 .action-buttons {
   justify-content: flex-end;
 }
@@ -1655,7 +1465,7 @@ function handleToggleSelectionMode() {
               transform var(--transition-fast);
 }
 
-/* Row hover: chip materialises behind the icon. */
+/* 行悬停时图标背后浮现底色。 */
 .file-list-container :deep(.el-table__body tr:hover .row-action-btn.el-button),
 .file-list-container :deep(.el-table__body tr.file-row-selected .row-action-btn.el-button) {
   color: var(--el-text-color-regular);
@@ -1664,7 +1474,6 @@ function handleToggleSelectionMode() {
   box-shadow: var(--shadow-xs);
 }
 
-/* Button hover: accent. */
 .action-buttons :deep(.row-action-btn.el-button:hover) {
   color: var(--el-color-primary);
   border-color: color-mix(in srgb, var(--el-color-primary) 35%, transparent);
@@ -1679,10 +1488,6 @@ function handleToggleSelectionMode() {
   font-size: 14px;
 }
 
-/* ── Empty state ──
-   Big, friendly, illustrated card. SVG folder icon, soft gradient
-   halo, gentle prompt — makes "this folder is empty" feel like a
-   feature, not an error. */
 .empty-state {
   display: flex;
   flex-direction: column;
@@ -1740,12 +1545,10 @@ function handleToggleSelectionMode() {
   to   { opacity: 1; transform: translateY(0); }
 }
 
-/* ── Loading ── */
 .file-list-container :deep(.el-loading-mask) {
   border-radius: var(--radius-lg);
 }
 
-/* ── Incremental-render sentinel ── */
 .load-more-sentinel {
   display: flex;
   justify-content: center;
@@ -1758,15 +1561,12 @@ function handleToggleSelectionMode() {
   font-size: 13px;
 }
 
-/* ── Mobile card list (hidden on desktop) ── */
 .mobile-file-list {
   display: none;
 }
 
-/* ── Responsive: Phone / Small tablet ── */
 @media (max-width: 640px) {
   .file-list-container {
-    /* No more horizontal scroll — full-width card list */
     overflow-x: visible;
   }
 
@@ -1775,7 +1575,7 @@ function handleToggleSelectionMode() {
     padding: 6px 10px;
   }
 
-  /* Hide the table, show the card list */
+  /* 手机隐藏表格，改用卡片列表。 */
   .file-list-container :deep(.file-table) {
     display: none !important;
   }
@@ -1785,13 +1585,11 @@ function handleToggleSelectionMode() {
     padding: 10px 12px 12px;
   }
 
-  /* Breadcrumb gets its own full-width row inside the panel so the
-     control groups below can wrap without fighting it. */
   .toolbar-breadcrumb {
     flex: 1 1 100%;
   }
 
-  /* Hide Modified column (still applies if the table ever leaks through) */
+  /* 隐藏 Modified 列（表格若意外出现也生效）。 */
   .file-list-container :deep(.col-modified) {
     display: none !important;
   }
@@ -1801,8 +1599,6 @@ function handleToggleSelectionMode() {
   }
 }
 
-/* ── Mobile card styles ──
-   Layered, hoverable cards with a generous icon tile. */
 .mobile-file-card {
   display: flex;
   align-items: center;
@@ -1835,10 +1631,6 @@ function handleToggleSelectionMode() {
   transform: scale(0.99);
 }
 
-/* Selected state: same primary tint as the desktop table selection
-   row, so a user moving between desktop and mobile sees consistent
-   visual feedback. The border becomes the primary color too so the
-   selection reads at a glance even on small screens. */
 .mobile-file-card--selected {
   background: color-mix(in srgb, var(--el-color-primary) 12%, var(--el-bg-color));
   border-color: color-mix(in srgb, var(--el-color-primary) 45%, transparent);
@@ -1851,9 +1643,6 @@ function handleToggleSelectionMode() {
   border-color: color-mix(in srgb, var(--el-color-primary) 60%, transparent);
 }
 
-/* Leading checkbox in a mobile card. Sized to a 36px target with
-   some breathing room; @click.stop keeps the checkbox tap from
-   triggering the card's row click. */
 .mobile-file-checkbox {
   flex-shrink: 0;
   margin-right: 2px;
@@ -1872,7 +1661,7 @@ function handleToggleSelectionMode() {
   width: 44px;
   height: 44px;
   border-radius: var(--radius-md);
-  /* color + background come from iconTileStyle (per file type) */
+  /* color 与 background 由 iconTileStyle 按文件类型注入 */
   transition: background var(--transition-base),
               transform var(--transition-base);
 }
@@ -1926,7 +1715,6 @@ function handleToggleSelectionMode() {
   flex-shrink: 0;
 }
 
-/* ── Responsive: Tiny phone ── */
 @media (max-width: 400px) {
   .mobile-file-card {
     padding: 12px 14px;

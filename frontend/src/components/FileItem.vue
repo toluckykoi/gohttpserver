@@ -1,8 +1,5 @@
 <template>
   <div class="file-name-cell">
-    <!-- Tinted chip: 12% of the type color behind a full-strength
-         glyph. Gives instant type recognition (amber folder, violet
-         image, rose video…) without a rainbow of raw icon colors. -->
     <span class="file-icon-chip" :style="chipStyle" aria-hidden="true">
       <svg class="file-icon-glyph" viewBox="0 0 24 24" fill="currentColor">
         <path v-for="(d, i) in iconPaths" :key="i" :d="d" />
@@ -36,8 +33,6 @@ const chipStyle = computed(() => ({
   display: flex;
   align-items: center;
   gap: 10px;
-  /* Match the cell's 24px line-height so the row stays at 41px
-     regardless of the chip's intrinsic height. */
   height: 24px;
 }
 

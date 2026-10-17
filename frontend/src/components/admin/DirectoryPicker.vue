@@ -8,7 +8,6 @@
     append-to-body
   >
     <div class="picker-body">
-      <!-- 当前选中路径面包屑,让用户清楚选了哪个目录。 -->
       <div class="current-path">
         <span class="path-label">已选：</span>
         <code class="path-value">{{ selectedPath || '/' }}</code>
@@ -69,13 +68,7 @@ interface TreeNode {
 
 const treeRef = ref()
 const treeData = ref<TreeNode[]>([])
-// Bumped every time the dialog opens so the <el-tree> fully re-mounts.
-// el-tree caches node state by node-key; without a fresh mount the root
-// node ("/") keeps its previous "loaded" flag on the 2nd open and never
-// re-fetches its children — leaving the tree empty.
 const treeKey = ref(0)
-// selectedPath 保存用户最后点击的节点。我们不立即 emit —— 只有
-// 点「确定」才 emit —— 这样用户在树里浏览时不会改坏表单字段。
 const selectedPath = ref<string>(props.modelValue || '/')
 
 const treeProps = {
@@ -89,14 +82,12 @@ watch(
   (open) => {
     if (open) {
       selectedPath.value = props.modelValue || '/'
-      // 重新挂载整棵树,保证重新打开时状态干净、重新拉取根目录。
+      // 每次打开都重新挂载树，重置节点展开/选中状态。
       treeKey.value++
       treeData.value = [{
         label: '根目录',
         path: '/',
       }]
-      // 自动展开根节点,让用户打开就能看到根目录下的子目录。
-      // 用 nextTick 确保 el-tree 内部节点已经创建。
       nextTick(() => {
         const rootNode = treeRef.value?.getNode('/')
         if (rootNode) {
@@ -107,9 +98,7 @@ watch(
   },
 )
 
-// fetchDir 调用现有的文件列表 API,只返回子目录。
-// ?json=true 端点和文件管理器用的是同一个,所以鉴权和中间件
-// 行为与主界面完全一致。
+// 走文件列表 API（?json=true）并只保留子目录。
 async function fetchDir(path: string): Promise<FileItem[]> {
   const sep = path.includes('?') ? '&' : '?'
   const url = path + sep + 'json=true'
@@ -118,15 +107,11 @@ async function fetchDir(path: string): Promise<FileItem[]> {
     throw new Error(`Failed to list ${path}: ${res.status}`)
   }
   const data = await res.json() as { files: FileItem[] }
-  // 只保留目录,文件不展示。
   return (data.files || []).filter((f) => f.type === 'dir')
 }
 
-// loadNode 是 el-tree 的懒加载回调。展开节点时被调用(根节点展开
-// 时也会调用一次)。我们暂不预判叶子节点,让 el-tree 在展开时
-// 再调用 loadNode,空结果会自动变成叶子。
+// el-tree 懒加载回调：不预先标记叶子，返回空数组时 el-tree 自动视为叶子。
 async function loadNode(node: any, resolve: (data: TreeNode[]) => void) {
-  // node.level === 0 对应我们注入的根节点,path 是 "/"。
   const dirPath = node.level === 0 ? '/' : node.data.path
   try {
     const subdirs = await fetchDir(dirPath)
@@ -146,12 +131,11 @@ function handleCurrentChange(_data: any, node: any) {
 
 function selectNode(data: TreeNode) {
   selectedPath.value = data.path
-  // 同步高亮,让视觉状态和选中状态一致。
   treeRef.value?.setCurrentKey(data.path)
 }
 
 function confirm() {
-  // 规范化:始终以 "/" 开头,除根目录外末尾不带 "/"。
+  // 规范化：始终以 "/" 开头；除根目录外不带结尾斜杠。
   let p = selectedPath.value || '/'
   if (!p.startsWith('/')) p = '/' + p
   if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1)

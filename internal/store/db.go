@@ -7,24 +7,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SQLite-backed persistence for the --login subsystem.
-//
-// When --login is enabled, gohttpserver stores its server-side state in a
-// single SQLite database file (default: gohttpserver.db in the working
-// directory). This replaces the previous scattered JSON files
-// (auth-state.json, webdav-accounts.json, storage-usage.json).
-//
-// The DB lives in the working directory, NOT under --root, so it is never
-// served over HTTP — the same reasoning that kept the JSON files out of the
-// served root.
-//
-// modernc.org/sqlite is a pure-Go driver (no CGO), which keeps the project's
-// CGO_ENABLED=0 cross-compilation (.goreleaser.yml / build.sh) working.
-// ─────────────────────────────────────────────────────────────────────────────
+// SQLite 持久化 gohttpserver 的服务端状态（登录凭据、webdav 账号、存储用量、frp 配置），单文件放在工作目录中，因此绝不会经 HTTP 对外提供。
+// 选用 modernc.org/sqlite 纯 Go 驱动（无需 CGO），以保住项目 CGO_ENABLED=0 的交叉编译能力。
 
-// schemaSQL creates every table used by the --login subsystem. All statements
-// are IF NOT EXISTS so opening an existing database is a no-op.
+// schemaSQL 创建 --login 子系统用到的全部表；语句均为 IF NOT EXISTS，打开已有库时是空操作。
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS login_credentials (
 	id              INTEGER PRIMARY KEY CHECK (id = 1),
@@ -73,27 +59,19 @@ CREATE TABLE IF NOT EXISTS frp_config (
 );
 `
 
-// migrationSQL contains ALTER TABLE statements for adding columns to existing tables.
-// These are executed after schemaSQL to handle upgrades from older versions.
+// migrationSQL 是给已有表加列的 ALTER TABLE 语句，在 schemaSQL 之后执行以支持从旧版本升级。
 const migrationSQL = `
 -- Add proxy_protocol_version column if it doesn't exist (SQLite doesn't support IF NOT EXISTS for ADD COLUMN)
 -- We use a transaction with exception handling to make this idempotent
 ALTER TABLE frp_config ADD COLUMN proxy_protocol_version TEXT NOT NULL DEFAULT '';
 `
 
-// openDB opens (creating if needed) the SQLite database at path and ensures
-// the schema exists. WAL mode gives better concurrency for the read-heavy
-// verify path; a single open connection sidesteps "database is locked"
-// contention on writes (write volume here is tiny — a password change or a
-// quota delta, never a hot loop).
+// OpenDB 打开（必要时创建）SQLite 库并确保 schema 就绪。WAL 提升读并发；连接池上限设为 1，因为写入量很小而纯 Go 驱动按连接串行化写入，封顶可避免并发保存时出现 SQLITE_BUSY。
 func OpenDB(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
 	}
-	// Pure-Go sqlite serializes writes per connection; capping the pool at 1
-	// avoids SQLITE_BUSY under concurrent saves from the login / webdav /
-	// usage states, all of which share this handle.
 	db.SetMaxOpenConns(1)
 	if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
 		db.Close()
@@ -107,8 +85,7 @@ func OpenDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
-	// Execute migrations for existing tables (ignore errors for already-applied migrations)
-	// SQLite doesn't support IF NOT EXISTS for ALTER TABLE ADD COLUMN
+	// 迁移；报错即说明已应用过，故忽略。
 	db.Exec(migrationSQL)
 	return db, nil
 }

@@ -120,10 +120,6 @@ async function loadFileInfo() {
   }
 }
 
-// Hashes are long enough that copy-via-selection is awkward. The
-// icon button is a single click target — clearer affordance than a
-// tooltip-only "select to copy" pattern, and matches the rest of
-// the app's copy-button styling.
 async function copyToClipboard(text: string, label: string) {
   try {
     await copyText(text)
@@ -167,9 +163,6 @@ watch(
   border-radius: var(--radius-md);
 }
 
-/* Hash rows. The hex string is the value; the inline copy button
-   keeps the row compact. On narrow screens the hash wraps to two
-   lines rather than overflowing the dialog. */
 .hash-value {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;

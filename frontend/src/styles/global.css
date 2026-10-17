@@ -1,16 +1,11 @@
-/* ════════════════════════════════════════════════════════════════
-   Design Tokens — Foundation of the entire UI
-   ════════════════════════════════════════════════════════════════ */
-
 :root {
-  /* ── Typography ── */
   --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto,
     'Helvetica Neue', Arial, 'Noto Sans', 'PingFang SC', 'Microsoft YaHei',
     sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
   --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, 'SF Mono',
     Consolas, 'Liberation Mono', Menlo, monospace;
 
-  /* Type scale: tight, slightly compressed for information density */
+  /* 字号偏小，以适应紧凑列表密度 */
   --fs-xs: 11.5px;
   --fs-sm: 13px;
   --fs-md: 14px;
@@ -19,17 +14,13 @@
   --fs-2xl: 20px;
   --fs-3xl: 24px;
 
-  /* ── Motion ── */
-  --ease-out: cubic-bezier(0.16, 1, 0.3, 1); /* smooth deceleration */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
   --transition-fast: 150ms var(--ease-out);
   --transition-base: 220ms var(--ease-out);
   --transition-smooth: 320ms var(--ease-out);
   --transition-slow: 480ms var(--ease-out);
 
-  /* ── Radius ──
-     Linear-inspired, slightly bumped for a softer, friendlier feel.
-     Pill = 999px for fully rounded controls. */
   --radius-xs: 4px;
   --radius-sm: 6px;
   --radius-md: 10px;
@@ -38,9 +29,6 @@
   --radius-2xl: 24px;
   --radius-pill: 999px;
 
-  /* ── Shadows ──
-     Soft, multi-layer shadows. Avoids the harsh drop-shadow look
-     that screams "default OS window". */
   --shadow-xs: 0 1px 2px rgba(15, 23, 42, 0.04);
   --shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.06),
                0 1px 2px rgba(15, 23, 42, 0.04);
@@ -51,25 +39,20 @@
   --shadow-xl: 0 20px 56px rgba(15, 23, 42, 0.12),
                0 8px 16px rgba(15, 23, 42, 0.06);
 
-  /* ── Z-index scale ── */
   --z-sticky: 100;
   --z-dropdown: 200;
   --z-modal: 1000;
   --z-toast: 2000;
 }
 
-/* ════════════════════════════════════════════════════════════════
-   Base
-   ════════════════════════════════════════════════════════════════ */
-
 html {
   font-family: var(--font-sans);
-  font-feature-settings: 'cv11', 'ss01', 'ss03'; /* Inter character variants */
+  font-feature-settings: 'cv11', 'ss01', 'ss03'; /* Inter 字形变体 */
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
   text-size-adjust: 100%;
-  /* 16px minimum on mobile prevents iOS zoom-on-focus */
+  /* 最小 16px，避免 iOS 聚焦输入框时自动放大 */
   font-size: 16px;
 }
 
@@ -77,9 +60,6 @@ body {
   margin: 0;
   padding: 0;
   min-height: 100dvh;
-  /* Subtle vertical gradient gives the page depth without screaming
-     "I'm a gradient!" — most users won't notice it consciously, but
-     the page never looks flat. */
   background:
     linear-gradient(180deg, var(--el-bg-color) 0%, var(--el-bg-color-page) 100%);
   background-attachment: fixed;
@@ -89,17 +69,12 @@ body {
               color var(--transition-base);
 }
 
-/* Element Plus defaults to a slightly tighter letter-spacing than
-   we want for body copy. Loosen just a touch. */
+/* 抵消 body 的负字距，正文用回正常间距 */
 .el-button,
 .el-input__inner,
 .el-textarea__inner {
   letter-spacing: 0;
 }
-
-/* ════════════════════════════════════════════════════════════════
-   Scrollbar — slim, themed, hover-revealed
-   ════════════════════════════════════════════════════════════════ */
 
 ::-webkit-scrollbar {
   width: 10px;
@@ -130,19 +105,12 @@ body {
                    transparent;
 }
 
-/* ════════════════════════════════════════════════════════════════
-   Selection
-   ════════════════════════════════════════════════════════════════ */
-
 ::selection {
   background: color-mix(in srgb, var(--el-color-primary) 24%, transparent);
   color: var(--el-text-color-primary);
 }
 
-/* ════════════════════════════════════════════════════════════════
-   Focus ring — visible only for keyboard nav
-   ════════════════════════════════════════════════════════════════ */
-
+/* 仅键盘导航时显示焦点环 */
 :focus {
   outline: none;
 }
@@ -152,10 +120,6 @@ body {
   outline-offset: 2px;
   border-radius: var(--radius-sm);
 }
-
-/* ════════════════════════════════════════════════════════════════
-   Reduced motion — respect user preference
-   ════════════════════════════════════════════════════════════════ */
 
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -167,11 +131,6 @@ body {
     scroll-behavior: auto !important;
   }
 }
-
-/* ════════════════════════════════════════════════════════════════
-   Element Plus border-radius remapping
-   Every Button/Input/Dialog inherits our rounded corners automatically.
-   ════════════════════════════════════════════════════════════════ */
 
 :root {
   --el-border-radius-base: var(--radius-md);
@@ -209,11 +168,6 @@ body {
   --el-skeleton-item-radius: var(--radius-sm);
 }
 
-/* ════════════════════════════════════════════════════════════════
-   Element Plus component polish
-   ════════════════════════════════════════════════════════════════ */
-
-/* Descriptions: soften cell separators */
 .el-descriptions__cell { border-radius: 0 !important; }
 .el-descriptions__label,
 .el-descriptions__content { border-radius: 0 !important; }
@@ -226,19 +180,16 @@ body {
   border-bottom-right-radius: var(--radius-sm) !important;
 }
 
-/* Circle/round icon-only buttons keep their perfect shape */
+/* 防止上方圆角重映射覆盖圆形按钮，需显式恢复 */
 .el-button.is-circle { border-radius: 50% !important; }
 .el-button.is-round  { border-radius: var(--radius-pill) !important; }
 
-/* Upload drag area: match the rest of the dialog */
 .el-upload-dragger {
   border-radius: var(--radius-lg) !important;
 }
 
-/* Loading masks inherit parent's radius */
 .el-loading-mask { border-radius: inherit !important; }
 
-/* Popper/dropdown/tooltip: subtle elevation */
 .el-popper,
 .el-tooltip__popper,
 .el-dropdown-menu,
@@ -248,7 +199,6 @@ body {
   border: 1px solid var(--el-border-color-lighter);
 }
 
-/* Tooltip — small, sharp, with arrow */
 .el-tooltip__popper {
   padding: 6px 10px !important;
   font-size: var(--fs-xs) !important;
@@ -256,22 +206,16 @@ body {
   border-radius: var(--radius-sm) !important;
 }
 
-/* Notification: rounded card */
 .el-notification {
   border-radius: var(--radius-lg) !important;
   border: 1px solid var(--el-border-color-lighter);
 }
 
-/* Drawer: rounded top on mobile */
 @media (max-width: 768px) {
   .el-drawer {
     border-radius: var(--radius-xl) var(--radius-xl) 0 0 !important;
   }
 }
-
-/* ════════════════════════════════════════════════════════════════
-   Dialog animations — springy enter, gentle leave
-   ════════════════════════════════════════════════════════════════ */
 
 .dialog-fade-enter-active {
   transition: opacity 320ms var(--ease-out),
@@ -290,7 +234,6 @@ body {
   transform: scale(0.95) !important;
 }
 
-/* Overlay: dim backdrop with quick fade */
 .el-overlay {
   background: rgba(15, 23, 42, 0.45) !important;
   backdrop-filter: blur(4px);
@@ -306,7 +249,6 @@ body {
 .el-fade-in-enter-from,
 .el-fade-in-leave-to { opacity: 0 !important; }
 
-/* Message box: same center-expand */
 .el-message-box {
   animation: dialog-pop 320ms var(--ease-out) both;
   border: 1px solid var(--el-border-color-lighter) !important;
@@ -318,14 +260,9 @@ body {
   to   { opacity: 1; transform: scale(1) translateY(0); }
 }
 
-/* Drawer — smooth slide */
 .el-drawer {
   transition: transform var(--transition-smooth) !important;
 }
-
-/* ════════════════════════════════════════════════════════════════
-   Responsive dialog: full-width on phone
-   ════════════════════════════════════════════════════════════════ */
 
 @media (max-width: 640px) {
   .el-dialog {
@@ -340,10 +277,6 @@ body {
   }
 }
 
-/* ════════════════════════════════════════════════════════════════
-   Touch-friendly tap targets
-   ════════════════════════════════════════════════════════════════ */
-
 @media (pointer: coarse) {
   .el-button--small {
     min-height: 36px;
@@ -351,11 +284,6 @@ body {
   }
 }
 
-/* ════════════════════════════════════════════════════════════════
-   Utility classes (used sparingly)
-   ════════════════════════════════════════════════════════════════ */
-
-/* Glass card: translucent + blurred, used for floating panels */
 .glass-card {
   background: color-mix(in srgb, var(--el-bg-color) 75%, transparent);
   backdrop-filter: saturate(180%) blur(20px);
@@ -372,7 +300,6 @@ body {
   }
 }
 
-/* Subtle animated entry for lists/panels */
 .fade-up-enter-active {
   transition: opacity var(--transition-smooth),
               transform var(--transition-smooth);
@@ -382,7 +309,6 @@ body {
   transform: translateY(8px);
 }
 
-/* Tabular numbers helper — used for size/mtime columns */
 .tabular-nums {
   font-variant-numeric: tabular-nums;
 }

@@ -1,18 +1,5 @@
-/**
- * Lightweight regex-based syntax highlighter.
- *
- * Used for the file-preview modal. Tokenization runs in priority order so
- * that comments and strings are extracted first (preventing their contents
- * from being re-tokenized as keywords or numbers), then keywords, then
- * numbers, then everything else falls through to plain.
- *
- * Each language defines:
- *   - tokenOrder:   the order in which token classes are extracted
- *   - patterns:     a regex per token class (must be global, with one
- *                   capture group around the whole match)
- *
- * The output is HTML with `tk-*` class names; the consumer styles them.
- */
+/** 文件预览弹窗用的轻量正则语法高亮：按 tokenOrder 优先级（注释/字符串优先）
+ *  提取 token，输出带 `tk-*` 类名的 HTML。 */
 
 import type { PreviewLanguage } from './previewable'
 
@@ -34,21 +21,15 @@ interface LanguageDef {
   patterns: Partial<Record<TokenType, RegExp>>
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Patterns
-// ────────────────────────────────────────────────────────────────────────────
-
 const LANGUAGE_DEFS: Record<PreviewLanguage, LanguageDef> = {
   markdown: { tokenOrder: [], patterns: {} },
 
   json: {
     tokenOrder: ['string', 'builtin', 'number', 'punct'],
     patterns: {
-      // JSON keys are also strings, but get the 'property' class.
       string: /"(?:[^"\\]|\\.)*"(?=\s*:)|"(?:[^"\\]|\\.)*"/g,
       builtin: /\b(?:true|false|null)\b/g,
       number: /-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b/g,
-      // Don't bother highlighting punctuation; it's noise in JSON.
       punct: /[{}[\],:]/g
     }
   },
@@ -60,7 +41,6 @@ const LANGUAGE_DEFS: Record<PreviewLanguage, LanguageDef> = {
       string: /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g,
       builtin: /\b(?:true|false|null|yes|no|on|off|~)\b/g,
       number: /-?\b\d+(?:\.\d+)?\b/g,
-      // Section headers (lines starting with non-space characters and a colon)
       section: /^[ \t]*[A-Za-z0-9._-]+(?=:)/gm,
       property: /^[ \t]*-?\s*[A-Za-z0-9._-]+(?=:)/gm
     }
@@ -70,8 +50,6 @@ const LANGUAGE_DEFS: Record<PreviewLanguage, LanguageDef> = {
     tokenOrder: ['comment', 'tag', 'string', 'attr'],
     patterns: {
       comment: /<!--[\s\S]*?-->/g,
-      // Matches opening tag, closing tag, or self-closing tag, capturing
-      // just the tag name (so attributes can be colored separately).
       tag: /<\/?([A-Za-z_][\w:-]*)/g,
       string: /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g,
       attr: /\b([A-Za-z_][\w:-]*)(?==)/g
@@ -109,7 +87,7 @@ const LANGUAGE_DEFS: Record<PreviewLanguage, LanguageDef> = {
       string: /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\$'(?:[^'\\]|\\.)*'/g,
       builtin: /\b(?:true|false)\b/g,
       number: /\b\d+\b/g,
-      // Common shell builtins. We don't try to match external commands.
+      // 只匹配常见 shell 内建命令，不尝试匹配外部命令。
       keyword:
         /\b(?:if|then|else|elif|fi|for|while|until|do|done|case|esac|in|function|return|exit|export|local|readonly|declare|set|unset|alias|source|eval|exec|shift|break|continue)\b/g
     }
@@ -159,8 +137,7 @@ const LANGUAGE_DEFS: Record<PreviewLanguage, LanguageDef> = {
     tokenOrder: ['comment', 'string', 'number', 'decorator', 'keyword', 'builtin'],
     patterns: {
       comment: /#[^\n]*/g,
-      // Triple-quoted first via tokenOrder so single-quoted string regex
-      // doesn't accidentally consume the first line of a docstring.
+      // 靠 tokenOrder 让三引号先于单引号匹配，避免单引号正则吃掉 docstring 首行。
       string:
         /"""[\s\S]*?"""|'''[\s\S]*?'''|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g,
       number: /\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?(?:j|j)?\b/g,
@@ -237,10 +214,6 @@ const LANGUAGE_DEFS: Record<PreviewLanguage, LanguageDef> = {
   plain: { tokenOrder: [], patterns: {} }
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Engine
-// ────────────────────────────────────────────────────────────────────────────
-
 const ESCAPE_MAP: Record<string, string> = {
   '&': '&amp;',
   '<': '&lt;',
@@ -253,21 +226,14 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ESCAPE_MAP[c])
 }
 
-/**
- * Highlight `code` for the given language and return safe HTML.
- * Returns escaped HTML even when no language matches, so it is always
- * safe to inject via v-html.
- */
+/** 按语言高亮 `code`，返回安全 HTML。 */
 export function highlight(code: string, language: PreviewLanguage): string {
   const def = LANGUAGE_DEFS[language]
   if (!def || def.tokenOrder.length === 0) {
     return escapeHtml(code)
   }
 
-  // Step 1: stash each token type in priority order into a placeholder.
-  // The placeholder is plain ASCII so it cannot collide with the source
-  // text or with subsequent regexes (none of the languages treat digits
-  // or underscores as keywords, and `__` is not part of any token class).
+  // 把 token 暂存到不会与源码或后续正则冲突的占位符里。
   const stash: string[] = []
   const tag = (text: string, type: TokenType) => {
     const idx = stash.length
@@ -279,15 +245,13 @@ export function highlight(code: string, language: PreviewLanguage): string {
   for (const tokenType of def.tokenOrder) {
     const pattern = def.patterns[tokenType]
     if (!pattern) continue
-    // Make sure the regex is global; the user supplies patterns without flags.
     const regex = pattern.flags.includes('g')
       ? pattern
       : new RegExp(pattern.source, pattern.flags + 'g')
     work = work.replace(regex, (m) => tag(m, tokenType))
   }
 
-  // Step 2: escape whatever is still untokenized (the "plain" parts).
-  // Split on the placeholder delimiter so we can escape exactly the gaps.
+  // 未命中 token 的空隙做转义。
   const parts = work.split(/(TK\d+)/)
   for (let i = 0; i < parts.length; i++) {
     if (!/^TK\d+$/.test(parts[i])) {
@@ -295,15 +259,11 @@ export function highlight(code: string, language: PreviewLanguage): string {
     }
   }
 
-  // Step 3: restore the stashed tokens.
+  // 还原暂存的 token。
   return parts.join('').replace(/TK(\d+)/g, (_, n) => stash[Number(n)])
 }
 
-/**
- * Highlight line-by-line. Each line is highlighted independently so a
- * token that spans lines (rare) cannot leak color into the next line.
- * The caller is expected to join the lines with newlines.
- */
+/** 按行高亮，避免跨行 token 的颜色串到其它行。 */
 export function highlightLines(code: string, language: PreviewLanguage): string[] {
   if (language === 'plain' || !LANGUAGE_DEFS[language] || LANGUAGE_DEFS[language].tokenOrder.length === 0) {
     return code.split('\n').map(escapeHtml)

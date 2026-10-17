@@ -13,14 +13,10 @@ import (
 	goplist "github.com/fork2fix/go-plist"
 )
 
-// maxPlistSize caps how large an Info.plist entry we are willing to read
-// from an IPA. Real-world Info.plist files are a few KiB to a few dozen
-// KiB; anything bigger is either malicious or broken. The previous code
-// did make([]byte, plfile.FileInfo().Size()), so a crafted IPA declaring
-// a 10 GiB uncompressed size would trigger a 10 GiB allocation before
-// any read happened.
+// maxPlistSize 限制从 IPA 读取的 Info.plist 大小，防止伪造超大解压体积强制大额分配。
 const maxPlistSize = 16 * 1024 * 1024 // 16 MiB
 
+// ParseIpaIcon 返回 IPA 中 Payload/*/icon.png 的字节内容。
 func ParseIpaIcon(path string) (data []byte, err error) {
 	iconPattern := regexp.MustCompile(`(?i)^Payload/[^/]*/icon\.png$`)
 	r, err := zip.OpenReader(path)
@@ -48,6 +44,7 @@ func ParseIpaIcon(path string) (data []byte, err error) {
 	return io.ReadAll(plreader)
 }
 
+// ParseIPA 解析 IPA 中的 Payload/*/Info.plist。
 func ParseIPA(path string) (plinfo *PlistBundle, err error) {
 	plistre := regexp.MustCompile(`^Payload/[^/]*/Info\.plist$`)
 	r, err := zip.OpenReader(path)
@@ -72,9 +69,7 @@ func ParseIPA(path string) (plinfo *PlistBundle, err error) {
 		return
 	}
 	defer plreader.Close()
-	// Guard against a crafted IPA declaring a huge uncompressed size:
-	// make([]byte, size) would allocate that much up front. Cap the
-	// allocation at maxPlistSize and reject anything bigger.
+	// 按声明体积预分配前先封顶，防止伪造的超大解压体积触发一次性大额分配。
 	declared := plfile.FileInfo().Size()
 	if declared > maxPlistSize {
 		err = fmt.Errorf("plist entry too large: %d bytes (max %d)", declared, maxPlistSize)
@@ -104,7 +99,6 @@ type PlistBundle struct {
 	} `plist:"CFBundleIcons"`
 }
 
-// ref: https://gist.github.com/frischmilch/b15d81eabb67925642bd#file_manifest.plist
 type plAsset struct {
 	Kind string `plist:"kind"`
 	URL  string `plist:"url"`

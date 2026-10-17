@@ -1,9 +1,6 @@
 <template>
   <div class="settings-section">
-    <!-- WebDAV master switch + URL display. The switch is the
-         single source of truth for whether /dav/ accepts connections;
-         turning it off keeps existing accounts but refuses all
-         requests with 503. -->
+    <!-- WebDAV 总开关：关闭后保留账号，但所有请求返回 503。 -->
     <section class="settings-card">
       <div class="card-header">
         <div>
@@ -28,8 +25,6 @@
       </div>
     </section>
 
-    <!-- Account list. Delegated to its own component because the table
-         + actions are large enough to warrant isolation. -->
     <section class="settings-card" v-if="store.webdavEnabled">
       <div class="card-header">
         <h2 class="section-title">WebDAV Accounts</h2>
@@ -42,8 +37,7 @@
       <el-skeleton v-else :rows="4" animated />
     </section>
 
-    <!-- Create dialog. Mounted lazily so the password preview
-         generator doesn't run until the user opens it. -->
+    <!-- 按需挂载，避免弹窗在未打开时就初始化。 -->
     <WebdavAccountCreate
       v-if="showCreate"
       v-model:visible="showCreate"
@@ -64,9 +58,6 @@ const store = useAdminStore()
 const togglingEnabled = ref(false)
 const showCreate = ref(false)
 
-// Build the full WebDAV URL from the current location + the relative
-// path returned by the API. Using window.location.origin keeps it
-// correct behind reverse proxies that rewrite the host header.
 const webdavFullUrl = computed(() => {
   const origin = window.location.origin
   return `${origin}${store.webdavUrl}`
@@ -98,10 +89,7 @@ onMounted(async () => {
   if (!store.webdavLoaded) {
     await store.loadWebdavStatus()
   }
-  // used_bytes is a server-side cached counter (maintained incrementally
-  // by WebDAV writes). Files added outside WebDAV — or an account pointed
-  // at a folder that already has files — won't be reflected until a walk.
-  // Force one when the panel opens so the quota bars show real numbers.
+  // used_bytes 是服务端缓存值，WebDAV 之外新增的文件不会自动体现；面板打开时强制重算。
   if (store.webdavEnabled) {
     store.recalculateWebdavUsage()
   }
@@ -128,9 +116,6 @@ onMounted(async () => {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 12px;
-  /* On narrow screens the title block and the switch/​button can't
-     sit side-by-side without overlapping. Wrap them so the action
-     drops below the title instead of clipping. */
   flex-wrap: wrap;
 }
 
@@ -141,9 +126,7 @@ onMounted(async () => {
   color: #0f172a;
 }
 
-/* Polished "New Account" pill: gradient fill, rounded, with a subtle
-   shadow and a hover lift so it reads as the primary action. Overrides
-   Element Plus's default button chrome. */
+/* 覆盖 Element Plus 默认按钮样式，做成渐变胶囊按钮。 */
 .new-account-btn {
   height: 28px;
   padding: 0 12px;
@@ -207,13 +190,10 @@ onMounted(async () => {
   padding: 0;
   border-radius: 0;
   word-break: break-all;
-  /* On phones the URL can be very long; let it shrink and the copy
-     button stay clickable rather than the URL eating all the space. */
   min-width: 0;
   flex: 1 1 auto;
 }
 
-/* Phone: tighter spacing, same as ProfileSection. */
 @media (max-width: 640px) {
   .settings-section {
     gap: 14px;
@@ -222,8 +202,6 @@ onMounted(async () => {
     padding: 14px 14px;
   }
   .webdav-url-row {
-    /* Stack the label / URL / copy button vertically so a long URL
-       gets a full row to display. */
     flex-direction: column;
     align-items: stretch;
     gap: 6px;

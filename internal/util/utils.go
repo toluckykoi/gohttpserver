@@ -8,28 +8,19 @@ import (
 	"sync"
 )
 
-// SanitizeLogInput removes control characters (except space, tab, newline)
-// from user-controlled input before logging. Prevents log injection attacks
-// where attackers craft filenames/URLs containing newlines to inject fake
-// log entries.
+// SanitizeLogInput 记录日志前剥离用户可控输入中的控制字符，防止构造文件名注入日志。
 func SanitizeLogInput(s string) string {
-	// Remove control characters except \t \n \r (space is 0x20, printable)
 	return strings.Map(func(r rune) rune {
 		if r < 32 && r != '\t' && r != '\n' && r != '\r' {
-			return -1 // remove the character
+			return -1
 		}
 		return r
 	}, s)
 }
 
-// GetLocalIP returns the non loopback local IP of the host.
-//
-// Only returns a private LAN address in 10.0.0.0/8 or 192.168.0.0/16 —
-// the two ranges a browser on the same office/home network can reach as a
-// "share this URL" address. Other interfaces (CGNAT/Tailscale 100.64/10,
-// link-local, VPN, public) are ignored; if no qualifying address is
-// found, "" is returned so the caller (admin panel Local IP) shows the
-// fallback 127.0.0.1 rather than an unreachable address.
+// GetLocalIP 返回可用于分享的私网地址，找不到则返回 ""。
+// 仅 10/8 与 192.168/16 合格；CGNAT、link-local、VPN 与公网地址对管理面板的
+// “分享此 URL”用途而言不可达。
 func GetLocalIP() string {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
@@ -47,8 +38,7 @@ func GetLocalIP() string {
 	return ""
 }
 
-// IsLANAddress reports whether ip is in one of the LAN ranges the admin
-// panel considers a shareable "Local IP": 10/8 and 192.168/16 only.
+// IsLANAddress 判断 ip 是否属于管理面板视为可分享的局域网段（仅 10/8 与 192.168/16）。
 func IsLANAddress(ip net.IP) bool {
 	for _, cidr := range []string{"10.0.0.0/8", "192.168.0.0/16"} {
 		if _, network, err := net.ParseCIDR(cidr); err == nil && network.Contains(ip) {
@@ -58,10 +48,7 @@ func IsLANAddress(ip net.IP) bool {
 	return false
 }
 
-// privateNets are the ranges treated as internal. Parsed once at init: the
-// access-log path used to rebuild and reparse this list for EVERY request.
-// 100.64.0.0/10 (CGNAT/Tailscale) and fe80::/10 (link-local) are included so a
-// VPN/tailnet client is not mislabelled as a public "FRP" visitor.
+// privateNets 内网网段列表，在 init 阶段解析一次（访问日志路径原先每请求都重建）。
 var privateNets = func() []*net.IPNet {
 	cidrs := []string{
 		"10.0.0.0/8",
@@ -83,7 +70,7 @@ var privateNets = func() []*net.IPNet {
 	return nets
 }()
 
-// IsPrivateIP reports whether ip falls in a private/loopback/link-local range.
+// IsPrivateIP 判断 ip 是否属于私网/loopback/link-local 网段。
 func IsPrivateIP(ip net.IP) bool {
 	if ip == nil {
 		return false
@@ -96,10 +83,8 @@ func IsPrivateIP(ip net.IP) bool {
 	return false
 }
 
-// AccessTypeOf classifies a client address for the access log: "LOCAL" for
-// private/loopback clients, "FRP" for anything arriving from a public address
-// (i.e. through a tunnel or port-forward). An unparseable or empty address is
-// reported as UNKNOWN rather than being silently called public.
+// AccessTypeOf 为访问日志分类客户端地址：私网/loopback 为 "LOCAL"，公网地址
+// （隧道或端口转发）为 "FRP"；无法解析的地址返回 "UNKNOWN" 而非默认为公网。
 func AccessTypeOf(ipStr string) string {
 	if ipStr == "" {
 		return "UNKNOWN"
@@ -132,70 +117,50 @@ func IsDir(path string) bool {
 	return err == nil && info.Mode().IsDir()
 }
 
-// ─── Proxy header trust control ─────────────────────────────────────────────
-//
-// SECURITY FIX: Previously GetClientIP unconditionally trusted X-Forwarded-For
-// and X-Real-IP headers. When the server is directly exposed to the network
-// (not behind a reverse proxy), any client can forge these headers to:
-//   - Bypass login brute-force rate limiting (each fake IP gets its own
-//     counter, so the attacker never gets locked out).
-//   - Inject fake IPs into audit logs, obscuring attack traces.
-//
-// Now proxy headers are only honoured when the operator has explicitly
-// enabled --xheaders (indicating they are behind a trusted proxy). main.go
-// calls SetTrustProxyHeaders(true) when --xheaders is set.
+// 代理头仅在运维显式开启 --xheaders 时才可信，否则任何客户端都能伪造
+// X-Forwarded-For，为每个假 IP 开一个新的限流桶并污染审计日志。
+// （main.go 在解析到 --xheaders 时调用 SetTrustProxyHeaders(true)）
 
 var (
 	trustProxyHeadersMu sync.RWMutex
 	trustProxyHeaders   bool
 )
 
-// SetTrustProxyHeaders enables or disables trust of X-Forwarded-For /
-// X-Real-IP headers. Should be called once at startup from main.go when
-// --xheaders is parsed.
+// SetTrustProxyHeaders 开关 X-Forwarded-For / X-Real-IP 的信任，main.go 解析
+// --xheaders 后在启动阶段调用一次。
 func SetTrustProxyHeaders(v bool) {
 	trustProxyHeadersMu.Lock()
 	defer trustProxyHeadersMu.Unlock()
 	trustProxyHeaders = v
 }
 
-// isTrustProxyHeaders returns whether proxy headers should be trusted.
+// isTrustProxyHeaders 返回是否信任代理头。
 func isTrustProxyHeaders() bool {
 	trustProxyHeadersMu.RLock()
 	defer trustProxyHeadersMu.RUnlock()
 	return trustProxyHeaders
 }
 
-// GetClientIP extracts the client IP address from the request.
-//
-// When --xheaders is enabled (server behind a trusted reverse proxy),
-// it checks X-Forwarded-For and X-Real-IP headers first, then falls
-// back to RemoteAddr.
-//
-// When --xheaders is NOT enabled (server directly exposed), it uses
-// only RemoteAddr, preventing IP spoofing via forged proxy headers.
+// GetClientIP 提取客户端 IP：仅在 --xheaders 开启时才采信 X-Forwarded-For /
+// X-Real-IP，否则只用 RemoteAddr，避免伪造代理头进行 IP 欺骗。
 func GetClientIP(r *http.Request) string {
 	if isTrustProxyHeaders() {
-		// Check X-Forwarded-For header (common for reverse proxies)
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			// X-Forwarded-For can contain multiple IPs: client, proxy1, proxy2
-			// Take the first one (the original client)
+			// XFF 形如 "client, proxy1, proxy2"，取最原始的客户端
 			if idx := strings.Index(xff, ","); idx != -1 {
 				return strings.TrimSpace(xff[:idx])
 			}
 			return strings.TrimSpace(xff)
 		}
 
-		// Check X-Real-IP header (nginx, etc.)
 		if xri := r.Header.Get("X-Real-IP"); xri != "" {
 			return strings.TrimSpace(xri)
 		}
 	}
 
-	// Fall back to RemoteAddr
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr // RemoteAddr might not have port
+		return r.RemoteAddr // RemoteAddr 可能不带端口
 	}
 	return ip
 }

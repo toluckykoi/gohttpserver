@@ -26,7 +26,6 @@
     </template>
 
     <div ref="viewportRef" class="image-viewport" @wheel.prevent="handleWheel">
-      <!-- Prev / Next buttons -->
       <button
         v-if="hasPrev"
         class="image-nav image-nav--prev"
@@ -127,7 +126,7 @@ interface Props {
   visible: boolean
   file: FileItem | null
   currentPath: string
-  /** Sibling image files in the same directory, for prev/next navigation. */
+  /** 同目录下的兄弟图片文件，用于上一张/下一张导航。 */
   siblings?: FileItem[]
 }
 
@@ -258,12 +257,10 @@ function navigate(delta: number) {
   if (list.length === 0) return
   const next = siblingIndex.value + delta
   if (next < 0 || next >= list.length) return
-  // The parent owns the file; emit and let it update.
   const target = list[next]
   emit('navigate', target)
 }
 
-// Keyboard navigation: left/right arrows when modal is open.
 function onKeyDown(e: KeyboardEvent) {
   if (!visible.value) return
   if (e.key === 'ArrowLeft' && hasPrev.value) {
@@ -296,7 +293,6 @@ watch(
 </script>
 
 <style scoped>
-/* ── Header ── */
 .image-header {
   display: flex;
   align-items: center;
@@ -334,7 +330,6 @@ watch(
   background: var(--el-fill-color);
 }
 
-/* ── Viewport ── */
 .image-viewport {
   position: relative;
   display: flex;
@@ -383,7 +378,6 @@ watch(
   color: var(--el-text-color-placeholder);
 }
 
-/* ── Prev / Next buttons ── */
 .image-nav {
   position: absolute;
   top: 50%;
@@ -413,7 +407,6 @@ watch(
 .image-nav--prev { left: 12px; }
 .image-nav--next { right: 12px; }
 
-/* ── Toolbar ── */
 .image-toolbar {
   display: flex;
   align-items: center;
@@ -444,12 +437,10 @@ watch(
   color: var(--el-text-color-secondary);
 }
 
-/* ── Dialog body padding ── */
 :deep(.image-dialog .el-dialog__body) {
   padding: 4px 20px 20px;
 }
 
-/* ── Responsive ── */
 @media (max-width: 768px) {
   :deep(.image-dialog) {
     width: calc(100vw - 32px) !important;

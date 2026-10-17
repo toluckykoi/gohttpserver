@@ -6,9 +6,6 @@ import (
 	"strings"
 )
 
-// compressibleExt lists the embedded-SPA asset types worth gzipping. The
-// bundle is ~1.4 MiB of JS/CSS; serving it identity-encoded meant every cold
-// load paid for all of it, even though gzip cuts it by roughly 3x.
 var compressibleExt = []string{".js", ".mjs", ".css", ".html", ".svg", ".json", ".map", ".txt", ".ico"}
 
 func compressiblePath(p string) bool {
@@ -21,28 +18,15 @@ func compressiblePath(p string) bool {
 	return false
 }
 
-// StaticAssets wraps the embedded frontend file server with the two response
-// policies a Vite bundle needs:
-//
-//   - gzip for text assets (only when the client asked for it, never for HEAD
-//     or Range requests — a range of a gzipped body is not a range of the
-//     original bytes);
-//   - Cache-Control. Vite names every bundled file with a content hash
-//     (element-plus-BBkW7pD9.js), so those are safe to mark immutable for a
-//     year. Everything else under /-/frontend/ (the SPA shell, favicon) must
-//     revalidate, because it can change without its name changing.
-//
-// The file server itself sets neither header: http.FileServer over an
-// embed.FS has no ModTime, so it cannot even emit Last-Modified, and clients
-// therefore had no way to cache or revalidate the bundle at all.
+// StaticAssets 为内嵌前端文件服务加上 gzip（仅 GET、无 Range、且客户端声明接受）与
+// Cache-Control：/assets/ 下带内容哈希的文件缓存一年，SPA 外壳与 favicon 需重新验证，
+// 因为它们的名字不变而内容可能变。底层文件服务本身不设这两个头。
 func StaticAssets(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isHashedAsset(r.URL.Path) {
 			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		} else {
-			// No validators exist for embedded files, so "no-cache" would force
-			// a full re-download on every navigation. A short max-age keeps the
-			// SPA shell fresh enough without hammering the server.
+			// 内嵌文件没有验证器可用，纯 "no-cache" 会导致每次导航都全量重新下载
 			w.Header().Set("Cache-Control", "no-cache, max-age=60")
 		}
 
@@ -64,15 +48,12 @@ func StaticAssets(next http.Handler) http.Handler {
 	})
 }
 
-// isHashedAsset reports whether the path points at a Vite content-hashed
-// bundle file (/-/frontend/assets/<name>-<hash>.<ext>).
+// isHashedAsset 判断路径是否指向 Vite 的内容哈希产物（/-/frontend/assets/<name>-<hash>.<ext>）。
 func isHashedAsset(p string) bool {
 	return strings.Contains(p, "/assets/")
 }
 
-// acceptsGzip does a deliberately simple Accept-Encoding check: we only need
-// to know whether gzip is acceptable, and "gzip;q=0" is the only realistic way
-// a client that lists gzip would still refuse it.
+// acceptsGzip 简单检查 Accept-Encoding：列出 gzip 的客户端唯一现实中的拒绝方式是 "gzip;q=0"。
 func acceptsGzip(header string) bool {
 	for _, part := range strings.Split(header, ",") {
 		part = strings.TrimSpace(part)
@@ -83,9 +64,8 @@ func acceptsGzip(header string) bool {
 	return false
 }
 
-// gzipResponseWriter deflates the body and fixes up the framing headers that
-// http.ServeContent already committed to (Content-Length / Accept-Ranges are
-// no longer true once the body is compressed).
+// gzipResponseWriter 压缩响应体，并去掉 http.ServeContent 可能已写入的框架头
+// （压缩后 Content-Length / Accept-Ranges 不再成立）。
 type gzipResponseWriter struct {
 	http.ResponseWriter
 	gz        *gzip.Writer
@@ -111,8 +91,7 @@ func (w *gzipResponseWriter) Write(b []byte) (int, error) {
 	return w.gz.Write(b)
 }
 
-// Flush forwards through the gzip writer so streamed responses still reach the
-// client promptly.
+// Flush 先刷 gzip writer 再刷底层，保证流式响应及时送达。
 func (w *gzipResponseWriter) Flush() {
 	_ = w.gz.Flush()
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {

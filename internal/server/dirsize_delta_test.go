@@ -6,8 +6,7 @@ import (
 	"testing"
 )
 
-// Verifies the dir-size cache: index aggregation, delta updates on
-// upload/delete, subtree drops, and the lazy walk fallback.
+// 验证目录大小缓存：索引聚合、上传/删除的增量更新、子树删除与惰性遍历回退。
 func TestDirSizeCacheAggregationAndDeltas(t *testing.T) {
 	root := t.TempDir()
 	mk := func(rel string, size int) {
@@ -26,13 +25,13 @@ func TestDirSizeCacheAggregationAndDeltas(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := NewHTTPStaticServer(root, true) // noIndex=true: no background loop
+	s := NewHTTPStaticServer(root, true) // noIndex=true：不起后台循环
 	if err := s.makeIndex(); err != nil {
 		t.Fatal(err)
 	}
 
 	cases := map[string]int64{
-		".":     175, // root
+		".":     175, // 根目录
 		"a":     150,
 		"a/sub": 50,
 		"b":     25,
@@ -44,7 +43,7 @@ func TestDirSizeCacheAggregationAndDeltas(t *testing.T) {
 		}
 	}
 
-	// Upload delta: +60 into a/sub → a=210, a/sub=110, root=235
+	// 上传增量：向 a/sub 写入 +60 → a=210、a/sub=110、root=235
 	mk("a/sub/new.bin", 60)
 	dirInfoSize.addDelta("a/sub/new.bin", 60)
 	if got := s.historyDirSize("a"); got != 210 {
@@ -54,7 +53,7 @@ func TestDirSizeCacheAggregationAndDeltas(t *testing.T) {
 		t.Errorf("after upload: root = %d, want 235", got)
 	}
 
-	// Delete delta: remove a/sub (110 cached) → a=100, root=125
+	// 删除增量：移除 a/sub（缓存 110）→ a=100、root=125
 	dirInfoSize.addDelta("a/sub", -110)
 	dirInfoSize.dropSubtree("a/sub")
 	os.RemoveAll(filepath.Join(root, "a", "sub"))
@@ -65,7 +64,7 @@ func TestDirSizeCacheAggregationAndDeltas(t *testing.T) {
 		t.Errorf("after delete: root = %d, want 125", got)
 	}
 
-	// Rebuild from disk reflects reality exactly.
+	// 从磁盘重建后与实际情况完全一致。
 	if err := s.makeIndex(); err != nil {
 		t.Fatal(err)
 	}
@@ -73,21 +72,19 @@ func TestDirSizeCacheAggregationAndDeltas(t *testing.T) {
 		t.Errorf("after reindex: root = %d, want 125", got)
 	}
 
-	// Search still works and is case-insensitive via precomputed Lower.
+	// 搜索仍可用，并借助预计算的 Lower 实现大小写不敏感。
 	res := s.findIndex("F1")
 	if len(res) != 1 || res[0].Path != "a/f1.txt" {
 		t.Errorf("findIndex(F1) = %+v, want a/f1.txt", res)
 	}
-	// At this point a/sub (incl. f2.txt) has been deleted, so only
-	// a/f1.txt and b/f3.txt remain; "txt -f3" matches just f1.
+	// 此时 a/sub（含 f2.txt）已删除，只剩 a/f1.txt 与 b/f3.txt；"txt -f3" 只命中 f1。
 	res = s.findIndex("txt -f3")
 	if len(res) != 1 || res[0].Path != "a/f1.txt" {
 		t.Errorf("findIndex(txt -f3) = %+v, want only a/f1.txt", res)
 	}
 }
 
-// Lazy fallback: with no index built at all (map nil), historyDirSize
-// must still walk the subtree and return the correct size.
+// 惰性回退：完全没有索引（map 为 nil）时，historyDirSize 仍须遍历子树并返回正确大小。
 func TestDirSizeLazyFallback(t *testing.T) {
 	root := t.TempDir()
 	p := filepath.Join(root, "x", "y")
@@ -96,7 +93,7 @@ func TestDirSizeLazyFallback(t *testing.T) {
 	}
 	os.WriteFile(filepath.Join(p, "f.bin"), make([]byte, 42), 0o644)
 
-	// Replace sharded cache with fresh empty one
+	// 用全新的空分片缓存替换
 	saved := dirInfoSize
 	dirInfoSize = shardedDirSize{}
 	defer func() { dirInfoSize = saved }()

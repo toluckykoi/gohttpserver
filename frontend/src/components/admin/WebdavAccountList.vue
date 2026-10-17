@@ -1,10 +1,6 @@
 <template>
   <div class="webdav-list">
-    <!-- Toolbar: manual refresh for the used-bytes counters. The
-         server updates usage live on every WebDAV write, but this SPA
-         only reads it on load — so after a client uploads files the
-         quota bars here stay stale until a reload. The button (plus the
-         visibility-change auto-refresh below) keeps the numbers fresh. -->
+    <!-- 已用容量由服务端缓存，需要手动刷新。 -->
     <div class="list-toolbar" v-if="store.webdavAccounts.length > 0">
       <span class="toolbar-hint">已用容量随上传自动更新</span>
       <el-button text size="small" :loading="refreshing" @click="handleRefresh">
@@ -12,21 +8,12 @@
         <span>刷新</span>
       </el-button>
     </div>
-    <!-- Empty state: shown when the operator has just enabled WebDAV
-         but hasn't created any accounts yet. Encourages them to make
-         one, since /dav/ returns 401 for every request without an
-         account. -->
     <div v-if="store.webdavAccounts.length === 0" class="empty-state">
       <el-icon :size="32" class="empty-icon"><FolderOpened /></el-icon>
       <p class="empty-text">No WebDAV accounts yet. Click "New Account" in the top right to get started.</p>
     </div>
 
-    <!-- Desktop: full table. Narrow screens: card list (the table has
-         7 columns and becomes unreadable below ~900px, so we switch to
-         vertical cards on tablets and phones).
-
-         Clicking anywhere on a row toggles an expanded detail panel
-         showing the connect link, username and password. -->
+    <!-- 宽屏用表格，窄屏改用卡片列表；点击行展开详情面板。 -->
     <el-table
       v-else-if="!isNarrow"
       ref="tableRef"
@@ -37,8 +24,7 @@
       class="account-table"
       @row-click="onRowClick"
     >
-      <!-- Expand column: the trigger arrow is hidden via CSS; the whole
-           row is the click target. The panel shows the "basic info". -->
+      <!-- 展开列：箭头由 CSS 隐藏，整行可点击。 -->
       <el-table-column type="expand">
         <template #default="{ row }">
           <div class="account-detail" @click.stop>
@@ -140,8 +126,6 @@
       </el-table-column>
     </el-table>
 
-    <!-- Narrow layout: vertical cards. Tapping the card header toggles
-         the same detail panel; actions live in a three-dot menu. -->
     <div v-else class="mobile-cards">
       <div v-for="acc in store.webdavAccounts" :key="acc.id" class="mobile-card">
         <div class="mobile-card-header" @click="toggleMobile(acc.id)">
@@ -186,7 +170,6 @@
           </span>
         </div>
         <div class="mobile-row"><span>Created</span><span>{{ formatTime(acc.created_at) }}</span></div>
-        <!-- Expanded "basic info" panel, mirrors the desktop detail row. -->
         <div v-if="expandedMobile.has(acc.id)" class="account-detail account-detail--mobile">
           <div class="detail-row">
             <span class="detail-label">链接地址</span>
@@ -219,8 +202,7 @@
       </div>
     </div>
 
-    <!-- Edit dialog. Mounted lazily so it only initialises when an
-         account is actually being edited. -->
+    <!-- 按需挂载。 -->
     <WebdavAccountEdit
       v-if="showEdit"
       v-model:visible="showEdit"
@@ -228,9 +210,7 @@
     />
 
 
-    <!-- Reset password result dialog. Plaintext password is shown here
-         once, with a copy button. Closing the dialog discards the
-         password forever — there's no way to recover it. -->
+    <!-- 重置密码结果弹窗：密码仅此一次可见。 -->
     <el-dialog
       v-model="showPasswordDialog"
       title="New Password"
@@ -247,14 +227,7 @@
       <p class="password-warning">
         This password is shown only once. Copy it now — it cannot be viewed again after closing.
       </p>
-      <!-- Connect URL with embedded credentials. Many WebDAV clients
-           (rclone, Cyberduck, command-line curl, macOS Finder "Connect
-           to Server") accept a URL of the form
-           http://user:password@host:port/path and pre-fill the
-           auth dialog. Showing this string makes the "which
-           username? which password?" guesswork go away, which is the
-           single most common source of "Linux shows Unauthorized"
-           reports from operators who hand-copied the password. -->
+      <!-- 内嵌凭据的连接 URL，多数客户端可直接预填用户名密码。 -->
       <div v-if="resetConnectUrl" class="connect-url-row">
         <span class="connect-url-label">Connect URL</span>
         <code class="connect-url-value">{{ resetConnectUrl }}</code>
@@ -283,31 +256,18 @@ import WebdavAccountEdit from './WebdavAccountEdit.vue'
 
 const store = useAdminStore()
 
-// Ref to the el-table so onRowClick can toggle a row's expansion. The
-// expand arrow itself is hidden (CSS) — the whole row is the trigger.
 const tableRef = ref()
 
-// Edit dialog state. editAccount is the row being edited; showEdit
-// mounts the dialog lazily.
 const showEdit = ref(false)
 const editAccount = ref<WebdavAccount | null>(null)
 
-// Mobile: which cards have their detail panel expanded. Desktop uses
-// el-table's own expansion state instead.
 const expandedMobile = ref<Set<string>>(new Set())
 
-// Which accounts currently have their password revealed (eye toggle).
 const revealed = ref<Set<string>>(new Set())
 
-// Manual refresh + auto-poll state for the used-bytes counters. The
-// server tracks usage live (every PUT/DELETE updates an in-memory
-// counter), but this SPA only reads it on load — so after a WebDAV
-// client uploads, the quota bars here go stale until we re-fetch.
 const refreshing = ref(false)
 let pollTimer: ReturnType<typeof setInterval> | undefined
 
-// Re-fetch account list (carrying fresh used_bytes) from the server.
-// Cheap: the server reads an in-memory counter, no filesystem walk.
 async function handleRefresh() {
   refreshing.value = true
   try {
@@ -317,8 +277,7 @@ async function handleRefresh() {
   }
 }
 
-// Poll usage while the tab is visible so quota bars stay in sync with
-// ongoing WebDAV uploads without the operator having to click refresh.
+// 仅在标签页可见时轮询用量，保持配额进度条同步。
 function startPolling() {
   stopPolling()
   pollTimer = setInterval(() => {
@@ -334,8 +293,6 @@ function stopPolling() {
   }
 }
 
-// Refresh immediately when the user switches back to this tab — the
-// common case is "upload via client, switch to admin to check".
 function handleVisibility() {
   if (document.visibilityState === 'visible') {
     store.loadWebdavStatus()
@@ -348,29 +305,19 @@ function toggleReveal(id: string) {
   revealed.value = next
 }
 
-// The connect link is the same for every account (origin + the WebDAV
-// base path); root_path is a server-side scope, not part of the URL.
+// 连接地址对所有账号相同，访问范围由服务端按 root_path 限定。
 const accountUrl = computed(() => `${window.location.origin}${store.webdavUrl || '/dav/'}`)
 
-// The table has 7 columns (Remark/Username/Root Path/Permission/System
-// Protection/Created/Actions). On anything below ~900px it gets too
-// cramped to read, so we switch to the vertical card layout. The
-// threshold is higher than the App's 640px phone breakpoint because
-// the table genuinely needs more room than a simple list — a tablet
-// in portrait is still too narrow.
+// 表格约需 900px，更窄时改用纵向卡片。
 const isNarrow = ref(window.innerWidth < 900)
 function handleResize() {
   isNarrow.value = window.innerWidth < 900
 }
 
-// Toggle the desktop expanded detail panel by clicking anywhere on the
-// row. Clicks on the actions dropdown call @click.stop so they don't
-// bubble here and accidentally toggle the panel.
 function onRowClick(row: WebdavAccount) {
   tableRef.value?.toggleRowExpansion(row)
 }
 
-// Toggle a mobile card's detail panel.
 function toggleMobile(id: string) {
   const next = new Set(expandedMobile.value)
   if (next.has(id)) next.delete(id)
@@ -378,7 +325,6 @@ function toggleMobile(id: string) {
   expandedMobile.value = next
 }
 
-// Dispatch the three-dot menu commands to the matching handler.
 function onCommand(cmd: string, acc: WebdavAccount) {
   if (cmd === 'edit') {
     editAccount.value = acc
@@ -400,10 +346,7 @@ async function copyText(text: string) {
 
 const showPasswordDialog = ref(false)
 const resetPasswordValue = ref('')
-// The webdav account whose password was just reset. We need its
-// username to build the connect URL — store the whole account so
-// this dialog can be reused for future per-account helpers without
-// re-plumbing the username from the table.
+// 刚重置密码的账号，用于拼接连接 URL。
 const resetAccount = ref<WebdavAccount | null>(null)
 
 function formatTime(unix: number): string {
@@ -413,10 +356,7 @@ function formatTime(unix: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
-// formatBytes converts raw bytes to a human-readable string with the
-// largest unit that keeps the leading number >= 1. Mirrors what
-// Windows / macOS Finder show in their drive-info panels so users get
-// consistent numbers across admin UI and OS-level quota display.
+// 选能让数值 >= 1 的最大单位做人类可读格式化。
 function formatBytes(n: number): string {
   if (!n || n < 0) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
@@ -426,27 +366,19 @@ function formatBytes(n: number): string {
     v /= 1024
     i++
   }
-  // Two decimals for < 10 in the chosen unit (matches Finder), else
-  // zero decimals. Always show at least one decimal for non-byte.
   if (i === 0) return `${v} ${units[i]}`
   if (v < 10) return `${v.toFixed(2)} ${units[i]}`
   if (v < 100) return `${v.toFixed(1)} ${units[i]}`
   return `${v.toFixed(0)} ${units[i]}`
 }
 
-// quotaPercent returns 0..100 (clamped). Unlimited accounts (quota=0)
-// always show 0 to avoid a misleading "empty bar" — the column already
-// displays "不限" as a textual label.
+// 返回 0..100（已截断）；不限配额的账号恒为 0。
 function quotaPercent(row: WebdavAccount): number {
   if (!row.quota_bytes || row.quota_bytes <= 0) return 0
   return Math.min(100, Math.round((row.used_bytes / row.quota_bytes) * 100))
 }
 
-// quotaColor returns the el-progress bar color based on fill. We use
-// blue for healthy (<80%), warning yellow for near-full (80-100%),
-// and red for over-quota (>100% — which can happen if the operator
-// shrunk quota below current usage; the system doesn't delete files
-// retroactively).
+// 进度条配色：<80% 蓝，80-100% 黄，超配额红。
 function quotaColor(row: WebdavAccount): string {
   const pct = quotaPercent(row)
   if (pct > 100) return '#ef4444'
@@ -454,21 +386,13 @@ function quotaColor(row: WebdavAccount): string {
   return '#3b82f6'
 }
 
-// Build the connect URL with embedded credentials. We pull username
-// from the account that was just reset (resetAccount) and password
-// from the freshly-generated value (resetPasswordValue). Empty
-// until both are populated. The userinfo portion is percent-encoded
-// per RFC 3986 — our generated passwords only use an unambiguous
-// alphabet so no escaping is needed today, but encoding defensively
-// avoids surprises if the alphabet changes later.
 const resetConnectUrl = computed(() => {
   if (!resetAccount.value || !resetPasswordValue.value) return ''
   const u = encodeURIComponent(resetAccount.value.username)
   const p = encodeURIComponent(resetPasswordValue.value)
   const origin = window.location.origin
   const path = store.webdavUrl || '/dav/'
-  // origin already includes scheme://host:port; append path with
-  // embedded userinfo between scheme:// and host.
+  // origin 形如 scheme://host:port，需要把 userinfo 插在 scheme 与 host 之间。
   const m = origin.match(/^([a-z]+:\/\/)(.+)$/i)
   if (!m) return ''
   return `${m[1]}${u}:${p}@${m[2]}${path.replace(/^\//, '')}`
@@ -582,13 +506,11 @@ onBeforeUnmount(() => {
   border-radius: 4px;
 }
 
-/* Rows are clickable to expand the detail panel. */
 .account-table :deep(.el-table__row) {
   cursor: pointer;
 }
 
-/* Hide the default expand arrow — the whole row toggles the panel — and
-   collapse the expand column to a hairline so it doesn't leave a gap. */
+/* 隐藏默认展开箭头，并把展开列压成 0 宽，避免留白。 */
 .account-table :deep(.el-table__expand-column .cell) {
   display: none;
 }
@@ -609,7 +531,6 @@ onBeforeUnmount(() => {
   color: var(--el-color-danger);
 }
 
-/* Basic-info panel (link / username / password), shown on row expand. */
 .account-detail {
   display: flex;
   flex-direction: column;
@@ -629,9 +550,7 @@ onBeforeUnmount(() => {
   gap: 8px;
   flex-wrap: wrap;
 }
-/* Element Plus adds margin-left:12px between adjacent buttons; on top of
-   the flex gap that pushes the reveal / copy icons too far apart. Rely
-   on the row's gap only. */
+/* 清掉 Element Plus 相邻按钮的 margin-left，只靠 flex gap 分隔。 */
 .detail-row :deep(.el-button + .el-button) {
   margin-left: 0;
 }
@@ -677,8 +596,6 @@ onBeforeUnmount(() => {
   gap: 8px;
   margin-bottom: 8px;
   cursor: pointer;
-  /* A very long remark name could push the tag off-screen. Wrap
-     instead of clipping. */
   flex-wrap: wrap;
 }
 
@@ -693,7 +610,6 @@ onBeforeUnmount(() => {
   font-weight: 600;
   font-size: 14px;
   color: #0f172a;
-  /* Long remarks shouldn't overflow; break and wrap to a new line. */
   word-break: break-word;
   min-width: 0;
 }
@@ -733,8 +649,6 @@ onBeforeUnmount(() => {
   background: rgba(148, 163, 184, 0.2);
   padding: 1px 5px;
   border-radius: 4px;
-  /* Long root_path values (e.g. /very/deep/nested/path) should wrap
-     rather than push the label off the right edge. */
   word-break: break-all;
   text-align: right;
   min-width: 0;
@@ -777,10 +691,6 @@ onBeforeUnmount(() => {
   border-radius: 6px;
 }
 
-/* Connect URL row — same shape as the password display, but with a
-   label on the left and a copy button on the right. The URL has
-   user:password@host in the middle so a wide layout would stretch
-   it; we wrap aggressively to keep the dialog narrow. */
 .connect-url-row {
   display: flex;
   align-items: center;

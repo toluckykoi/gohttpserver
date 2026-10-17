@@ -62,9 +62,7 @@ import { useFileStore } from '@/stores/fileStore'
 import { ElMessage } from 'element-plus'
 
 interface Props {
-  /** Path the user was originally trying to reach; preserved in the
-   *  POST body so the server's 302 redirect lands them back where they
-   *  started instead of dumping them at the root. */
+  /** 用户最初想访问的路径。 */
   next?: string
 }
 
@@ -78,15 +76,10 @@ const username = ref('')
 const password = ref('')
 const submitting = ref(false)
 
-// Autofocus the username input on mount so the user can start typing
-// immediately. Element Plus wraps the native <input> inside its own
-// component, so we use a template ref + nextTick to ensure the inner
-// input has been rendered before calling .focus().
+// Element Plus 包装了原生 input，须在 nextTick 后优先调用暴露的 focus()。
 const usernameInputRef = ref<{ focus?: () => void; input?: HTMLInputElement } | null>(null)
 onMounted(() => {
   nextTick(() => {
-    // Prefer the exposed focus() helper (handles internal wrapper),
-    // but fall back to the raw input node if absent.
     const el = usernameInputRef.value as any
     if (!el) return
     if (typeof el.focus === 'function') {
@@ -97,8 +90,7 @@ onMounted(() => {
   })
 })
 
-// Surfaces either a server-supplied error code (mapped to a friendly
-// message) or any client-side validation. Empty string hides the alert.
+// 映射服务端错误码；空字符串表示隐藏提示。
 const errorMessage = computed(() => {
   if (!errorCode.value) return ''
   switch (errorCode.value) {
@@ -112,8 +104,7 @@ const errorMessage = computed(() => {
       return errorCode.value
   }
 })
-// If the server redirected to /-/login?error=... (e.g. after a failed
-// login attempt via the backend redirect flow), surface the error.
+// 服务端通过 ?error= 回传错误码。
 const errorCode = ref<string | null>(
   new URLSearchParams(window.location.search).get('error')
 )
@@ -128,15 +119,8 @@ async function handleSubmit() {
   try {
     const res = await fileStore.loginWithCredentials(username.value.trim(), password.value)
     if (res.ok) {
-      // The SPA doesn't ship a router — the original App.vue navigates
-      // via window.location. After login we land the browser back where
-      // it was headed (next), or at the root. window.location.replace
-      // prevents the login page from cluttering the back stack.
-      const target = props.next || '/'
-      // Hard navigation so the SPA fully re-mounts with the new session
-      // cookie in place; soft re-render would still trip middleware on
-      // the first fetchFiles because Pinia hasn't propagated.
-      window.location.replace(target)
+      // 整页跳转，让 SPA 带上新会话 Cookie 重新挂载。
+      window.location.replace(props.next || '/')
     } else {
       errorCode.value = res.error || 'invalid_credentials'
       password.value = ''

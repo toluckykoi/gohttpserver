@@ -3,22 +3,17 @@ import { ref, computed } from 'vue'
 import type { AdminProfile, WebdavStatus, WebdavAccount } from '@/types'
 import { useAdminApi } from '@/composables/useAdminApi'
 
-/** Admin-panel-wide store. Holds profile info and the WebDAV account
- *  list so the two tabs (个人中心 / 参数设置) can share state without
- *  each one re-fetching. */
+/** 管理面板级 store，Profile / WebDAV / FRP 三个页签共用。 */
 export const useAdminStore = defineStore('admin', () => {
   const api = useAdminApi()
 
-  // ─── Profile tab state ────────────────────────────────────────────
   const profile = ref<AdminProfile | null>(null)
   const profileLoaded = ref(false)
 
-  // ─── WebDAV tab state ─────────────────────────────────────────────
   const webdavStatus = ref<WebdavStatus | null>(null)
   const webdavLoaded = ref(false)
   const webdavLoading = ref(false)
 
-  // ─── FRP tab state ────────────────────────────────────────────────
   const frpStatus = ref<{
     enabled: boolean
     running: boolean
@@ -39,11 +34,8 @@ export const useAdminStore = defineStore('admin', () => {
   const frpLoaded = ref(false)
   const frpLoading = ref(false)
 
-  // Plaintext WebDAV passwords, cached locally. The server only ever
-  // returns a password once (at create / reset time) and stores only a
-  // hash afterwards — so to let the operator re-view a password in the
-  // account's "basic info" panel we stash it in localStorage keyed by
-  // account id. Cleared when the account is deleted.
+  // 本地缓存 WebDAV 明文密码：服务端只在创建/重置时返回一次密码，之后只存哈希，
+  // 因此按账号 id 存进 localStorage 以便再次查看。
   const WEBDAV_PW_KEY = 'webdav_passwords'
   function loadWebdavPasswords(): Record<string, string> {
     try {
@@ -58,8 +50,7 @@ export const useAdminStore = defineStore('admin', () => {
     try {
       localStorage.setItem(WEBDAV_PW_KEY, JSON.stringify(webdavPasswords.value))
     } catch {
-      // Ignore quota / private-mode write failures — the password is
-      // still shown for this session via the in-memory ref.
+      // 忽略配额/隐私模式下的写入失败。
     }
   }
   function setWebdavPassword(id: string, password: string) {
@@ -77,14 +68,12 @@ export const useAdminStore = defineStore('admin', () => {
     persistWebdavPasswords()
   }
 
-  // ─── Profile actions ──────────────────────────────────────────────
   async function loadProfile() {
     const res = await api.fetchProfile()
     if (res.ok) {
       profile.value = res.data
     } else {
-      // Silently fail — the panel will show empty fields rather than
-      // crash. The error is already logged in useAdminApi.
+      // 静默失败；错误已在 useAdminApi 里打印。
       profile.value = null
     }
     profileLoaded.value = true
@@ -93,9 +82,7 @@ export const useAdminStore = defineStore('admin', () => {
   async function changeUsername(newUsername: string) {
     const res = await api.changeUsername(newUsername)
     if (res.ok) {
-      // Update local profile so the header / panel reflects the new
-      // name immediately. The fileStore's user object is updated
-      // separately by App.vue after this returns (it reads res.data).
+      // 同步本地 profile 让头部显示最新名字；App.vue 用 res.data 刷新 fileStore 的 user。
       if (profile.value) {
         profile.value = { ...profile.value, username: res.data.username }
       }
@@ -107,16 +94,13 @@ export const useAdminStore = defineStore('admin', () => {
     return await api.changePassword(oldPassword, newPassword)
   }
 
-  // ─── WebDAV actions ───────────────────────────────────────────────
   async function loadWebdavStatus() {
     webdavLoading.value = true
     const res = await api.fetchWebdavStatus()
     if (res.ok) {
       webdavStatus.value = res.data
     } else if (!webdavStatus.value) {
-      // Only blank on first-load failure; later poll failures keep the
-      // last good list so a transient network blip doesn't wipe the
-      // panel mid-viewing (the WebdavAccountList polls every 10s).
+      // 后续轮询失败时保留上一次的良好状态。
       webdavStatus.value = null
     }
     webdavLoaded.value = true
@@ -141,9 +125,7 @@ export const useAdminStore = defineStore('admin', () => {
   }) {
     const res = await api.createWebdavAccount(req)
     if (res.ok) {
-      // Append the new account (without the password) to the local
-      // list so the table updates without a full reload. The plaintext
-      // password is cached separately so it can be re-viewed later.
+      // 追加时不带密码：密码单独缓存以便再次查看。
       const { password, ...acc } = res.data
       setWebdavPassword(acc.id, password)
       if (webdavStatus.value) {
@@ -184,9 +166,7 @@ export const useAdminStore = defineStore('admin', () => {
     return res
   }
 
-  /** Force-recalculate byte usage for every account. On success,
-   *  merge the returned used_bytes into the local account list so the
-   *  UI updates without a full /status round-trip. */
+  /** 重算所有账号的字节用量。 */
   async function recalculateWebdavUsage() {
     const res = await api.recalculateWebdavUsage()
     if (res.ok && webdavStatus.value) {
@@ -208,7 +188,7 @@ export const useAdminStore = defineStore('admin', () => {
         ...webdavStatus.value,
         accounts: webdavStatus.value.accounts.filter((a) => a.id !== id),
       }
-      // Drop the cached password too — the account is gone.
+      // 同时清掉缓存的密码。
       removeWebdavPassword(id)
     }
     return res
@@ -217,7 +197,7 @@ export const useAdminStore = defineStore('admin', () => {
   async function resetWebdavPassword(id: string) {
     const res = await api.resetWebdavPassword(id)
     if (res.ok && webdavStatus.value) {
-      // Cache the freshly-generated password so it stays viewable.
+      // 缓存新生成的密码，便于继续查看。
       if (res.data?.password) setWebdavPassword(id, res.data.password)
       webdavStatus.value = {
         ...webdavStatus.value,
@@ -231,7 +211,6 @@ export const useAdminStore = defineStore('admin', () => {
     return res
   }
 
-  // ─── FRP actions ──────────────────────────────────────────────────
   async function loadFRPStatus() {
     frpLoading.value = true
     const res = await api.fetchFRPStatus()
@@ -266,12 +245,8 @@ export const useAdminStore = defineStore('admin', () => {
   }) {
     const res = await api.updateFRPConfig(req)
     if (res.ok && frpStatus.value) {
-      // Optimistically mirror the editable fields, but never echo the
-      // submitted authToken back into the store. The status API treats
-      // the token as write-only (returns "" + authTokenSet), so copying
-      // req.authToken here would either leak the just-typed secret into
-      // the form or wipe the authTokenSet flag when the field is blank.
-      // FrpSection reloads status right after save, which is authoritative.
+      // 只回填可编辑字段，绝不回显 authToken——status 接口把它当作只写字段。
+      // 保存后 FrpSection 会立刻重新拉取状态，以那次结果为准。
       const prev = frpStatus.value.config
       frpStatus.value = {
         ...frpStatus.value,
@@ -293,15 +268,11 @@ export const useAdminStore = defineStore('admin', () => {
     return res
   }
 
-  /** Pull the plaintext auth token from the server on demand. Backs
-   *  the "显示" button next to the password field — the status poll
-   *  never carries the secret, so this is the only way to see what's
-   *  currently stored (e.g. when FRP auth fails after a restart). */
+  /** 按需拉取 auth token 明文（status 轮询从不携带它）。 */
   async function revealFRPAuthToken() {
     return await api.fetchFRPAuthToken()
   }
 
-  // ─── Computed convenience accessors ───────────────────────────────
   const webdavEnabled = computed(() => webdavStatus.value?.enabled ?? false)
   const webdavAccounts = computed<WebdavAccount[]>(
     () => webdavStatus.value?.accounts ?? [],
@@ -309,13 +280,11 @@ export const useAdminStore = defineStore('admin', () => {
   const webdavUrl = computed(() => webdavStatus.value?.webdav_url ?? '/dav/')
 
   return {
-    // profile
     profile,
     profileLoaded,
     loadProfile,
     changeUsername,
     changePassword,
-    // webdav
     webdavStatus,
     webdavLoaded,
     webdavLoading,
@@ -330,7 +299,6 @@ export const useAdminStore = defineStore('admin', () => {
     resetWebdavPassword,
     recalculateWebdavUsage,
     getWebdavPassword,
-    // frp
     frpStatus,
     frpLoaded,
     frpLoading,

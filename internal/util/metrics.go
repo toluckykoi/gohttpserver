@@ -8,13 +8,7 @@ import (
 	"time"
 )
 
-// Metrics holds the process-wide request counters exposed at /metrics.
-//
-// It is intentionally dependency-free: the server ships as a single
-// static binary, and the handful of counters below are cheap enough to
-// keep with atomics instead of pulling in a full Prometheus client. The
-// exposition format matches Prometheus' text format so an existing
-// scraper can consume it without extra configuration.
+// Metrics 保存进程级请求计数器，由 /metrics 暴露。
 type Metrics struct {
 	start time.Time
 
@@ -27,14 +21,10 @@ type Metrics struct {
 	responseBytes    atomic.Int64
 }
 
-// metrics is the process-wide registry used by the logging middleware.
 var metrics = &Metrics{start: time.Now()}
 
-// MetricsRegistry returns the process-wide metrics registry.
 func MetricsRegistry() *Metrics { return metrics }
 
-// Observe records the outcome of a single request. It is called by the
-// logging middleware, which already has the status code and byte count.
 func (m *Metrics) Observe(status, bytes int) {
 	m.requestsTotal.Add(1)
 	m.responseBytes.Add(int64(bytes))
@@ -50,15 +40,11 @@ func (m *Metrics) Observe(status, bytes int) {
 	}
 }
 
-// requestStarted increments the in-flight gauge; the returned function
-// decrements it and must always be called (defer it).
 func (m *Metrics) requestStarted() func() {
 	m.requestsInFlight.Add(1)
 	return func() { m.requestsInFlight.Add(-1) }
 }
 
-// writePrometheusMetrics renders the registry in Prometheus
-// text-exposition format.
 func writePrometheusMetrics(w http.ResponseWriter, m *Metrics, version string) {
 	writeCounter := func(name, help string, value int64) {
 		fmt.Fprintf(w, "# HELP %s %s\n", name, help)
@@ -99,7 +85,7 @@ func writePrometheusMetrics(w http.ResponseWriter, m *Metrics, version string) {
 	fmt.Fprintf(w, "gohttpserver_build_info{version=%q} 1\n", version)
 }
 
-// MetricsHandler returns the /metrics handler.
+// MetricsHandler 返回 /metrics 的 handler。
 func MetricsHandler(version string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {

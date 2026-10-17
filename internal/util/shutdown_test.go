@@ -10,9 +10,7 @@ import (
 	"time"
 )
 
-// newTestServer starts an http.Server on a loopback listener, waits until
-// it is actually accepting connections, and returns the server plus a
-// channel carrying its Serve return value.
+// newTestServer 在 loopback 上启动 http.Server，等到真正可接受连接后返回服务及其 Serve 返回值通道。
 func newTestServer(t *testing.T) (*http.Server, chan error) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -69,8 +67,7 @@ func TestShutdownManagerShutdownClosesServerAndReturnsErrServerClosed(t *testing
 	}
 }
 
-// Cleanups must run newest-first (LIFO) and a failing cleanup must not
-// prevent the remaining ones from running.
+// 清理函数须按最新注册优先（LIFO）执行，且单个失败不得阻断其余清理。
 func TestShutdownManagerRunsCleanupsLIFOAndToleratesErrors(t *testing.T) {
 	srv, done := newTestServer(t)
 

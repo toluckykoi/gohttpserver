@@ -1,14 +1,3 @@
-/**
- * Previewable file formats and language detection.
- *
- * The preview system covers three families of files:
- *   - markdown:  can be rendered to HTML, with a source view as fallback
- *   - code:      raw text with syntax-aware highlighting
- *   - data:      raw text with structure-aware highlighting (json/yaml/toml)
- *
- * Anything else is treated as plain text.
- */
-
 import { isPreviewableImage, isVideoFile } from './fileIcon'
 
 export type PreviewLanguage =
@@ -31,22 +20,16 @@ export type PreviewLanguage =
   | 'plain'
 
 export interface PreviewableMeta {
-  /** Whether the file is previewable at all. */
   previewable: boolean
-  /** Detected language, used to pick a highlighter. */
   language: PreviewLanguage
-  /** Whether the file can be rendered to HTML (markdown only for now). */
   renderable: boolean
-  /** Display label for the language (used in the UI badge). */
   label: string
 }
 
 const EXT_LANGUAGE: Record<string, PreviewLanguage> = {
-  // markdown
   md: 'markdown',
   markdown: 'markdown',
 
-  // data
   json: 'json',
   jsonc: 'json',
   json5: 'json',
@@ -59,23 +42,19 @@ const EXT_LANGUAGE: Record<string, PreviewLanguage> = {
   env: 'ini',
   properties: 'ini',
 
-  // markup
   xml: 'xml',
   html: 'xml',
   htm: 'xml',
   svg: 'xml',
   xhtml: 'xml',
 
-  // code — shell
   sh: 'shell',
   bash: 'shell',
   zsh: 'shell',
   fish: 'shell',
 
-  // code — sql
   sql: 'sql',
 
-  // code — web
   js: 'javascript',
   mjs: 'javascript',
   cjs: 'javascript',
@@ -86,7 +65,6 @@ const EXT_LANGUAGE: Record<string, PreviewLanguage> = {
   scss: 'css',
   less: 'css',
 
-  // code — general
   py: 'python',
   go: 'go',
   rs: 'rust',
@@ -121,7 +99,7 @@ const LANG_LABELS: Record<PreviewLanguage, string> = {
   plain: 'Text'
 }
 
-/** Filenames that have a known type but no extension (e.g. dotfiles). */
+/** 无扩展名但类型已知的点文件/特殊文件。 */
 const FILENAME_LANGUAGE: Record<string, PreviewLanguage> = {
   Dockerfile: 'shell',
   Makefile: 'shell',
@@ -136,7 +114,6 @@ const FILENAME_LANGUAGE: Record<string, PreviewLanguage> = {
 }
 
 export function detectPreview(filename: string): PreviewableMeta {
-  // Exact-filename matches first (dotfiles, special files).
   if (filename in FILENAME_LANGUAGE) {
     const language = FILENAME_LANGUAGE[filename]
     return {
@@ -147,14 +124,12 @@ export function detectPreview(filename: string): PreviewableMeta {
     }
   }
 
-  // Extension lookup.
   const dot = filename.lastIndexOf('.')
   if (dot === -1) {
     return { previewable: false, language: 'plain', renderable: false, label: '' }
   }
   const ext = filename.slice(dot + 1).toLowerCase()
 
-  // Plain text extensions — always previewable, no special highlighting.
   if (ext === 'txt' || ext === 'text' || ext === 'log' || ext === 'csv') {
     return {
       previewable: true,
@@ -177,16 +152,9 @@ export function detectPreview(filename: string): PreviewableMeta {
   return { previewable: false, language: 'plain', renderable: false, label: '' }
 }
 
-/** Convenience: can this file be previewed at all? */
 export function isPreviewable(filename: string): boolean {
   return detectPreview(filename).previewable
 }
-
-// ────────────────────────────────────────────────────────────────────────────
-// Click action — the answer to "what should happen when the user clicks the
-// row?"  Used by the file list to give every file type a sensible default
-// without forcing the user to use the action menu.
-// ────────────────────────────────────────────────────────────────────────────
 
 export type ClickAction =
   | { kind: 'navigate' }
@@ -195,7 +163,7 @@ export type ClickAction =
   | { kind: 'play-video' }
   | { kind: 'download' }
 
-/** Short user-facing description of the click action, for tooltips. */
+/** 点击动作面向用户的简短描述，用于 tooltip。 */
 export function clickActionLabel(action: ClickAction): string {
   switch (action.kind) {
     case 'navigate':     return 'Click to open'
@@ -206,11 +174,6 @@ export function clickActionLabel(action: ClickAction): string {
   }
 }
 
-/**
- * Pick the right action for a row click.
- * `isDir` comes from the file item, not the filename, since the API
- * already classifies directories.
- */
 export function getClickAction(
   filename: string,
   isDir: boolean

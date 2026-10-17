@@ -17,10 +17,7 @@ import (
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
-// maxZipExpansionRatio rejects zip files whose uncompressed size exceeds
-// this multiple of the compressed size. A ratio > 100:1 is almost always
-// a zip bomb (typical text/code compresses ~3-10x; only highly repetitive
-// binary data achieves >100x).
+// maxZipExpansionRatio 限制解压/压缩体积比，超过 100:1 几乎必为 zip 炸弹。
 const maxZipExpansionRatio = 100
 
 type Zip struct {
@@ -43,7 +40,6 @@ func statFile(filename string) (info os.FileInfo, reader io.ReadCloser, err erro
 	if err != nil {
 		return
 	}
-	// content
 	if info.Mode()&os.ModeSymlink != 0 {
 		var target string
 		target, err = os.Readlink(filename)
@@ -77,7 +73,7 @@ func (z *Zip) Add(relpath, abspath string) error {
 	if info.IsDir() {
 		hdr.Name += "/"
 	}
-	hdr.Method = zip.Deflate // compress method
+	hdr.Method = zip.Deflate
 	writer, err := z.CreateHeader(hdr)
 	if err != nil {
 		return err
@@ -86,6 +82,7 @@ func (z *Zip) Add(relpath, abspath string) error {
 	return err
 }
 
+// CompressToZip 将 rootDir 以 .zip 附件形式流式发送给客户端。
 func CompressToZip(w http.ResponseWriter, rootDir string) {
 	rootDir = filepath.Clean(rootDir)
 	zipFileName := filepath.Base(rootDir) + ".zip"
@@ -97,24 +94,20 @@ func CompressToZip(w http.ResponseWriter, rootDir string) {
 	defer zw.Close()
 
 	filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
-		// filepath.Walk calls back with a nil FileInfo when an entry cannot be
-		// lstat'ed (missing root, permission-denied child, file removed
-		// mid-walk). Dereferencing it panicked the request, so skip instead.
+		// 跳过无法 lstat 的条目，避免解引用 nil info。
 		if err != nil || info == nil {
 			return nil
 		}
-		if info.Name() == ".ghs.yml" { // ignore .ghs.yml for security
+		if info.Name() == ".ghs.yml" {
 			return nil
 		}
 		zipPath := path[len(rootDir):]
 		if zipPath == "" {
-			// The walk root itself: archiving a single file used to produce an
-			// entry literally named "." (sanitizedName("") == ".").
+			// 归档单个文件时避免出现 "." 条目。
 			zipPath = info.Name()
 		}
 		if addErr := zw.Add(zipPath, path); addErr != nil {
-			// Stop on the first failure: the client has usually gone away, and
-			// continuing would deflate the whole remaining tree for nothing.
+			// 首次失败即停止，此时客户端通常已断开。
 			return addErr
 		}
 		return nil
@@ -154,18 +147,8 @@ func ExtractFromZip(zipFile, path string, w io.Writer) (err error) {
 	return fmt.Errorf("file %s not found", strconv.Quote(path))
 }
 
-// unzipFile extracts the zip at filename into dest. If onProgress is non-nil,
-// it is called once per entry at the start of that entry's write with the
-// 1-based index, the total entry count, and the destination-relative path.
-//
-// If ctx is cancelled, extraction stops and the cancellation error is
-// returned. Already-extracted files remain on disk (acceptable for an
-// upload-and-extract workflow where the user may have aborted).
-//
-// Zip bomb defence: checks the compression ratio of each entry. If the
-// uncompressed size exceeds maxZipExpansionRatio (100x) the compressed size,
-// extraction is rejected. Typical text/code compresses 3-10x; only highly
-// repetitive binary data achieves >100x, which is almost always malicious.
+// UnzipFile 将 filename 解压到 dest，支持逐条目进度回调与 ctx 取消；
+// 压缩比超过 maxZipExpansionRatio 的条目按 zip 炸弹拒收。
 func UnzipFile(ctx context.Context, filename, dest string, onProgress func(idx, total int, name string)) error {
 	zr, err := zip.OpenReader(filename)
 	if err != nil {
@@ -179,15 +162,13 @@ func UnzipFile(ctx context.Context, filename, dest string, onProgress func(idx, 
 
 	total := len(zr.File)
 	for i, f := range zr.File {
-		// Honor client cancellation. Skip the rest of the extraction and
-		// return the context error so the caller can surface it.
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
-		// Zip bomb defence: check compression ratio before extraction
+		// zip 炸弹防御：解压前先检查压缩比。
 		if f.CompressedSize > 0 && f.UncompressedSize > 0 {
 			ratio := float64(f.UncompressedSize) / float64(f.CompressedSize)
 			if ratio > maxZipExpansionRatio {
@@ -203,11 +184,7 @@ func UnzipFile(ctx context.Context, filename, dest string, onProgress func(idx, 
 	return nil
 }
 
-// extractZipEntry writes a single zip entry to dest. Extracted into its
-// own function so `defer rc.Close()` runs at the end of each entry
-// rather than accumulating until unzipFile returns — the previous
-// in-loop defer could exhaust file descriptors on archives with many
-// entries.
+// extractZipEntry 写出单个 zip 条目；独立成函数是为了让 defer rc.Close() 逐条执行而非累积。
 func extractZipEntry(f *zip.File, dest string, idx, total int, onProgress func(idx, total int, name string)) error {
 	rc, err := f.Open()
 	if err != nil {
@@ -215,20 +192,13 @@ func extractZipEntry(f *zip.File, dest string, idx, total int, onProgress func(i
 	}
 	defer rc.Close()
 
-	// ignore .ghs.yml
 	filename := sanitizedName(f.Name)
 	if filepath.Base(filename) == ".ghs.yml" {
 		return nil
 	}
 	fpath := filepath.Join(dest, filename)
 
-	// filename maybe GBK or UTF-8
-	// Ref: https://studygolang.com/articles/3114
-	// Apply GBK→UTF-8 transcode BEFORE the Zip Slip check below so
-	// the escape validation runs against the final fpath that will
-	// be written to disk. GBK's mapping doesn't turn "/" into other
-	// bytes, so in practice the check is equivalent either way, but
-	// ordering transcode-then-validate is the safer invariant.
+	// 先做 GBK->UTF-8 转码再校验 Zip Slip，确保校验的是最终 fpath。
 	if f.Flags&(1<<11) == 0 { // GBK
 		tr := simplifiedchinese.GB18030.NewDecoder()
 		fpathUtf8, err := tr.String(fpath)
@@ -237,12 +207,8 @@ func extractZipEntry(f *zip.File, dest string, idx, total int, onProgress func(i
 		}
 	}
 
-	// Zip Slip defence: reject entries whose normalised path escapes
-	// the destination directory. sanitizedName already runs
-	// filepath.Clean, but Clean does not collapse a leading ".." —
-	// so an entry named "../../etc/passwd" would still resolve
-	// outside dest. The prefix check (with a trailing separator on
-	// both sides) is the standard mitigation per CVE-2018-1002200.
+	// Zip Slip 防御：拒绝规范化后逃逸 dest 的条目。filepath.Clean 不会消解开头的 ".."，
+	// 因此按 CVE-2018-1002200 的标准做法做带分隔符前缀比对。
 	cleanDest := filepath.Clean(dest)
 	cleanFpath := filepath.Clean(fpath)
 	if cleanFpath != cleanDest &&

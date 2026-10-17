@@ -1,14 +1,8 @@
-// File-type glyphs in the filled Fluent / Material (MDI) style.
-// Each entry is an array of SVG path `d` strings for a 24x24 viewBox,
-// rendered inline with fill=currentColor so the type color system
-// (getFileIconColor) keeps working unchanged.
-
 export type FileKind =
   | 'folder' | 'go' | 'code' | 'pdf' | 'zip' | 'audio'
   | 'image' | 'video' | 'apple' | 'windows' | 'apk' | 'default'
 
 const pathMap: Record<FileKind, string[]> = {
-  // Fluent: folder-24-filled
   folder: [
     'M13.821 6.5h5.929a2.25 2.25 0 0 1 2.229 1.938l.016.158.005.154v9a2.25 2.25 0 0 1-2.096 2.245L19.75 20H4.25a2.25 2.25 0 0 1-2.245-2.096L2 17.75v-7.251l6.207.001.196-.009a2.25 2.25 0 0 0 1.088-.393l.156-.12L13.821 6.5ZM8.207 4c.46 0 .908.141 1.284.402l.156.12 2.103 1.751-3.063 2.553-.085.061a.75.75 0 0 1-.29.106L8.206 9 2 8.999V6.25a2.25 2.25 0 0 1 2.096-2.245L4.25 4h3.957Z'
   ],
@@ -59,26 +53,24 @@ const pathMap: Record<FileKind, string[]> = {
   ]
 }
 
-// MDI: git (special-cased for .git directories, outside the kind system)
+// MDI: git —— .git 目录特判，不属于 FileKind 体系。
 const GIT_PATHS = [
   'M2.6,10.59L8.38,4.8L10.07,6.5C9.83,7.35 10.22,8.28 11,8.73V14.27C10.4,14.61 10,15.26 10,16A2,2 0 0,0 12,18A2,2 0 0,0 14,16C14,15.26 13.6,14.61 13,14.27V9.41L15.07,11.5C15,11.65 15,11.82 15,12A2,2 0 0,0 17,14A2,2 0 0,0 19,12A2,2 0 0,0 17,10C16.82,10 16.65,10 16.5,10.07L13.93,7.5C14.19,6.57 13.71,5.55 12.78,5.16C12.35,5 11.9,4.96 11.5,5.07L9.8,3.38L10.59,2.6C11.37,1.81 12.63,1.81 13.41,2.6L21.4,10.59C22.19,11.37 22.19,12.63 21.4,13.41L13.41,21.4C12.63,22.19 11.37,22.19 10.59,21.4L2.6,13.41C1.81,12.63 1.81,11.37 2.6,10.59Z'
 ]
 
-// Muted per-type accent colors. Saturation is kept low on purpose:
-// the chip tint (12%) must read as a whisper, not a highlighter, and
-// every hue has to survive both the light themes and the dark theme.
+// 各类型柔和强调色；低饱和度以兼顾明暗主题。
 const colorMap: Record<FileKind, string> = {
-  folder: '#BA7517',  // amber
-  go: '#00ADD8',      // Go brand cyan
-  image: '#7F77DD',   // violet
-  video: '#D4537E',   // rose
-  audio: '#1D9E75',   // teal
-  code: '#378ADD',    // blue
-  pdf: '#E24B4A',     // red
-  zip: '#D85A30',     // coral
-  apple: '#888780',   // neutral gray
-  windows: '#378ADD', // blue
-  apk: '#639922',     // android green
+  folder: '#BA7517',
+  go: '#00ADD8',      // Go 官方品牌色
+  image: '#7F77DD',
+  video: '#D4537E',
+  audio: '#1D9E75',
+  code: '#378ADD',
+  pdf: '#E24B4A',
+  zip: '#D85A30',
+  apple: '#888780',
+  windows: '#378ADD',
+  apk: '#639922',
   default: '#888780'
 }
 
@@ -155,7 +147,7 @@ export function getFileKind(filename: string, type: 'file' | 'dir'): FileKind {
   }
 }
 
-/** SVG path data for the file's glyph (24x24 viewBox, fill=currentColor). */
+/** 文件图标的 SVG path 数据（24x24 viewBox，fill=currentColor）。 */
 export function getFileIconPaths(filename: string, type: 'file' | 'dir'): string[] {
   if (type === 'dir' && filename === '.git') {
     return GIT_PATHS
@@ -163,7 +155,7 @@ export function getFileIconPaths(filename: string, type: 'file' | 'dir'): string
   return pathMap[getFileKind(filename, type)]
 }
 
-/** Per-type accent color for the icon chip behind each file icon. */
+/** 图标底色块按类型取用的强调色。 */
 export function getFileIconColor(filename: string, type: 'file' | 'dir'): string {
   return colorMap[getFileKind(filename, type)]
 }
@@ -187,13 +179,7 @@ export function isImageFile(filename: string): boolean {
   ].includes(ext)
 }
 
-/**
- * Subset of `isImageFile` that browsers can actually decode into a native
- * `<img>` element. Excludes TIFF and HEIC/HEIF, which most desktop
- * browsers (Chrome/Firefox/Edge) can't render — using `isImageFile` as a
- * preview gate would surface a "Failed to load image" error after the
- * user clicks the preview button.
- */
+/** `isImageFile` 中浏览器可解码的子集：排除多数桌面浏览器渲染不了的 TIFF/HEIC。 */
 export function isPreviewableImage(filename: string): boolean {
   const ext = filename.split('.').pop()?.toLowerCase() || ''
   return [

@@ -73,17 +73,14 @@ export function useFileApi() {
       formData.append('filename', options.filename)
     }
     if (options?.relativePath) {
-      // Server uses this to recreate directory structure for folder
-      // uploads. Without it the server falls back to the flat `filename`
-      // / multipart-part name, which collapses the upload into a single
-      // directory.
+      // 服务端据此重建上传目录结构。
       formData.append('path', options.relativePath)
     }
     if (options?.unzip) {
       formData.append('unzip', 'true')
     }
 
-    // Attach progress listener BEFORE send() to avoid race condition
+    // 必须在 send() 前挂载，否则竞态漏掉早期进度事件。
     xhr.upload.addEventListener('progress', (e: ProgressEvent) => {
       if (e.lengthComputable) {
         onProgress(Math.round((e.loaded / e.total) * 100))
@@ -112,17 +109,7 @@ export function useFileApi() {
     return promise
   }
 
-  /**
-   * Upload a file and stream NDJSON progress events from the server. The
-   * server emits one line per file during unzip, then a final terminal
-   * line carrying the success status. The response is sent as
-   * `application/x-ndjson` with chunked transfer encoding, and the XHR
-   * `progress` event fires per chunk — we use that to incrementally parse
-   * each complete line as it arrives.
-   *
-   * Returns when the terminal `done` line is observed. Rejects on network
-   * error, abort, or non-2xx HTTP status.
-   */
+  /** 解压进度以 NDJSON 流式返回：在 XHR progress 事件中逐行解析，遇到 done 行时 resolve。 */
   function uploadFileWithUnzipProgress(
     path: string,
     file: File,
@@ -139,38 +126,27 @@ export function useFileApi() {
       formData.append('filename', options.filename)
     }
     if (options?.relativePath) {
-      // See uploadFileWithProgress — same field, same rationale.
       formData.append('path', options.relativePath)
     }
     formData.append('unzip', 'true')
 
-    // Upload progress (request body bytes) — same semantics as
-    // uploadFileWithProgress.
     xhr.upload.addEventListener('progress', (e: ProgressEvent) => {
       if (e.lengthComputable) {
         callbacks.onUploadProgress(Math.round((e.loaded / e.total) * 100))
       }
     })
 
-    // NDJSON line parser. The server may emit one line per zip entry; the
-    // response body can be large, so we read the response stream in chunks
-    // (the XHR `progress` event) and split on `\n` incrementally. An
-    // incomplete trailing line is held in `tail` until the next chunk
-    // arrives.
+    // NDJSON 行解析：增量读取流式响应，未终结的尾行留在 tail 等下一块。
     let tail = ''
     let terminalResult: { success: boolean; description?: string } | null = null
 
     const processBuffer = () => {
-      // xhr.responseText grows as the body streams in. The portion we
-      // haven't yet examined is `xhr.responseText.slice(tail.length)` —
-      // we keep `tail` of any unterminated suffix and prepend it to the
-      // new chunk.
+      // xhr.responseText 随响应体流式增长，只处理新增后缀。
       const full = xhr.responseText
       const newChunk = full.slice(tail.length)
       if (!newChunk) return
       const parts = newChunk.split('\n')
-      // Last element is either '' (chunk ended on \n) or an incomplete
-      // line that we save into `tail` for the next round.
+      // 末元素为 ''（块以 \n 结束）或存入 tail 的不完整行。
       tail = parts.pop() ?? ''
       for (const line of parts) {
         const trimmed = line.trim()
@@ -190,8 +166,7 @@ export function useFileApi() {
             }
           }
         } catch {
-          // Skip malformed lines — server is the only writer, so this
-          // should not happen in practice.
+          // 服务端是唯一写入方，坏行直接跳过。
         }
       }
     }
@@ -200,7 +175,7 @@ export function useFileApi() {
       xhr.addEventListener('progress', processBuffer)
 
       xhr.addEventListener('load', () => {
-        // Drain any final partial line before resolving.
+        // 清掉最后可能残留的半行。
         processBuffer()
         if (xhr.status < 200 || xhr.status >= 300) {
           reject(new Error(`Upload failed: ${xhr.status} ${xhr.statusText}`))
@@ -209,8 +184,7 @@ export function useFileApi() {
         if (terminalResult) {
           resolve(terminalResult)
         } else {
-          // Server returned 2xx but no terminal line — treat as success
-          // to match the existing uploadFileWithProgress fallback.
+          // 2xx 却没有终结行时按成功处理。
           resolve({ success: true })
         }
       })
@@ -250,8 +224,7 @@ export function useFileApi() {
     return await response.json()
   }
 
-  /** Probe the server for whether --login is enabled and the current
-   *  session's auth status. Always resolves; never throws. */
+  /** 探测是否启用 --login 以及当前会话的认证状态。 */
   async function fetchAuthStatus(): Promise<{
     login_enabled: boolean
     authenticated?: boolean
@@ -267,39 +240,13 @@ export function useFileApi() {
         name: typeof data.name === 'string' ? data.name : undefined
       }
     } catch {
-      // Server may be unreachable / not yet started; treat as no-login.
+      // 服务不可达时按未启用登录处理。
       return { login_enabled: false }
     }
   }
 
-  /** Submit username/password to POST /-/login. The server responds
-   *  with a 302 redirect: to `next` on success, or back to /-/login
-   *  with an ?error= query on failure.
-   *
-   *  Reliability note: we previously used `redirect: 'follow'` and
-   *  inspected `response.url` to distinguish success from failure.
-   *  That works on most browsers, but a small number of browsers
-   *  (notably some Windows configurations) silently drop the
-   *  Set-Cookie attached to the original 302 response when they
-   *  follow the redirect inside the same fetch() call — leaving the
-   *  user in a "login loop" where the cookie never persists and the
-   *  page keeps redirecting back to /-/login.
-   *
-   *  To eliminate that race entirely, we now use `redirect: 'manual'`
-   *  so we receive the 302 (with Set-Cookie) directly. With
-   *  manual redirect, the browser still applies Set-Cookie to the
-   *  cookie jar (Set-Cookie on 3xx is well-defined per RFC 7231),
-   *  but never auto-navigates. The opaqueredirect response is what
-   *  tells us the server issued a redirect at all — anything else
-   *  (200, 400, 401, 5xx) means the credentials were rejected or the
-   *  server hit an error.
-   *
-   *  After a successful 302 we still verify with /-/api/auth/status
-   *  before returning ok — that single round-trip catches the rare
-   *  case where the browser dropped Set-Cookie (the auth probe will
-   *  then report authenticated: false and we fall through to the
-   *  invalid_credentials branch instead of letting the caller
-   *  navigate and bounce back). */
+  /** 用 POST /-/login 提交凭证。redirect:'manual' 让浏览器应用 302 上的 Set-Cookie
+   *  （自动跟随重定向时部分浏览器会丢掉它），再用一次认证探测确认结果。 */
   async function submitLogin(
     username: string,
     password: string,
@@ -314,25 +261,16 @@ export function useFileApi() {
       response = await fetch('/-/login', {
         method: 'POST',
         body: form,
-        // 'manual' prevents the fetch from auto-following the 302,
-        // which is where some browsers silently lose Set-Cookie.
-        // We receive the redirect opaquely and verify with a follow-up
-        // auth probe (see comment block above).
+        // 'manual' 阻止自动跟随 302，避免丢失 Set-Cookie。
         redirect: 'manual',
         credentials: 'same-origin'
       })
     } catch {
       return { ok: false, error: 'network' }
     }
-    // With redirect:'manual', any 3xx (302 in particular) is reported
-    // as type='opaqueredirect' with status 0. Any other status is the
-    // real HTTP response — typically 200 (whitelisted SPA HTML rendered
-    // by mistake) or 400/401 (form error / bad credentials).
+    // 3xx 会以 type='opaqueredirect'、status 0 的形式上报。
     if (response.type === 'opaqueredirect') {
-      // Server issued a 302. The Set-Cookie from that response was
-      // applied to the cookie jar. Verify by hitting the auth-status
-      // endpoint with the now-current cookie jar; if it reports
-      // authenticated:true, the login genuinely succeeded.
+      // Set-Cookie 已生效，再用 auth-status 接口确认。
       try {
         const probe = await fetch('/-/api/auth/status', {
           credentials: 'same-origin',
@@ -345,29 +283,22 @@ export function useFileApi() {
           }
         }
       } catch {
-        // Network error on the probe — fall through and report
-        // invalid_credentials so the UI doesn't appear to hang.
+        // 探测失败则回落到 invalid_credentials。
       }
       return { ok: false, error: 'invalid_credentials' }
     }
-    // Non-redirect response. 400 (form parse error) and 401 (rare
-    // path — middleware shouldn't see login, but be defensive) both
-    // mean the credentials were not accepted.
+    // 400/401 表示凭证被拒。
     if (response.status === 401 || response.status === 400) {
       return { ok: false, error: 'invalid_credentials' }
     }
-    // Any other 2xx without a redirect means the server rendered the
-    // SPA HTML directly. Treat as success (the session cookie was
-    // applied during session.Save and the next navigation will carry
-    // it).
+    // 其它 2xx：会话 cookie 已下发，下次导航会带上。
     if (response.ok) {
       return { ok: true }
     }
     return { ok: false, error: `HTTP ${response.status}` }
   }
 
-  /** Change the current user's password. 401 means not signed in (the
-   *  user should be brought back to the login page). */
+  /** 修改当前用户密码；401 表示未登录。 */
   async function changePassword(
     oldPassword: string,
     newPassword: string
@@ -409,16 +340,9 @@ export function useFileApi() {
     window.location.href = `${encodePath}${sep}op=archive`
   }
 
-  /**
-   * Download an arbitrary mix of files and directories as a single zip.
-   * Posts a JSON body to the multi-select archive endpoint and pipes the
-   * response blob into a hidden anchor to trigger the browser save
-   * dialog. The server preserves each entry's basename at the top level
-   * of the zip, so the unpacked layout mirrors what the user selected.
-   *
-   * Network errors and non-2xx responses are surfaced as a rejected
-   * promise so the caller can show an error toast.
-   */
+  /** 把文件/目录的任意组合打包成一个 zip 下载：POST 多选打包接口，把响应 blob
+   *  塞进隐藏 anchor 触发浏览器保存。服务端保留每个条目的顶层 basename，解包后
+   *  的布局与用户所选一致。网络错误与非 2xx 均以 reject 暴露，供调用方弹错误提示。 */
   async function downloadMulti(paths: string[]): Promise<void> {
     if (paths.length === 0) return
     const response = await fetch('/-/zip', {
@@ -437,8 +361,7 @@ export function useFileApi() {
     document.body.appendChild(a)
     a.click()
     a.remove()
-    // Release the blob URL on the next tick so the browser has time to
-    // start the download before we tear the reference down.
+    // 等一个 tick 再释放，给浏览器留出启动下载的时间。
     setTimeout(() => URL.revokeObjectURL(blobUrl), 0)
   }
 
@@ -452,17 +375,10 @@ export function useFileApi() {
     return `/-/ipa/link/${encodePath}`
   }
 
-  /**
-   * Update (overwrite) the contents of an existing file via PUT.
-   * Used by the in-browser editor when the user saves a text file
-   * they were editing. The server caps PUT bodies at a few MiB
-   * (see hEdit); callers should validate before sending to avoid
-   * a 413 round-trip.
-   *
-   * Body is sent as raw text with Content-Type: text/plain so the
-   * server's body-preserving auth check (token via URL query, see
-   * hEdit / canUploadSession) is not confused by form parsing.
-   */
+  /** PUT 覆盖已有文件内容，供浏览器内编辑器保存使用。服务端对 PUT body 有
+   *  几 MiB 上限（见 hEdit），调用方应先校验以免吃 413 往返。body 以 text/plain
+   *  原样发送，避免服务端的保 body 认证检查（URL query 传 token，见 hEdit /
+   *  canUploadSession）被表单解析干扰。 */
   async function updateFile(
     path: string,
     filename: string,
@@ -480,17 +396,9 @@ export function useFileApi() {
     return await response.json()
   }
 
-  /**
-   * Trigger the server-side offline downloader. POSTs the remote
-   * URL and target filename to /-/fetch; the server streams the
-   * remote response body to disk under the supplied path. Returns
-   * the JSON {success, destination, size, source} from the server.
-   *
-   * Caller is responsible for showing progress / a spinner — the
-   * request blocks for as long as the remote fetch takes. The
-   * server applies SSRF protection (rejects loopback / private IPs)
-   * so the UI just needs to surface 502/4xx errors as-is.
-   */
+  /** 触发服务端离线下载：向 /-/fetch POST 远端 URL 与目标文件名，服务端把远端
+   *  响应体流式写入磁盘。请求会阻塞到远端抓取完成，进度/转圈由调用方负责；服务端
+   *  已做 SSRF 防护（拒绝 loopback/私网 IP），UI 只需原样展示 502/4xx 错误。 */
   async function fetchFromUrl(
     path: string,
     url: string,
@@ -499,8 +407,7 @@ export function useFileApi() {
     const formData = new FormData()
     formData.append('url', url)
     formData.append('to', to)
-    // Send against the directory, not against the destination file —
-    // /-/fetch lives at a fixed path on the route var.
+    // 请求打到目录而非目标文件：/-/fetch 挂在路由变量的固定路径上。
     const target = path === '/' || path === '' ? '/' : (path.endsWith('/') ? path : path + '/')
     const response = await fetch(target + '-/fetch', {
       method: 'POST',

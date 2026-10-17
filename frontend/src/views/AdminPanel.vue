@@ -1,9 +1,6 @@
 <template>
   <div class="admin-shell">
     <div class="admin-card">
-      <!-- Top bar: brand + close. Close returns to the file manager.
-           We use a router-friendly replace so the back button doesn't
-           re-enter the panel. -->
       <header class="admin-topbar">
         <div class="admin-brand">
           <span class="admin-logo" aria-hidden="true">
@@ -16,9 +13,6 @@
         </el-button>
       </header>
 
-      <!-- Body: left nav + right content. On phones the nav collapses
-           to a top bar of icons (el-tabs handles this naturally via
-           the tab-position prop). -->
       <div class="admin-body">
         <el-tabs
           v-model="activeTab"
@@ -74,8 +68,7 @@ const emit = defineEmits<{
 
 const activeTab = ref<'profile' | 'settings' | 'frp'>('profile')
 
-// Phone breakpoint — same threshold as App.vue's isPhone so the panel
-// matches the rest of the app's responsive behaviour.
+// 与 App.vue 的 isPhone 保持同一断点。
 const isPhone = ref(window.innerWidth < 640)
 function handleResize() {
   isPhone.value = window.innerWidth < 640
@@ -204,8 +197,6 @@ onBeforeUnmount(() => {
   background-color: rgba(14, 165, 233, 0.12);
 }
 
-/* Vertical (left) tabs: left-align each label so the icons and text
-   line up along the left edge instead of being centered per-item. */
 .admin-tabs :deep(.el-tabs__item.is-left) {
   display: flex;
   justify-content: flex-start;
@@ -232,7 +223,7 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
-/* Tablet: tighten things up a bit but keep the desktop layout. */
+/* 平板：收紧间距，保持桌面布局。 */
 @media (max-width: 900px) {
   .admin-shell {
     padding: 16px 12px;
@@ -242,12 +233,10 @@ onBeforeUnmount(() => {
   }
 }
 
-/* Phone: full-screen, no card chrome, safe-area aware. */
+/* 手机：全屏、去卡片装饰，并适配安全区。 */
 @media (max-width: 640px) {
   .admin-shell {
     padding: 0;
-    /* Honor notched phones: keep the top bar below the status bar
-       and the content above the home indicator. */
     padding-top: env(safe-area-inset-top);
     padding-bottom: env(safe-area-inset-bottom);
   }
@@ -255,8 +244,6 @@ onBeforeUnmount(() => {
     border-radius: 0;
     border: none;
     box-shadow: none;
-    /* Use 100vh minus the safe-area insets so the card fills the
-       viewport without being clipped by the notch / home bar. */
     max-height: calc(100vh - env(safe-area-inset-top) - env(safe-area-inset-bottom));
   }
   .admin-topbar {

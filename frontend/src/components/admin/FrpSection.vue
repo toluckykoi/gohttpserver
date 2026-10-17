@@ -1,6 +1,5 @@
 <template>
   <div class="frp-section">
-    <!-- FRP master switch + status display -->
     <section class="frp-card">
       <div class="card-header">
         <div>
@@ -16,7 +15,6 @@
         />
       </div>
 
-      <!-- Status indicator -->
       <div class="status-row" v-if="store.frpStatus?.enabled">
         <span class="status-label">Status:</span>
         <el-tag :type="store.frpStatus?.running ? 'success' : 'danger'" size="small">
@@ -25,7 +23,6 @@
       </div>
     </section>
 
-    <!-- Configuration form -->
     <section class="frp-card" v-if="store.frpStatus?.enabled">
       <div class="card-header">
         <h2 class="section-title">FRP Configuration</h2>
@@ -37,7 +34,6 @@
         class="frp-form"
         @submit.prevent="handleSaveConfig"
       >
-        <!-- Server settings -->
         <div class="form-group">
           <h3 class="group-title">Server Settings</h3>
           <el-form-item label="Server Address" required>
@@ -72,7 +68,6 @@
           </el-form-item>
         </div>
 
-        <!-- Proxy settings -->
         <div class="form-group">
           <h3 class="group-title">Proxy Settings</h3>
           <el-form-item label="Proxy Name">
@@ -104,7 +99,6 @@
           </el-form-item>
         </div>
 
-        <!-- Local settings (auto-detected, editable) -->
         <div class="form-group">
           <h3 class="group-title">Local Service (Auto-detected, editable)</h3>
           <el-form-item label="Local IP">
@@ -129,7 +123,6 @@
           </el-form-item>
         </div>
 
-        <!-- Remote settings -->
         <div class="form-group">
           <h3 class="group-title">Remote Port</h3>
           <el-form-item label="Remote Port" required>
@@ -142,7 +135,6 @@
           </el-form-item>
         </div>
 
-        <!-- Save button -->
         <div class="form-actions">
           <el-button type="primary" :loading="saving" @click="handleSaveConfig">
             Save Configuration
@@ -151,7 +143,6 @@
       </el-form>
     </section>
 
-    <!-- Connection info -->
     <section class="frp-card" v-if="store.frpStatus?.enabled && store.frpStatus?.running">
       <div class="card-header">
         <h2 class="section-title">Connection Info</h2>
@@ -195,19 +186,13 @@ const form = reactive({
   proxyProtocolVersion: '',
 })
 
-// The status API treats the auth token as write-only: it returns an
-// empty authToken plus an authTokenSet flag. Never echo a value back
-// into the password field — that's what caused a masked "********" to
-// be re-saved as the real token and break FRP authentication after a
-// restart. The placeholder tells the operator whether a token is
-// already stored so they know to leave the field blank to keep it.
+// 服务端的 auth token 只写不回显：把掩码值回填会以 "********" 覆盖真实 token。留空表示保持原值。
 const authTokenPlaceholder = computed(() =>
   store.frpStatus?.config?.authTokenSet
     ? 'Token configured — leave blank to keep, or enter a new one'
     : 'FRP server authentication token',
 )
 
-// Load config from store when status changes
 watch(
   () => store.frpStatus?.config,
   (config) => {
@@ -232,7 +217,6 @@ async function handleToggleEnabled(target: boolean) {
     const res = await store.setFRPEnabled(target)
     if (res.ok) {
       ElMessage.success(target ? 'FRP enabled' : 'FRP disabled')
-      // Refresh status to update UI
       await store.loadFRPStatus()
     } else {
       ElMessage.error(res.error || 'Toggle failed')
@@ -243,7 +227,6 @@ async function handleToggleEnabled(target: boolean) {
 }
 
 async function handleSaveConfig() {
-  // Validation
   if (!form.serverAddr) {
     ElMessage.error('Please enter server address')
     return
@@ -276,7 +259,6 @@ async function handleSaveConfig() {
     })
     if (res.ok) {
       ElMessage.success('Configuration saved')
-      // Refresh status to update UI
       await store.loadFRPStatus()
     } else {
       ElMessage.error(res.error || 'Save failed')
@@ -286,12 +268,8 @@ async function handleSaveConfig() {
   }
 }
 
-/** Eye-toggle for the auth token. When revealing an empty field that
- *  has a token stored server-side, pull the plaintext down first so
- *  the eye actually shows the saved secret — not a blank box. If the
- *  operator is typing a new token, the eye just toggles visibility. */
+/** 明文显示开关：字段为空但服务端已存 token 时，先拉取明文再显示。 */
 async function handleToggleTokenVisible() {
-  // About to reveal + field empty + a token is stored -> fetch it.
   if (!passwordVisible.value && !form.authToken && store.frpStatus?.config?.authTokenSet) {
     revealingToken.value = true
     try {
@@ -441,7 +419,6 @@ onMounted(async () => {
   flex: 1 1 auto;
 }
 
-/* Phone: tighter spacing */
 @media (max-width: 640px) {
   .frp-section {
     gap: 14px;

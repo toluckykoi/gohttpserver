@@ -9,11 +9,8 @@ import (
 	"github.com/go-yaml/yaml"
 )
 
-// TestAccessConfMergeMatchesYAMLUnmarshal pins the behaviour the cached
-// parser has to preserve: the original code unmarshalled each .ghs.yml
-// on top of the already-merged parent config, so a child file overrides
-// only the keys it declares. rawAccessConf + mergeInto must reach the
-// exact same result as that in-place yaml.Unmarshal.
+// 锁定缓存解析器必须保持的行为：原实现把每个 .ghs.yml 直接反序列化到已合并的父配置之上，
+// 子文件因此只覆盖自己声明的键。rawAccessConf + mergeInto 必须与那次原地 yaml.Unmarshal 结果完全一致。
 func TestAccessConfMergeMatchesYAMLUnmarshal(t *testing.T) {
 	base := AccessConf{
 		Upload:       true,
@@ -37,13 +34,13 @@ func TestAccessConfMergeMatchesYAMLUnmarshal(t *testing.T) {
 
 	for name, doc := range cases {
 		t.Run(name, func(t *testing.T) {
-			// Reference: the original in-place yaml.Unmarshal merge.
+			// 基准：原实现的原地 yaml.Unmarshal 合并。
 			want := base
 			if err := yaml.Unmarshal([]byte(doc), &want); err != nil {
 				t.Fatalf("reference unmarshal failed: %v", err)
 			}
 
-			// New: cached parse + explicit merge.
+			// 新实现：缓存解析 + 显式合并。
 			raw, err := parseAccessConfFile([]byte(doc))
 			if err != nil {
 				t.Fatalf("cached parse failed: %v", err)
@@ -58,9 +55,7 @@ func TestAccessConfMergeMatchesYAMLUnmarshal(t *testing.T) {
 	}
 }
 
-// TestReadAccessConfInheritsAndOverrides checks the directory walk end
-// to end: a child .ghs.yml overrides one key while inheriting the rest
-// from the root config.
+// 端到端检查目录遍历：子的 .ghs.yml 覆盖一个键，其余继承根配置。
 func TestReadAccessConfInheritsAndOverrides(t *testing.T) {
 	root := t.TempDir()
 	child := filepath.Join(root, "sub")
@@ -92,9 +87,7 @@ func TestReadAccessConfInheritsAndOverrides(t *testing.T) {
 	}
 }
 
-// TestReadAccessConfCacheInvalidation verifies that a rewrite of
-// .ghs.yml is observed once the handler invalidates the cache, which is
-// what upload/delete/edit do after a mutation.
+// 验证 .ghs.yml 被改写后，处理器调用失效即可观察到新配置——上传/删除/编辑在变更后正是这么做的。
 func TestReadAccessConfCacheInvalidation(t *testing.T) {
 	root := t.TempDir()
 	confPath := filepath.Join(root, YAMLCONF)

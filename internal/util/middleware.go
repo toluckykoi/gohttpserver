@@ -10,16 +10,7 @@ import (
 	"time"
 )
 
-// SecurityHeaders applies the HTTP security headers to every response.
-//
-// It lives at the outermost layer (wrapped around the whole router in main)
-// because the file handler used to set these itself: the login page and the
-// embedded SPA assets are served by other packages and therefore went out with
-// no CSP, no X-Frame-Options and no nosniff at all — on the most
-// phishing-sensitive page of the app.
-//
-// csp is passed in rather than hard-coded so the file-server package stays the
-// single source of truth for the policy that matches the frontend it embeds.
+// SecurityHeaders 给每个响应加上安全响应头；csp 由文件服务包提供，是匹配内嵌前端的唯一来源。
 func SecurityHeaders(csp string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -29,8 +20,7 @@ func SecurityHeaders(csp string) func(http.Handler) http.Handler {
 			h.Set("X-Frame-Options", "DENY")
 			h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
 			h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-			// HSTS only when this process actually serves TLS; behind a
-			// TLS-terminating proxy the operator sets it there instead.
+			// 仅当本进程直接提供 TLS 时下发 HSTS；若由代理终止 TLS，则由代理设置
 			if r.TLS != nil {
 				h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 			}
@@ -39,35 +29,27 @@ func SecurityHeaders(csp string) func(http.Handler) http.Handler {
 	}
 }
 
-// RequestIDMiddleware adds a unique request ID to each request context.
-// The request ID is returned in the X-Request-ID response header.
+// RequestIDMiddleware 为每个请求生成唯一 ID，写入 context 与 X-Request-ID 响应头。
 func RequestIDMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestID := generateRequestID()
 		ctx := WithRequestID(r.Context(), requestID)
-
-		// Add to response header for client correlation
 		w.Header().Set("X-Request-ID", requestID)
 
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-// LoggingMiddleware logs HTTP requests with structured fields.
-// Uses the request ID from context if present.
+// LoggingMiddleware 以结构化字段记录 HTTP 请求日志。
 func LoggingMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			requestID := RequestIDFromContext(r.Context())
 			clientIP := GetClientIP(r)
-
-			// Wrap ResponseWriter to capture status code and byte count.
 			rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 
-			// Track in-flight requests for /metrics. Decremented after the
-			// handler returns so a long upload counts as one in-flight
-			// request for its whole duration.
+			// 在 handler 返回后才递减，使一次长上传在其整个耗时内都计为一个在途请求
 			done := metrics.requestStarted()
 			defer done()
 
@@ -79,10 +61,7 @@ func LoggingMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 			logger.Info("HTTP request",
 				RequestIDAttr(requestID),
 				ClientIPAttr(clientIP),
-				// LOCAL / FRP classification used to be produced by a second
-				// logger wrapping the file handler, which meant every request
-				// was logged twice (and reparsed the private-IP CIDRs each
-				// time). One line now carries both.
+				// access_type 把 LOCAL/FRP 的分类合并进这一条日志
 				slog.String("access_type", AccessTypeOf(clientIP)),
 				MethodAttr(r.Method),
 				PathAttr(r.URL.Path),
@@ -94,8 +73,7 @@ func LoggingMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 	}
 }
 
-// responseWriter wraps http.ResponseWriter to capture the status code
-// and the number of body bytes written for logging and metrics.
+// responseWriter 捕获状态码与响应字节数，供日志与指标使用。
 type responseWriter struct {
 	http.ResponseWriter
 	statusCode int
@@ -113,19 +91,16 @@ func (rw *responseWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// Flush forwards to the underlying writer when it supports flushing.
-// Without this the wrapper would hide http.Flusher from handlers that
-// stream (the upload progress NDJSON path asserts for it), silently
-// buffering progress output until the handler returns.
+// Flush 转发到底层 writer（若支持）；缺少它会让流式 handler（上传进度 NDJSON）
+// 看不到 http.Flusher，进度输出被静默缓冲到 handler 返回才发出。
 func (rw *responseWriter) Flush() {
 	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
 }
 
-// ReadFrom preserves the sendfile/zero-copy fast path that net/http's
-// writer exposes for large downloads. Falling back to a plain io.Copy
-// would add a userspace copy for every file served.
+// ReadFrom 保留 net/http writer 为大文件下载提供的 sendfile/零拷贝路径，
+// 退回 io.Copy 会让每个文件多一次用户态拷贝。
 func (rw *responseWriter) ReadFrom(src io.Reader) (int64, error) {
 	if rf, ok := rw.ResponseWriter.(io.ReaderFrom); ok {
 		n, err := rf.ReadFrom(src)
@@ -137,27 +112,18 @@ func (rw *responseWriter) ReadFrom(src io.Reader) (int64, error) {
 	return n, err
 }
 
-// generateRequestID builds an ID of the form
-// <UTC-ish timestamp>-<random hex>. The timestamp makes IDs roughly
-// sortable by arrival; the 64 random bits make collisions negligible.
-//
-// The previous implementation fabricated the random part from the low
-// bits of time.Now().UnixNano() and called time.Sleep(1) between
-// characters. That was both weakly random and, on platforms whose sleep
-// granularity is ~1ms, cost several milliseconds per request.
+// generateRequestID 生成 <时间戳>-<64 位随机数>：时间戳让 ID 大致可排序，
+// 随机位让碰撞概率可忽略。
 func generateRequestID() string {
 	var buf [8]byte
 	if _, err := rand.Read(buf[:]); err != nil {
-		// crypto/rand failing is effectively impossible on supported
-		// platforms; degrade to a nanosecond value rather than dropping
-		// the request.
+		// crypto/rand 失败几乎不可能发生，降级为纳秒时间戳而不是丢弃请求
 		return strconv.FormatInt(time.Now().UnixNano(), 10)
 	}
 	return time.Now().Format("20060102T150405.000000000") + "-" + hex.EncodeToString(buf[:])
 }
 
-// HealthCheckHandler returns a simple health check handler.
-// Can be mounted at /healthz or /-/healthz.
+// HealthCheckHandler 返回健康检查 handler，可挂载于 /healthz 或 /-/healthz。
 func HealthCheckHandler(version string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

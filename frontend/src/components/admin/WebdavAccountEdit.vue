@@ -125,7 +125,7 @@ const form = reactive({
   rootPath: '/',
   readonly: false,
   protectSystemFiles: true,
-  // Quota is edited as a value + unit pair; combined into bytes on submit.
+  // 配额以「数值 + 单位」编辑，提交时换算成字节。
   quotaValue: 0,
 })
 const quotaUnit = ref<number>(1024 ** 3)
@@ -133,8 +133,7 @@ const submitting = ref(false)
 const errorMessage = ref('')
 const showPicker = ref(false)
 
-// Pick the largest unit that yields a value >= 1 so the operator sees a
-// readable number (e.g. 5 GB instead of 5368709120 B). 0 stays 0 (unlimited).
+// 选能让数值 >= 1 的最大单位（例如显示 5 GB 而不是 5368709120 B）。
 function splitQuota(bytes: number): { value: number; unit: number } {
   if (!bytes || bytes <= 0) return { value: 0, unit: 1024 ** 3 }
   const units = [1024 ** 4, 1024 ** 3, 1024 ** 2, 1024, 1]
@@ -144,7 +143,6 @@ function splitQuota(bytes: number): { value: number; unit: number } {
   return { value: bytes, unit: 1 }
 }
 
-// Re-seed the form each time the dialog opens for a given account.
 watch(
   () => [props.visible, props.account] as const,
   ([open]) => {
@@ -180,8 +178,6 @@ async function handleSubmit() {
     })
     if (res.ok) {
       ElMessage.success('账号已更新')
-      // root_path may have changed, which changes what counts toward the
-      // quota — recalc so the usage bar reflects the new scope.
       store.recalculateWebdavUsage()
       emit('update:visible', false)
     } else {

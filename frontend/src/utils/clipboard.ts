@@ -1,25 +1,8 @@
-/**
- * Robust copy-to-clipboard helper.
- *
- * `navigator.clipboard.writeText()` is the modern API, but it fails silently
- * (with a rejected promise) in several real-world scenarios this app sees:
- *   - Served over plain HTTP on a LAN — the page is not a "secure context",
- *     so the Clipboard API is unavailable.
- *   - Document not focused (e.g. user just opened a modal and the focus is
- *     still on the page body).
- *   - Very large payloads (some browsers reject megabyte-sized writes).
- *   - Older browsers / privacy-focused browsers that disable the API.
- *
- * The fallback path uses a transient `<textarea>` + `document.execCommand`
- * which works in all of those cases. It's deprecated but still universally
- * supported and is exactly what libraries like clipboard.js do under the hood.
- *
- * Returns `true` if the copy succeeded, `false` otherwise.
- */
+/** 复制到剪贴板；非安全上下文（HTTP 局域网）、文档失焦或旧浏览器时
+ *  回退到 execCommand。 */
 export async function copyText(text: string): Promise<boolean> {
   if (!text) return false
 
-  // ── 1. Modern Clipboard API (preferred) ────────────────────────────────
   if (
     typeof navigator !== 'undefined' &&
     navigator.clipboard &&
@@ -31,20 +14,17 @@ export async function copyText(text: string): Promise<boolean> {
       await navigator.clipboard.writeText(text)
       return true
     } catch {
-      // Fall through to the legacy path. The most common cause here is the
-      // document not being focused, which we can work around below.
+      // 失败则走旧版回退路径。
     }
   }
 
-  // ── 2. Legacy execCommand fallback ─────────────────────────────────────
   return legacyCopy(text)
 }
 
 function legacyCopy(text: string): boolean {
   if (typeof document === 'undefined') return false
 
-  // Create a textarea that's visible to the layout but invisible to the user.
-  // (Setting `display: none` would prevent some browsers from copying.)
+  // 对布局可见但对用户不可见：display:none 在部分浏览器里会导致复制失败。
   const textarea = document.createElement('textarea')
   textarea.value = text
   textarea.setAttribute('readonly', '')
@@ -64,7 +44,7 @@ function legacyCopy(text: string): boolean {
 
   document.body.appendChild(textarea)
 
-  // Preserve the current selection so we can restore it after the copy.
+  // 记下当前选区，复制后恢复。
   const previousActive = document.activeElement as HTMLElement | null
   const previousSelection =
     typeof window.getSelection === 'function'

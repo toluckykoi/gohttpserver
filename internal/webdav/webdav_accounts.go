@@ -15,14 +15,7 @@ import (
 	storedb "github.com/codeskyblue/gohttpserver/internal/store"
 )
 
-// WebdavAccount is a single WebDAV credential entry. The username is
-// always the current login user's name (bound at creation); the password
-// is an independent random 10-char string so a leaked WebDAV password
-// doesn't compromise the login password.
-//
-// The on-disk representation never stores the plaintext password — only
-// the SHA-256 hash. Plaintext is returned to the caller exactly once, at
-// creation / reset time, and is never recoverable afterwards.
+// WebdavAccount 表示一条 WebDAV 凭据：Username 绑定登录用户、密码独立随机，仅存哈希，明文只在创建/重置时返回一次。
 type WebdavAccount struct {
 	ID                 string `json:"id"`
 	Remark             string `json:"remark"`
@@ -31,39 +24,27 @@ type WebdavAccount struct {
 	RootPath           string `json:"root_path"`
 	ReadOnly           bool   `json:"readonly"`
 	ProtectSystemFiles bool   `json:"protect_system_files"`
-	// QuotaBytes is the per-account storage cap in bytes. Zero means
-	// unlimited (no quota enforced, no quota reported via PROPFIND).
-	// Old on-disk records without this field decode as 0, which is the
-	// safest default for a quota field on legacy deployments.
+	// QuotaBytes 为该账号存储上限，0 表示不限量。
 	QuotaBytes    int64 `json:"quota_bytes"`
 	CreatedAtUnix int64 `json:"created_at"`
 	UpdatedAtUnix int64 `json:"updated_at"`
 }
 
-// WebdavAccountsFile is the in-memory shape of the WebDAV account state.
-// The top-level "enabled" flag lets the operator turn the whole WebDAV
-// server off without deleting configured accounts. It is persisted to the
-// webdav_meta table (key="enabled") and the webdav_accounts table.
+// WebdavAccountsFile 是 WebDAV 账号的内存状态。
 type WebdavAccountsFile struct {
 	Enabled  bool            `json:"enabled"`
 	Accounts []WebdavAccount `json:"accounts"`
 }
 
-// WebdavAccountState is the in-memory state, guarded by a RWMutex.
-// Persistence is backed by SQLite (webdav_accounts + webdav_meta tables),
-// replacing the previous webdav-accounts.json file. Snapshot reads under
-// the read lock, transactional writes under the write lock.
+// WebdavAccountState 是并发安全的内存状态。
 type WebdavAccountState struct {
 	mu     sync.RWMutex
 	data   *WebdavAccountsFile
 	db     *sql.DB
-	dbPath string // kept so tests can reopen the same DB to verify persistence
+	dbPath string // 供测试重开同一 DB 验证持久化
 }
 
-// systemFileNames are the filenames protected by ProtectSystemFiles.
-// Anything matching this set is refused for write/delete operations
-// through the WebDAV handler. Hidden files (starting with ".") are
-// also protected, matching the file manager's default behaviour.
+// systemFileNames 中的文件禁止通过 WebDAV 写入或删除。
 var systemFileNames = map[string]bool{
 	"auth-state.json":      true,
 	"webdav-accounts.json": true,
@@ -76,18 +57,12 @@ var systemFileNames = map[string]bool{
 	"favicon.png":          true,
 }
 
-// LoadWebdavAccounts reads the WebDAV account state from SQLite (or returns
-// an empty, disabled state if nothing is stored yet). Errors during read
-// are logged but non-fatal — the server falls back to an empty state
-// rather than refusing to start.
+// LoadWebdavAccounts 从 SQLite 读取 WebDAV 账号状态。
 func LoadWebdavAccounts(db *sql.DB) *WebdavAccountState {
 	return LoadWebdavAccountsAt(db, "")
 }
 
-// LoadWebdavAccountsAt is LoadWebdavAccounts with the database path
-// recorded on the returned state. Tests use the path to reopen the same
-// DB to verify persistence. Production callers (main.go) use the
-// parameter-less variant and ignore the empty path.
+// LoadWebdavAccountsAt 额外记录 DB 路径（测试会重开该库）。
 func LoadWebdavAccountsAt(db *sql.DB, path string) *WebdavAccountState {
 	st := &WebdavAccountState{
 		db:     db,
@@ -95,7 +70,6 @@ func LoadWebdavAccountsAt(db *sql.DB, path string) *WebdavAccountState {
 		data:   &WebdavAccountsFile{Enabled: false},
 	}
 
-	// Read the enabled flag from webdav_meta.
 	var enabledStr string
 	err := db.QueryRow("SELECT value FROM webdav_meta WHERE key = 'enabled'").Scan(&enabledStr)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -132,10 +106,7 @@ func LoadWebdavAccountsAt(db *sql.DB, path string) *WebdavAccountState {
 	return st
 }
 
-// WebdavAccountsFromDB opens the database at path and loads the WebDAV
-// account state. Test-only convenience for re-opening the same DB to
-// verify persistence. Cleanup of the new handle is the caller's
-// responsibility (close the state.db or register a t.Cleanup).
+// WebdavAccountsFromDB 打开 path 处的 DB 并加载状态（仅供测试）。
 func WebdavAccountsFromDB(path string) (*WebdavAccountState, error) {
 	db, err := storedb.OpenDB(path)
 	if err != nil {
@@ -144,10 +115,7 @@ func WebdavAccountsFromDB(path string) (*WebdavAccountState, error) {
 	return LoadWebdavAccountsAt(db, path), nil
 }
 
-// generateWebdavPassword returns a random 10-character alphanumeric
-// password. The alphabet is intentionally limited to unambiguous
-// characters (no 0/O/1/I) so the password can be transcribed by hand
-// if a client UI doesn't allow copy-paste.
+// generateWebdavPassword 生成 10 位随机密码，字符集排除易混淆的 0/O/1/I。
 func generateWebdavPassword() (string, error) {
 	const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
 	const length = 10
@@ -161,8 +129,7 @@ func generateWebdavPassword() (string, error) {
 	return string(buf), nil
 }
 
-// generateWebdavID returns a unique-enough identifier for a new account.
-// 6 hex chars from crypto/rand (24 bits of entropy) prefixed with "wd_".
+// generateWebdavID 返回 "wd_" 前缀加 6 位十六进制的标识符。
 func generateWebdavID() (string, error) {
 	var b [3]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -181,14 +148,14 @@ func generateWebdavID() (string, error) {
 	return string(result), nil
 }
 
-// IsEnabled returns whether the WebDAV server should accept connections.
+// IsEnabled 返回 WebDAV 服务是否接受连接。
 func (s *WebdavAccountState) IsEnabled() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.data.Enabled
 }
 
-// SetEnabled flips the master switch and persists to disk.
+// SetEnabled 切换总开关并持久化。
 func (s *WebdavAccountState) SetEnabled(on bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -196,7 +163,7 @@ func (s *WebdavAccountState) SetEnabled(on bool) error {
 	return s.saveLocked()
 }
 
-// list returns a copy of all accounts.
+// List 返回账号列表的副本。
 func (s *WebdavAccountState) List() []WebdavAccount {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -205,22 +172,17 @@ func (s *WebdavAccountState) List() []WebdavAccount {
 	return out
 }
 
-// CreateAccountRequest is the JSON body accepted by POST
-// /-/api/admin/webdav/accounts. Password is NOT accepted — the server
-// generates it and returns the plaintext in the response.
+// CreateAccountRequest 是 POST /-/api/admin/webdav/accounts 的 JSON 请求体。
 type CreateAccountRequest struct {
 	Remark             string `json:"remark"`
 	RootPath           string `json:"root_path"`
 	ReadOnly           bool   `json:"readonly"`
 	ProtectSystemFiles bool   `json:"protect_system_files"`
-	// QuotaBytes in bytes; 0 (or omitted) means unlimited.
+	// QuotaBytes 为 0 或省略表示不限量。
 	QuotaBytes int64 `json:"quota_bytes"`
 }
 
-// CreateAccount validates the request, generates a random password, and
-// persists the new entry. Returns the created account plus the plaintext
-// password — the caller returns the plaintext in the HTTP response
-// exactly once.
+// CreateAccount 校验请求、生成随机密码、持久化账号并一次性返回明文密码。
 func (s *WebdavAccountState) CreateAccount(req CreateAccountRequest, loginUsername string) (WebdavAccount, string, error) {
 	if req.Remark == "" {
 		return WebdavAccount{}, "", errors.New("remark is required")
@@ -237,7 +199,6 @@ func (s *WebdavAccountState) CreateAccount(req CreateAccountRequest, loginUserna
 	if err != nil {
 		return WebdavAccount{}, "", fmt.Errorf("generate password: %w", err)
 	}
-	// Use shared password hashing
 	hash, err := auth.Generate(pw)
 	if err != nil {
 		return WebdavAccount{}, "", fmt.Errorf("hash password: %w", err)
@@ -259,31 +220,24 @@ func (s *WebdavAccountState) CreateAccount(req CreateAccountRequest, loginUserna
 	defer s.mu.Unlock()
 	s.data.Accounts = append(s.data.Accounts, acc)
 	if err := s.saveLocked(); err != nil {
-		// Roll back the in-memory append so list() doesn't return an
-		// account whose persistence failed.
+		// 持久化失败则回滚 append。
 		s.data.Accounts = s.data.Accounts[:len(s.data.Accounts)-1]
 		return WebdavAccount{}, "", err
 	}
 	return acc, pw, nil
 }
 
-// UpdateAccountRequest is the JSON body for PUT
-// /-/api/admin/webdav/accounts/{id}. Password and Username are
-// intentionally NOT accepted: username is bound to the login user, and
-// password rotation goes through the dedicated reset endpoint.
+// UpdateAccountRequest 是 PUT /-/api/admin/webdav/accounts/{id} 的 JSON 请求体；不接受 username/password（前者绑定登录用户，后者只能重置）。
 type UpdateAccountRequest struct {
 	Remark             *string `json:"remark,omitempty"`
 	RootPath           *string `json:"root_path,omitempty"`
 	ReadOnly           *bool   `json:"readonly,omitempty"`
 	ProtectSystemFiles *bool   `json:"protect_system_files,omitempty"`
-	// QuotaBytes uses a pointer for partial-update semantics: omit the
-	// field to leave unchanged, set to 0 to make the account unlimited,
-	// set to a positive value to apply a cap. Negative values are rejected.
+	// QuotaBytes 用指针支持部分更新：省略不变、0 为不限量、正数封顶，负数拒绝。
 	QuotaBytes *int64 `json:"quota_bytes,omitempty"`
 }
 
-// UpdateAccount applies a partial update to an existing account. Fields
-// not present in the request are left untouched.
+// UpdateAccount 对已有账号做部分更新，未提供的字段保持不变。
 func (s *WebdavAccountState) UpdateAccount(id string, req UpdateAccountRequest) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -327,8 +281,7 @@ func (s *WebdavAccountState) UpdateAccount(id string, req UpdateAccountRequest) 
 	return s.saveLocked()
 }
 
-// ResetPassword generates a new random password for the account and
-// returns the plaintext.
+// ResetPassword 为账号生成新随机密码并返回明文。
 func (s *WebdavAccountState) ResetPassword(id string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -346,7 +299,6 @@ func (s *WebdavAccountState) ResetPassword(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Use shared password hashing
 	hash, err := auth.Generate(pw)
 	if err != nil {
 		return "", err
@@ -359,8 +311,7 @@ func (s *WebdavAccountState) ResetPassword(id string) (string, error) {
 	return pw, nil
 }
 
-// DeleteAccount removes the account with the given ID. Deleting a
-// non-existent ID is a no-op so the API can be idempotent.
+// DeleteAccount 删除指定 ID 的账号；ID 不存在时静默成功，保证 API 幂等。
 func (s *WebdavAccountState) DeleteAccount(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -378,28 +329,14 @@ func (s *WebdavAccountState) DeleteAccount(id string) error {
 	return s.saveLocked()
 }
 
-// SyncUsernamesTo renames every webdav account bound to oldName to
-// newName. Returns the number of accounts that were updated.
-//
-// This closes a footgun: webdav accounts are bound to the LOGIN
-// username at creation time, but the admin API lets the operator
-// rename the login user via /-/api/admin/profile/username. Without
-// this sync the webdav accounts keep the old username, so a Linux
-// GVfs / rclone / Cyberduck client trying to connect with the new
-// username gets a silent 401 ("Unauthorized") with no indication
-// that the username needs to be the OLD login name.
-//
-// Called from admin_api.handleChangeUsername after the rename
-// succeeds, so webdav-bound clients immediately work with the new
-// name. No-op when nothing matches — leaves un-bound accounts alone.
+// SyncUsernamesTo 把绑定 oldName 的账号改名到 newName，在登录用户改名后调用，避免 WebDAV 客户端失效。
 func (s *WebdavAccountState) SyncUsernamesTo(oldName, newName string) (int, error) {
 	if oldName == newName {
 		return 0, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Snapshot the indices we'll change so we can roll back cleanly
-	// if saveLocked fails.
+	// 记录索引以便 saveLocked 失败时回滚。
 	type rename struct {
 		idx     int
 		oldName string
@@ -419,8 +356,7 @@ func (s *WebdavAccountState) SyncUsernamesTo(oldName, newName string) (int, erro
 		s.data.Accounts[r.idx].UpdatedAtUnix = now
 	}
 	if err := s.saveLocked(); err != nil {
-		// Roll back to the pre-rename state so list() doesn't return
-		// accounts that the disk copy no longer matches.
+		// 持久化失败则回滚已改的用户名。
 		for _, r := range renames {
 			s.data.Accounts[r.idx].Username = oldName
 		}
@@ -431,20 +367,7 @@ func (s *WebdavAccountState) SyncUsernamesTo(oldName, newName string) (int, erro
 	return len(renames), nil
 }
 
-// VerifyWebdav looks up an account by username and checks the password.
-// Returns the matching account (copied, safe for caller to mutate) and
-// true on success, or zero-value + false on any failure.
-// Supports both bcrypt (new) and SHA-256 (legacy) password hashes.
-//
-// Multiple accounts may share the same username (the admin can create
-// several accounts bound to "admin" with different root_path / readonly
-// flags). We iterate ALL accounts with a matching username and return
-// the first whose password hash matches. Without this, if account A
-// (created earlier) appears before account B in the list and the user
-// tries to log in with B's password, the early-return-on-mismatch
-// behaviour would reject the login even though B's password is correct.
-// We also avoid early return on hash mismatch so the timing doesn't
-// leak which username exists (a non-match walks the whole list).
+// VerifyWebdav 按用户名查账号并校验密码；同名账号可能多个、需全部尝试，且不提前返回以免泄露用户名是否存在。
 func (s *WebdavAccountState) VerifyWebdav(username, password string) (WebdavAccount, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -456,10 +379,9 @@ func (s *WebdavAccountState) VerifyWebdav(username, password string) (WebdavAcco
 			continue
 		}
 		userMatched++
-		// Use shared password hash verification
 		ph := auth.NewPasswordHashFromStored(acc.PasswordSHA)
 		if ph.Verify(password, func(newHash string) {
-			// Async upgrade to bcrypt
+			// 校验成功后异步把旧哈希升级为 bcrypt。
 			go s.upgradeWebdavPasswordHash(acc.ID, newHash)
 		}) {
 			matched = acc
@@ -468,29 +390,18 @@ func (s *WebdavAccountState) VerifyWebdav(username, password string) (WebdavAcco
 		}
 	}
 	if !found {
-		// Distinguish "username doesn't match any account" from
-		// "username matches but password is wrong" — this is the key
-		// signal for diagnosing login failures. The two cases require
-		// completely different operator fixes:
-		//   - userMatched == 0 → user is typing the wrong username
-		//     (e.g. using the "remark" field, or a stale username
-		//     from before a rename).
-		//   - userMatched > 0  → username is correct but the password
-		//     is wrong (typo, stale clipboard, reset was done but
-		//     client cached the old password).
+		// 记录用户名是否命中任何账号，便于区分「用户名错误」与「密码错误」。
 		log.Printf("webdav: verify failed user=%q (accounts with matching username=%d, total accounts=%d)",
 			username, userMatched, len(s.data.Accounts))
 	}
 	return matched, found
 }
 
-// upgradeWebdavPasswordHash upgrades a legacy SHA-256 hash to bcrypt after
-// successful WebDAV login. Runs in a goroutine to avoid blocking the response.
+// upgradeWebdavPasswordHash 在登录成功后以 goroutine 将旧 SHA-256 哈希升级为 bcrypt。
 func (s *WebdavAccountState) upgradeWebdavPasswordHash(accountID, newHash string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Find the account by ID
 	idx := -1
 	for i := range s.data.Accounts {
 		if s.data.Accounts[i].ID == accountID {
@@ -502,7 +413,7 @@ func (s *WebdavAccountState) upgradeWebdavPasswordHash(accountID, newHash string
 		return
 	}
 
-	// Double-check we still have legacy hash (might have been changed concurrently)
+	// 加锁后复查：并发下哈希可能已被其他请求升级。
 	ph := auth.NewPasswordHashFromStored(s.data.Accounts[idx].PasswordSHA)
 	if ph.Algorithm() != auth.HashLegacySHA256 {
 		return
@@ -517,24 +428,17 @@ func (s *WebdavAccountState) upgradeWebdavPasswordHash(accountID, newHash string
 	log.Printf("webdav: successfully upgraded password hash from SHA-256 to bcrypt for account %q", accountID)
 }
 
-// normaliseWebdavRoot validates and canonicalises a WebDAV account's
-// root_path. The result is always "/"-prefixed and never contains ".."
-// segments (which would let the account escape --root via path
-// traversal in the WebDAV handler).
+// normaliseWebdavRoot 校验并规范化 root_path：强制 "/" 前缀且不含 ".."（防止逃出 --root）。
 func normaliseWebdavRoot(input string) (string, error) {
 	if input == "" {
 		return "/", nil
 	}
-	// Force forward slashes regardless of platform — WebDAV URLs always
-	// use "/", and the file handler later translates back to the OS
-	// separator via filepath.FromSlash.
+	// 统一为 "/"，WebDAV URL 只使用正斜杠。
 	cleaned := filepath.ToSlash(filepath.Clean(input))
 	if !strings.HasPrefix(cleaned, "/") {
 		cleaned = "/" + cleaned
 	}
-	// filepath.Clean collapses ".." where it can, but a leading ".." or
-	// a "/../foo" pattern still survives. Reject any segment equal to
-	// ".." to be safe.
+	// 拒绝任何 ".." 段（filepath.Clean 会保留前导的 ".."）。
 	for _, seg := range strings.Split(cleaned, "/") {
 		if seg == ".." {
 			return "", errors.New("root_path must not contain '..'")
@@ -543,11 +447,7 @@ func normaliseWebdavRoot(input string) (string, error) {
 	return cleaned, nil
 }
 
-// saveLocked persists the full account state to SQLite in one transaction:
-// the enabled flag into webdav_meta and the account list into
-// webdav_accounts (delete-all + reinsert, mirroring the previous
-// whole-file-rewrite semantics). The transaction gives atomicity — a
-// failed commit rolls back cleanly. Caller must hold s.mu in write mode.
+// saveLocked 在单个事务中持久化全部账号状态；调用方必须持有 s.mu 写锁。
 func (s *WebdavAccountState) saveLocked() error {
 	if s.data == nil {
 		return errors.New("webdav: no state loaded")
@@ -591,15 +491,11 @@ func (s *WebdavAccountState) saveLocked() error {
 	return tx.Commit()
 }
 
-// isProtectedFilename returns true if the given basename should be
-// protected from write/delete operations through WebDAV when the
-// account has ProtectSystemFiles enabled.
+// isProtectedFilename 判断文件名在开启 ProtectSystemFiles 时是否禁止写入/删除。
 func isProtectedFilename(name string) bool {
 	if systemFileNames[name] {
 		return true
 	}
-	// Hide any dotfile — matches the file manager's default behaviour
-	// (showHidden is false by default) and prevents accidentally
-	// exposing or clobbering configuration.
+	// 点文件同样受保护。
 	return strings.HasPrefix(name, ".")
 }

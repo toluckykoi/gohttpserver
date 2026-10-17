@@ -1,16 +1,11 @@
 <template>
   <el-config-provider :locale="locale">
-    <!-- Login gate: when --login is enabled and we have no session,
-         render only the Login view. The whole shell (header / footer /
-         file list) is hidden so nothing leaks before authentication. -->
+    <!-- 认证完成前不渲染任何内容。 -->
     <template v-if="showLoginGate">
       <Login :next="pendingPath" />
     </template>
 
     <div v-else class="app-shell" :data-theme="currentTheme">
-      <!-- Header: frosted-glass bar that floats over content.
-           Uses backdrop-filter for the modern translucent effect.
-           On phones it collapses search/theme into a more compact row. -->
       <header class="app-header">
         <div class="header-inner">
           <div class="header-left">
@@ -26,9 +21,7 @@
           </div>
 
           <div class="header-right">
-            <!-- Phone QR button: hidden on phone (can't scan your own screen).
-                 Kept as a square icon chip on desktop for symmetry with the
-                 other controls. -->
+            <!-- 本机无法扫描自己屏幕上的二维码。 -->
             <el-tooltip content="View on phone (QR)" placement="bottom">
               <el-button
                 class="header-chip header-chip--qr"
@@ -55,8 +48,6 @@
               <kbd v-if="!isPhone" class="header-search-kbd">/</kbd>
             </div>
 
-            <!-- Theme picker: a small grid of swatches. Visual feedback
-                 beats a dropdown of color names — you see what you get. -->
             <el-popover
               placement="bottom-end"
               :width="220"
@@ -93,9 +84,6 @@
               </div>
             </el-popover>
 
-            <!-- User pill: kept last (rightmost) so the account anchor
-                 sits at the far edge of the header, the conventional
-                 spot for identity controls. -->
             <template v-if="fileStore.user">
               <el-popover
                 ref="userPopoverRef"
@@ -143,7 +131,6 @@
         </div>
       </header>
 
-      <!-- Main content area -->
       <main class="app-main">
         <div class="main-inner">
           <FileList />
@@ -236,7 +223,6 @@ import { useTheme } from './composables/useTheme'
 import FileList from './components/FileList.vue'
 import Login from './views/Login.vue'
 import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
-// Lazy-load modals/panels used directly in App.vue
 const AdminPanel = defineAsyncComponent(() => import('./views/AdminPanel.vue'))
 const QRCodeModal = defineAsyncComponent(() => import('./components/QrCodeModal.vue'))
 import type { FileItem } from './types'
@@ -253,21 +239,12 @@ const showQrCodeModal = ref(false)
 const currentQrFile = ref<FileItem | null>(null)
 const searchValue = ref('')
 const showAdminPanel = ref(false)
-// Ref to the user-menu popover so we can imperatively close it when
-// one of its menu items is clicked. trigger="click" toggles on the
-// reference element only; clicks inside the popover body don't hide
-// it, which left the menu stuck open after opening the admin panel.
 const userPopoverRef = ref<{ hide: () => void } | null>(null)
 
 const version = computed(() => fileStore.version)
 const currentPath = computed(() => window.location.pathname)
 
-// Show the login screen when:
-//   1. The /-/api/auth/status probe reports login is enabled, AND
-//   2. We don't have a session (fileStore.user is null), AND
-//   3. The probe has actually completed (loginChecked) — otherwise we'd
-//      flash the manager for one tick before auth state arrives and
-//      yank it back to the login screen, which feels broken.
+// 必须等鉴权探测完成，否则登录页会闪现。
 const showLoginGate = computed(() => {
   return (
     fileStore.loginChecked &&
@@ -276,11 +253,7 @@ const showLoginGate = computed(() => {
   )
 })
 
-// Path the user was trying to reach when intercepted by the server's
-// 302 to /-/login?next=…. We pass it forward to Login.vue so a
-// successful POST lands them back where they started. The server
-// passes the original path via the `next` query param; if absent
-// (e.g. user navigated directly to /-/login), fall back to "/".
+// 被服务端 302 到 /-/login 之前用户想访问的路径。
 const pendingPath = computed(() => {
   const params = new URLSearchParams(window.location.search)
   const next = params.get('next')
@@ -288,8 +261,6 @@ const pendingPath = computed(() => {
   return window.location.pathname || '/'
 })
 
-// Reactive phone breakpoint. Used to hide kbd hint, toggle button
-// labels, etc. without re-mounting the whole tree.
 const isPhone = ref(window.innerWidth < 640)
 function handleResize() {
   isPhone.value = window.innerWidth < 640
@@ -326,25 +297,16 @@ function openAdminPanel() {
 async function handleLogout() {
   userPopoverRef.value?.hide()
   await fileStore.logout()
-  // Force a reload so the middleware gets a clean chance to redirect
-  // us, and the file list caches are evicted. Soft re-render leaves
-  // cached data in the Pinia store that re-appears on the next mount.
   ElMessage.info('Signed out')
   window.location.assign('/')
 }
 
-// When the operator renames their account in the admin panel, update
-// the fileStore's user object so the header pill shows the new name
-// immediately. The session cookie was already re-stamped by the
-// backend; we just need to mirror it in Pinia.
 function handleUsernameChanged(newName: string) {
   if (fileStore.user) {
     fileStore.user = { ...fileStore.user, name: newName }
   }
 }
 
-// "/" focuses search; Esc clears. These are file-manager-y shortcuts
-// every user already expects from tools like VS Code / GitHub.
 function handleShortcut(e: KeyboardEvent) {
   const t = e.target as HTMLElement | null
   const isInput =
@@ -363,10 +325,6 @@ function handlePopState() {
 }
 
 onMounted(async () => {
-  // Login status is the gate decision; load it FIRST so the login
-  // page can render without a flash of the file manager. The other
-  // loads (files/user/sysinfo) still happen and their results are
-  // just ignored by the v-if once showLoginGate is true.
   await fileStore.loadLoginStatus()
 
   if (!showLoginGate.value) {
@@ -390,10 +348,6 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* ════════════════════════════════════════════════════════════════
-   Layout
-   ════════════════════════════════════════════════════════════════ */
-
 .app-shell {
   display: flex;
   flex-direction: column;
@@ -401,10 +355,6 @@ onBeforeUnmount(() => {
   background: var(--el-bg-color-page);
   transition: background-color var(--transition-base);
 }
-
-/* ════════════════════════════════════════════════════════════════
-   Header — frosted glass
-   ════════════════════════════════════════════════════════════════ */
 
 .app-header {
   position: sticky;
@@ -440,7 +390,6 @@ onBeforeUnmount(() => {
   gap: 16px;
 }
 
-/* ── Brand ── */
 .header-brand {
   display: inline-flex;
   align-items: center;
@@ -509,7 +458,6 @@ onBeforeUnmount(() => {
   line-height: 1.3;
 }
 
-/* ── Right cluster ── */
 .header-right {
   display: flex;
   align-items: center;
@@ -518,8 +466,6 @@ onBeforeUnmount(() => {
 }
 
 .header-chip {
-  /* Square icon button — matches the user pill height (34px).
-     min-width:0 lets it shrink on narrow viewports without overflowing. */
   width: 34px;
   height: 34px;
   padding: 0;
@@ -530,7 +476,6 @@ onBeforeUnmount(() => {
   margin: 0;
 }
 
-/* Search field with embedded kbd hint */
 .header-search {
   position: relative;
   width: 240px;
@@ -584,7 +529,6 @@ onBeforeUnmount(() => {
   user-select: none;
 }
 
-/* User pill */
 .header-user {
   display: inline-flex;
   align-items: center;
@@ -607,8 +551,6 @@ onBeforeUnmount(() => {
   background: var(--el-fill-color-light);
 }
 
-/* When the user pill is rendered as a clickable trigger (for the popover
-   menu), it gets a hover affordance and a pointer cursor. */
 .header-user--button {
   cursor: pointer;
   font: inherit;
@@ -623,7 +565,6 @@ onBeforeUnmount(() => {
   outline-offset: 2px;
 }
 
-/* User menu (popover body) */
 .user-menu {
   display: flex;
   flex-direction: column;
@@ -677,7 +618,6 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 
-/* Theme toggle swatch — visible in any theme */
 .theme-swatch {
   display: inline-block;
   width: 16px;
@@ -697,7 +637,6 @@ onBeforeUnmount(() => {
   transform: scale(1.08);
 }
 
-/* ── Theme popover (visual swatch grid) ── */
 :deep(.theme-popover) {
   padding: 12px !important;
 }
@@ -746,8 +685,6 @@ onBeforeUnmount(() => {
   border: 1px solid var(--el-border-color-lighter);
 }
 
-/* Each theme renders as a small split-swatch showing its dominant
-   light + dark side. The user sees the actual palette at a glance. */
 .theme-card-swatch-light,
 .theme-card-swatch-dark {
   flex: 1;
@@ -773,10 +710,6 @@ onBeforeUnmount(() => {
   color: var(--el-color-primary);
 }
 
-/* ════════════════════════════════════════════════════════════════
-   Main
-   ════════════════════════════════════════════════════════════════ */
-
 .app-main {
   flex: 1;
   display: flex;
@@ -793,10 +726,6 @@ onBeforeUnmount(() => {
   padding: 8px 28px;
   box-sizing: border-box;
 }
-
-/* ════════════════════════════════════════════════════════════════
-   Footer
-   ════════════════════════════════════════════════════════════════ */
 
 .app-footer {
   max-width: 1440px;
@@ -927,10 +856,6 @@ onBeforeUnmount(() => {
   opacity: 0.75;
 }
 
-/* ════════════════════════════════════════════════════════════════
-   Responsive — Tablet
-   ════════════════════════════════════════════════════════════════ */
-
 @media (max-width: 768px) {
   .app-header { height: 56px; }
   .header-inner { padding: 0 16px; gap: 8px; }
@@ -938,7 +863,6 @@ onBeforeUnmount(() => {
 
   .header-subtitle { display: none; }
 
-  /* Phone QR is unusable from the device rendering the page. */
   .header-chip--qr { display: none; }
 
   .header-right { gap: 6px; }
@@ -957,10 +881,6 @@ onBeforeUnmount(() => {
   }
 }
 
-/* ════════════════════════════════════════════════════════════════
-   Responsive — Phone
-   ════════════════════════════════════════════════════════════════ */
-
 @media (max-width: 480px) {
   .header-inner { padding: 0 12px; }
   .main-inner { padding: 8px 12px; }
@@ -973,17 +893,13 @@ onBeforeUnmount(() => {
     max-width: 110px;
   }
 
-  /* Compact the input internals on phone so the field stays usable
-     without forcing the rest of the header off-screen. */
   .header-search :deep(.el-input__wrapper) {
     padding: 4px 8px;
   }
   .header-search :deep(.el-input__inner) {
     font-size: 13px;
   }
-  /* On phone the field is too narrow for the placeholder to fit
-     alongside the icon; hide it so the input looks clean. The search
-     icon is enough to convey purpose. */
+  /* 手机上占位符放不下图标。 */
   .header-search :deep(.el-input__inner::placeholder) {
     color: transparent;
   }
@@ -1004,15 +920,10 @@ onBeforeUnmount(() => {
   .footer-product { font-size: 12.5px; }
 }
 
-/* ════════════════════════════════════════════════════════════════
-   Tiny phones — drop brand title text, keep just the logo
-   ════════════════════════════════════════════════════════════════ */
-
 @media (max-width: 360px) {
   .header-titles { display: none; }
 }
 
-/* Modal loading state for Suspense fallback */
 .modal-loading {
   display: flex;
   align-items: center;
@@ -1023,18 +934,9 @@ onBeforeUnmount(() => {
 }
 </style>
 
-<!--
-  ════════════════════════════════════════════════════════════════
-  Theme palette — mounted on <html data-theme="..."> by useTheme.
-  Element Plus tokens are remapped per theme so every component
-  inherits the chosen look without per-component overrides.
-  ════════════════════════════════════════════════════════════════
--->
+<!-- 主题色板由 useTheme 挂到 <html data-theme="...">，需全局样式。 -->
 
 <style>
-/* ────────────────────────────────────────────────────────────────
-   Black — original cool-grey theme, refined.
-   ──────────────────────────────────────────────────────────────── */
 [data-theme="black"] {
   --el-color-primary: #4b5563;
   --el-color-primary-light-3: #9ca3af;
@@ -1047,9 +949,6 @@ onBeforeUnmount(() => {
   --el-fill-color: #eef0f2;
 }
 
-/* ────────────────────────────────────────────────────────────────
-   White — Apple + Notion inspired warm minimalism.
-   ──────────────────────────────────────────────────────────────── */
 [data-theme="white"] {
   --el-color-primary: #0066cc;
   --el-color-primary-light-3: #7ab8f5;
@@ -1078,9 +977,6 @@ onBeforeUnmount(() => {
   --el-border-color-darker: #aeaeb5;
 }
 
-/* ────────────────────────────────────────────────────────────────
-   Green — emerald accent.
-   ──────────────────────────────────────────────────────────────── */
 [data-theme="green"] {
   --el-color-primary: #059669;
   --el-color-primary-light-3: #6ee7b7;
@@ -1093,9 +989,6 @@ onBeforeUnmount(() => {
   --el-fill-color: #eaf2ec;
 }
 
-/* ────────────────────────────────────────────────────────────────
-   Cyan — bright sky accent.
-   ──────────────────────────────────────────────────────────────── */
 [data-theme="cyan"] {
   --el-color-primary: #0891b2;
   --el-color-primary-light-3: #67e8f9;
@@ -1108,11 +1001,6 @@ onBeforeUnmount(() => {
   --el-fill-color: #e9f1f5;
 }
 
-/* ────────────────────────────────────────────────────────────────
-   Dark — true dark mode. Element Plus dark-theme convention:
-   primary-light-N steps get DARKER as N grows (they back tinted
-   fills), while primary-dark-2 is the lighter hover on the accent.
-   ──────────────────────────────────────────────────────────────── */
 [data-theme="dark"] {
   color-scheme: dark;
 
@@ -1148,8 +1036,7 @@ onBeforeUnmount(() => {
 
   --el-mask-color: rgba(0, 0, 0, 0.6);
 
-  /* The global light-theme shadows vanish on dark surfaces; swap in
-     deeper, wider umbra so cards still lift off the page. */
+/* 深色表面需要更重的阴影。 */
   --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.35);
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4),
                0 1px 2px rgba(0, 0, 0, 0.3);

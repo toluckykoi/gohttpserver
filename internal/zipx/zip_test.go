@@ -10,9 +10,8 @@ import (
 	"testing"
 )
 
-// CompressToZip used to dereference a nil os.FileInfo: filepath.Walk calls the
-// callback with info == nil when the root cannot be lstat'ed, so archiving a
-// path that does not exist panicked the request (GET /missing?op=archive).
+// 根路径无法 lstat 时 filepath.Walk 会以 info == nil 调用回调，
+// 回归测试：归档不存在的路径（GET /missing?op=archive）不得 panic。
 func TestCompressToZipMissingPathDoesNotPanic(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
 	rec := httptest.NewRecorder()
@@ -28,8 +27,7 @@ func TestCompressToZipMissingPathDoesNotPanic(t *testing.T) {
 	}
 }
 
-// Archiving a single file must name the entry after that file. It used to be
-// named "." because the relative path for the walk root is empty.
+// 单文件归档应以该文件名作为条目名：walk 根的相对路径为空，曾导致条目名为 "."。
 func TestCompressToZipSingleFileEntryName(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "report.txt")
@@ -64,7 +62,7 @@ func TestCompressToZipSingleFileEntryName(t *testing.T) {
 	}
 }
 
-// A directory archive must skip .ghs.yml: its body holds the per-user tokens.
+// 目录归档必须跳过 .ghs.yml，其内容包含各用户 token。
 func TestCompressToZipSkipsAccessControlFile(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, ".ghs.yml"), []byte("token: SECRET"), 0o644); err != nil {

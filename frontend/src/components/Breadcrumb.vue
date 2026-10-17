@@ -101,8 +101,6 @@ function navigateTo(path: string) {
 }
 
 .breadcrumb-home {
-  /* The home chip stands out a touch — it's the always-available
-     escape hatch to the root. */
   background: color-mix(in srgb, var(--el-fill-color) 50%, transparent);
 }
 
@@ -119,7 +117,6 @@ function navigateTo(path: string) {
   opacity: 0.6;
 }
 
-/* Phone: tighten everything */
 @media (max-width: 480px) {
   .breadcrumb {
     padding: 8px 0 6px;
@@ -132,8 +129,6 @@ function navigateTo(path: string) {
   }
 
   .breadcrumb-home span {
-    /* Hide the "Home" text below 480px to make room for path crumbs.
-       Icon alone still telegraphs the action. */
     display: none;
   }
 

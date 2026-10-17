@@ -23,19 +23,10 @@ var (
 	DefaultSessionName = "ghs-session"
 )
 
-// sessionKeyLen is the length (in bytes) of the random session signing
-// key generated when GHS_SESSION_KEY is not provided. 32 bytes = 256 bits,
-// the recommended minimum for HMAC-SHA256 cookie signing.
+// sessionKeyLen 是未设置 GHS_SESSION_KEY 时的随机会话密钥长度（32 字节 = 256 位，适配 HMAC-SHA256）。
 const sessionKeyLen = 32
 
 func init() {
-	// Session key precedence: GHS_SESSION_KEY env var → random key.
-	// Previously this was a hardcoded literal in the source, which let
-	// anyone reading the repo forge valid session cookies. A random key
-	// survives across restarts only within a single process, so logged-in
-	// users will be signed out on server restart — that's the trade-off
-	// for not shipping a secret in the binary. Operators who need sticky
-	// sessions across restarts should set GHS_SESSION_KEY explicitly.
 	if key := os.Getenv("GHS_SESSION_KEY"); key != "" {
 		Store = sessions.NewCookieStore([]byte(key))
 	} else {
@@ -47,16 +38,8 @@ func init() {
 			"Sessions will not survive a restart. Set GHS_SESSION_KEY for production.")
 		Store = sessions.NewCookieStore(buf)
 	}
-	// Harden the session cookie by default: HttpOnly prevents JS from
-	// reading it (mitigates XSS token theft), SameSite=Lax blocks most
-	// CSRF. gorilla/sessions v1.4.0 changed NewCookieStore to default
-	// Secure=true and SameSite=None — that breaks plain-HTTP local dev
-	// (the browser refuses to store a Secure cookie over HTTP, so the
-	// session is silently lost on every login). We explicitly reset
-	// Secure=false here; main() flips it back to true when TLS is on.
-	// Path="/" ensures the cookie is sent on all requests, not just
-	// the login path — without this, some browsers won't send the
-	// cookie after the post-login redirect, causing a login loop.
+	// Secure=false 以兼容明文 HTTP 本地开发（gorilla v1.4.0 默认 true 会破坏 HTTP），
+	// TLS 启用时由 main() 置为 true；Path="/" 保证登录后重定向仍带着 cookie。
 	Store.Options.HttpOnly = true
 	Store.Options.SameSite = http.SameSiteLaxMode
 	Store.Options.Secure = false
@@ -77,12 +60,6 @@ func init() {
 	gob.Register(&M{})
 }
 
-// requestScheme returns the scheme of the incoming request. It prefers
-// r.URL.Scheme (set by some reverse proxies), falls back to https when
-// r.TLS is non-nil, and otherwise returns http. Extracted so the login
-// redirect and the callback verify use the same scheme — previously
-// login inferred scheme from r.URL.Scheme while verify hardcoded "http://",
-// which broke HTTPS deployments.
 func requestScheme(r *http.Request) string {
 	if r.URL.Scheme != "" {
 		return r.URL.Scheme
@@ -93,29 +70,18 @@ func requestScheme(r *http.Request) string {
 	return "http"
 }
 
-// safeNextURL validates a user-supplied "next" redirect target. Only
-// same-origin or relative URLs are allowed; anything else falls back to
-// "/". This closes an open-redirect hole where a crafted next= could
-// send users to an attacker-controlled site after login.
-//
-// Backslash handling: browsers normalise "/\\evil.com" to "//evil.com"
-// (treating backslash as a path separator), so a value like "/\\evil.com"
-// would bypass a naive "starts with / but not //" check. We reject any
-// relative path whose second character is a backslash to close that.
+// safeNextURL 校验用户提供的 next 跳转目标，仅允许同源或相对 URL（封堵开放重定向）；
+// 拒绝反斜杠，因为浏览器会把 "/\\evil.com" 归一化为 "//evil.com"。
 func safeNextURL(r *http.Request, next string) string {
 	if next == "" {
 		return "/"
 	}
-	// Relative paths ( starting with "/" but not "//") are always safe.
-	// Reject any path containing backslashes: browsers treat "/\evil.com",
-	// "/\\evil.com", etc. as protocol-relative URLs.
 	if strings.HasPrefix(next, "/") && !strings.HasPrefix(next, "//") {
 		if strings.Contains(next, "\\") {
 			return "/"
 		}
 		return next
 	}
-	// Absolute URLs must match the request host.
 	if u, err := url.Parse(next); err == nil && u.IsAbs() {
 		if u.Host == r.Host {
 			return next
@@ -143,8 +109,6 @@ func HandleOpenID(router *mux.Router, loginUrl string, secure bool) {
 	}).Methods("GET")
 
 	router.HandleFunc("/-/openidcallback", func(w http.ResponseWriter, r *http.Request) {
-		// Build the verify URL from the actual request scheme so HTTPS
-		// deployments match what the OpenID provider redirected to.
 		scheme := requestScheme(r)
 		id, err := openid.Verify(scheme+"://"+r.Host+r.URL.String(), discoveryCache, nonceStore)
 		if err != nil {
@@ -195,9 +159,6 @@ func HandleOpenID(router *mux.Router, loginUrl string, secure bool) {
 		if nextUrl == "" {
 			nextUrl = r.Referer()
 		}
-		// Same open-redirect guard as /-/login and /-/openidcallback:
-		// without this, /-/logout?next=https://evil.com would send users
-		// to an attacker-controlled site right after they sign out.
 		nextUrl = safeNextURL(r, nextUrl)
 		_ = session.Save(r, w)
 		http.Redirect(w, r, nextUrl, 302)

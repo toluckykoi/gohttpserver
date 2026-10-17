@@ -20,57 +20,25 @@ import (
 	gdav "golang.org/x/net/webdav"
 )
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Quota subsystem for the WebDAV server.
-//
-// This file mirrors the protocol-layer patterns from Cloudreve's
-// pkg/webdav (an extension of golang.org/x/net/webdav) but stays self-
-// contained: we wrap the upstream FileSystem rather than forking it,
-// intercept only top-level PROPFIND for quota XML injection, and report
-// 507 Insufficient Storage on over-quota writes (Cloudreve currently
-// leaks a 500 here — we fix that bug from day one).
-//
-// Three pieces:
-//   1. usageState    — in-memory map[accountID]int64 + JSON persistence.
-//   2. quotaFileSystem — webdav.FileSystem wrapper that enforces the cap
-//      on mutating calls and tracks byte deltas.
-//   3. handlePropfindRoot — top-level PROPFIND handler that emits
-//      DAV:quota-used-bytes and DAV:quota-available-bytes (RFC 4331).
-// ─────────────────────────────────────────────────────────────────────────────
+// WebDAV 配额子系统：实施每账号存储上限、经 PROPFIND（RFC 4331）上报用量、超额写入返回 507。
 
-// ErrInsufficientCapacity is returned by quotaFileSystem.OpenFile when
-// the write would push the account past its configured quota. Mapped to
-// HTTP 507 by webdavServer.ServeHTTP.
+// ErrInsufficientCapacity 在写入会超出配额时返回。
 var ErrInsufficientCapacity = errors.New("webdav: insufficient storage capacity")
 
-// ─── usageState ─────────────────────────────────────────────────────────────
-
-// UsageState persists the per-account byte totals for the WebDAV server.
-//
-// Persistence is backed by the SQLite storage_usage table (account_id →
-// used_bytes), replacing the previous storage-usage.json file.
-//
-// Concurrency: an RWMutex guards the in-memory map. addDelta takes the
-// write lock and persists on every call. recalculate takes the write
-// lock once, walks the filesystem, replaces the entry, and persists.
-// Both are O(1) for the lock holder but block other writers briefly.
+// UsageState 持久化各账号已用字节数，以 SQLite 为后端。
 type UsageState struct {
 	mu     sync.RWMutex
 	used   map[string]int64
 	db     *sql.DB
-	dbPath string // kept so tests can reopen the same DB to verify persistence
+	dbPath string // 供测试重开同一 DB 验证持久化
 }
 
-// LoadUsageState reads the storage_usage table. A read error is logged and
-// falls back to an empty state (the operator can re-trigger recalculation
-// via the admin endpoint to repopulate).
+// LoadUsageState 读取 storage_usage 表。
 func LoadUsageState(db *sql.DB) *UsageState {
 	return loadUsageStateAt(db, "")
 }
 
-// loadUsageStateAt is LoadUsageState with the database path recorded on
-// the returned state. Tests use the path to reopen the same DB to verify
-// persistence.
+// loadUsageStateAt 额外记录 DB 路径（测试会重开该库）。
 func loadUsageStateAt(db *sql.DB, path string) *UsageState {
 	s := &UsageState{
 		db:     db,
@@ -99,8 +67,7 @@ func loadUsageStateAt(db *sql.DB, path string) *UsageState {
 	return s
 }
 
-// usageStateFromDB opens the database at path and loads the usage table.
-// Test-only convenience for re-opening the same DB to verify persistence.
+// usageStateFromDB 打开 path 处的 DB 并加载用量表（仅供测试）。
 func usageStateFromDB(path string) (*UsageState, error) {
 	db, err := storedb.OpenDB(path)
 	if err != nil {
@@ -109,30 +76,21 @@ func usageStateFromDB(path string) (*UsageState, error) {
 	return loadUsageStateAt(db, path), nil
 }
 
-// Get returns the cached byte count for an account. Zero is a valid
-// answer (newly created account with no files yet) so the caller must
-// not distinguish "missing" from "zero" — same value, same meaning.
+// Get 返回账号的缓存字节数。
 func (s *UsageState) Get(accountID string) int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.used[accountID]
 }
 
-// IsEmpty reports whether the usage map is empty. Used at startup to
-// decide whether a fresh DB needs the per-account chroot walk to seed
-// initial byte totals (a brand-new DB is empty even if accounts are
-// present).
+// IsEmpty 报告用量表是否为空（为空说明是新库，需要初始播种）。
 func (s *UsageState) IsEmpty() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.used) == 0
 }
 
-// addDelta atomically updates the cached byte count for accountID and
-// persists. A negative delta can drive the counter below zero only if
-// the operator manually deleted files outside the WebDAV handler; we
-// clamp at zero defensively so the PROPFIND report never goes
-// negative.
+// addDelta 原子更新缓存字节数并持久化；负 delta 会被截断到 0。
 func (s *UsageState) addDelta(accountID string, delta int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -147,18 +105,7 @@ func (s *UsageState) addDelta(accountID string, delta int64) error {
 	return s.saveLocked()
 }
 
-// setUsage atomically replaces the cached byte count for accountID and
-// persists. Use this when you have the absolute total (e.g. after a
-// filesystem walk) and need to set it without a TOCTOU window between
-// Get() and addDelta().
-//
-// LOGIC FIX: RecalculateAll previously did
-//
-//	s.addDelta(acc.ID, total - s.Get(acc.ID))
-//
-// which spans two separate lock acquisitions — another goroutine can
-// modify the counter between Get and addDelta, producing a wrong delta.
-// setUsage does the read+replace in a single critical section.
+// setUsage 原子替换缓存字节数并持久化；已知绝对总量时用它代替 addDelta，避免 Get 与 addDelta 之间的 TOCTOU 窗口。
 func (s *UsageState) setUsage(accountID string, total int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -166,12 +113,7 @@ func (s *UsageState) setUsage(accountID string, total int64) error {
 	return s.saveLocked()
 }
 
-// Recalculate walks rootPath and replaces the cached byte count for
-// accountID with the actual on-disk total. Use this to recover from a
-// counter drift (e.g. operator manually rm-ed files, or initial
-// migration from a pre-quota install). Errors during the walk are
-// non-fatal — the counter is still updated with the partial sum so
-// the operator gets a usable starting point.
+// Recalculate 遍历 rootPath，用磁盘实际总量替换缓存；遍历出错不致命（仍采用部分和）。
 func (s *UsageState) Recalculate(rootPath string, accountID string) error {
 	total, walkErr := walkSize(rootPath)
 	if walkErr != nil {
@@ -190,8 +132,7 @@ func (s *UsageState) Recalculate(rootPath string, accountID string) error {
 	return nil
 }
 
-// RecalculateAll walks every (rootPath, accountID) pair and refreshes
-// the cache. Returns per-account results for the admin endpoint.
+// RecalculateAll 遍历所有账号并刷新缓存。
 func (s *UsageState) RecalculateAll(accounts []WebdavAccount, root string) []map[string]any {
 	out := make([]map[string]any, 0, len(accounts))
 	for _, acc := range accounts {
@@ -206,9 +147,6 @@ func (s *UsageState) RecalculateAll(accounts []WebdavAccount, root string) []map
 			})
 			continue
 		}
-		// LOGIC FIX: Use setUsage (single lock) instead of
-		// addDelta(total - Get()) which spans two locks and races
-		// with concurrent WebDAV writes.
 		_ = s.setUsage(acc.ID, total)
 		out = append(out, map[string]any{
 			"id":         acc.ID,
@@ -219,10 +157,7 @@ func (s *UsageState) RecalculateAll(accounts []WebdavAccount, root string) []map
 	return out
 }
 
-// saveLocked persists the in-memory usage map to the storage_usage table.
-// Only positive totals are stored (matching the previous JSON behaviour);
-// accounts at zero are deleted so the table stays sparse. The whole update
-// runs in one transaction for atomicity. Caller must hold s.mu in write mode.
+// saveLocked 在单个事务中把用量表写入 storage_usage；调用方必须持有 s.mu 写锁。
 func (s *UsageState) saveLocked() error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -257,14 +192,12 @@ func (s *UsageState) saveLocked() error {
 	return tx.Commit()
 }
 
-// walkSize sums the size of every regular file under root. Symlinks and
-// special files are skipped. Returns 0 for a missing path.
+// walkSize 累加 root 下所有普通文件的大小。
 func walkSize(root string) (int64, error) {
 	var total int64
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			// If the root itself is missing, return 0 cleanly so the
-			// caller treats it as "nothing uploaded yet".
+			// 根目录缺失时干净返回 0，让调用方视为「尚无上传」。
 			if errors.Is(walkErr, fs.ErrNotExist) && p == root {
 				return nil
 			}
@@ -273,14 +206,13 @@ func walkSize(root string) (int64, error) {
 		if d.IsDir() {
 			return nil
 		}
-		// Skip symlinks — they can point outside the dav root and we
-		// don't want to double-count or follow loops.
+		// 跳过符号链接（可能指向根外或形成环）。
 		if d.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
 		info, infoErr := d.Info()
 		if infoErr != nil {
-			return nil // skip unreadable entries rather than abort
+			return nil // 跳过不可读条目而非中止
 		}
 		if info.Mode().IsRegular() {
 			total += info.Size()
@@ -290,42 +222,19 @@ func walkSize(root string) (int64, error) {
 	return total, err
 }
 
-// ─── quotaFileSystem ────────────────────────────────────────────────────────
-
-// quotaFileSystem wraps a webdav.FileSystem to enforce per-account
-// storage quotas. The wrapped inner filesystem is responsible for the
-// actual on-disk operations; quotaFileSystem only intercepts at the
-// boundaries where bytes are added or removed.
-//
-// Accounting model (mirrors Cloudreve's `ReserveStorage` + walk-based
-// recalc):
-//
-//   - OpenFile (writes): pre-check against Content-Length-equivalent
-//     hint if known, else fail-open; post-check the final on-disk
-//     size in Close() and reconcile via usageState.addDelta.
-//   - RemoveAll: walk the path before removal to compute the total,
-//     subtract from usage after the inner call succeeds.
-//   - Rename: in-place; size unchanged.
-//   - Mkdir: directories cost zero bytes.
-//   - Stat: pure passthrough.
-//
-// The pre-check is best-effort because the webdav.FileSystem interface
-// doesn't carry Content-Length. The hard guarantee comes from the
-// post-check + the admin recalculate endpoint.
+// quotaFileSystem 包装 webdav.FileSystem 以实施每账号配额：只在字节增减的边界拦截，硬保证来自写入后校验与管理员重算。
 type quotaFileSystem struct {
 	inner      gdav.FileSystem
 	state      *UsageState
 	accountID  string
-	quotaBytes int64 // 0 = unlimited
+	quotaBytes int64 // 0 表示不限量
 	root       string
 	readOnly   bool
-	// protectSystemFiles mirrors the account's flag: refuse writes to system
-	// and dot files (see checkWriteAllowed).
+	// protectSystemFiles 对应账号开关：拒绝写入系统文件与点文件（见 checkWriteAllowed）。
 	protectSystemFiles bool
 }
 
-// Mkdir creates a directory. Quota is irrelevant (directories are
-// metadata-only) but read-only enforcement still applies.
+// Mkdir 创建目录（目录不占配额字节）。
 func (q *quotaFileSystem) Mkdir(ctx context.Context, name string, perm os.FileMode) error {
 	if q.readOnly {
 		return errors.New("webdav: account is read-only")
@@ -336,23 +245,7 @@ func (q *quotaFileSystem) Mkdir(ctx context.Context, name string, perm os.FileMo
 	return q.inner.Mkdir(ctx, name, perm)
 }
 
-// OpenFile passes through to the inner filesystem but wraps the
-// returned File so that Close() can reconcile the byte delta and reject
-// the write if it would overshoot the configured quota.
-//
-// The flag bitmask follows os package conventions. We treat a write as
-// any of:
-//   - os.O_CREATE alone (rare; usually combined with O_WRONLY/O_RDWR)
-//   - os.O_WRONLY or os.O_RDWR with truncation
-//   - os.O_APPEND (we still account on Close; pre-check is skipped)
-//
-// readOnly accounts always reject write flags with a 403-equivalent
-// error before reaching the inner filesystem.
-//
-// Accounting is ALWAYS performed for writes, regardless of whether a
-// quota is configured, so the admin UI can show used_bytes for
-// unlimited accounts too. The post-check overshoot warning only fires
-// when quotaBytes > 0.
+// OpenFile 透传内层文件系统，并包装返回的 File 以便 Close 时对账字节差；写操作一律记账（不限量账号也要在管理界面显示用量），超配额告警仅在 quotaBytes > 0 时触发。
 func (q *quotaFileSystem) OpenFile(ctx context.Context, name string, flag int, perm os.FileMode) (gdav.File, error) {
 	isWrite := flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE|os.O_TRUNC|os.O_APPEND) != 0
 
@@ -365,11 +258,7 @@ func (q *quotaFileSystem) OpenFile(ctx context.Context, name string, flag int, p
 		}
 	}
 
-	// Capture the pre-existing size BEFORE inner.OpenFile so that a
-	// O_TRUNC flag doesn't shrink the file underneath our Stat call.
-	// We use os.Stat directly (not webdav.FileSystem.Stat) because the
-	// inner filesystem's Stat may apply its own path translation and
-	// we'd rather see the bytes on disk.
+	// 必须在 inner.OpenFile 之前取旧文件大小：O_TRUNC 会先截断，之后再 Stat 就拿不到原值。
 	var oldSize int64
 	var absPath string
 	if isWrite {
@@ -387,15 +276,11 @@ func (q *quotaFileSystem) OpenFile(ctx context.Context, name string, flag int, p
 	}
 
 	if !isWrite || absPath == "" {
-		// Reads, and writes whose target we refused to resolve inside the
-		// chroot, are passed through unaccounted: better a slightly
-		// under-counted total than a delta computed against the wrong path.
+		// 读操作或无法解析 chroot 的写入：直接透传，不记账。
 		return inner, nil
 	}
 
-	// Capture quota state in local variables so the closure doesn't
-	// depend on qf being constructed yet (avoids a "use before
-	// declaration" trap in the composite literal).
+	// 把配额状态快照到局部变量，避免闭包依赖 q。
 	preflight := q.quotaBytes
 	acct := q.accountID
 	stateRef := q.state
@@ -407,7 +292,7 @@ func (q *quotaFileSystem) OpenFile(ctx context.Context, name string, flag int, p
 		onClose: func() error {
 			info, statErr := os.Stat(absPath)
 			if statErr != nil {
-				// File might have been removed by another path; skip accounting.
+				// 文件可能已被其他途径删除，跳过记账。
 				return nil
 			}
 			newSize := info.Size()
@@ -415,9 +300,7 @@ func (q *quotaFileSystem) OpenFile(ctx context.Context, name string, flag int, p
 			if delta == 0 {
 				return nil
 			}
-			// Post-check: if the write overshot the quota, log a warning
-			// but accept the file. Cloudreve does the same. Future PUT
-			// requests will be rejected until usage drops below the cap.
+			// 写入后校验：即使超出配额也只记录日志并接受文件，避免拒绝已落盘的数据。
 			if preflight > 0 && stateRef.Get(acct)+delta > preflight {
 				log.Printf("webdav-quota: account %s overshot quota by %d bytes (post-check); accepting file",
 					acct, stateRef.Get(acct)+delta-preflight)
@@ -428,10 +311,7 @@ func (q *quotaFileSystem) OpenFile(ctx context.Context, name string, flag int, p
 	return qf, nil
 }
 
-// RemoveAll removes the path and subtracts its pre-removal byte total
-// from the account usage. Returns the inner error verbatim if the
-// inner filesystem fails; usage is NOT decremented in that case (so a
-// failed remove leaves the counter correct).
+// RemoveAll 删除路径并扣减其删除前的字节总量；内层删除失败则不扣减计数。
 func (q *quotaFileSystem) RemoveAll(ctx context.Context, name string) error {
 	if q.readOnly {
 		return errors.New("webdav: account is read-only")
@@ -442,11 +322,9 @@ func (q *quotaFileSystem) RemoveAll(ctx context.Context, name string) error {
 	abs, inside := q.resolveInRoot(name)
 	var removed int64
 	if inside {
-		removed, _ = walkSize(abs) // ignore error; partial result is better than nothing
+		removed, _ = walkSize(abs) // 忽略错误：部分和聊胜于无
 	} else {
-		// Never walk (or subtract) a path outside the chroot: the previous
-		// double-unescape made DELETE /dav/%252e%252e walk the chroot's PARENT
-		// and wipe the account's quota with someone else's bytes.
+		// chroot 外的路径绝不记账。
 		log.Printf("webdav-quota: refusing to account out-of-chroot delete %q", name)
 	}
 	if err := q.inner.RemoveAll(ctx, name); err != nil {
@@ -460,15 +338,12 @@ func (q *quotaFileSystem) RemoveAll(ctx context.Context, name string) error {
 	return nil
 }
 
-// Rename moves oldName to newName within the inner filesystem. Both
-// names are inside the same root, so byte total is unchanged. We still
-// guard against read-only writes.
+// Rename 在同一 root 内改名（大小不变，不计配额）。
 func (q *quotaFileSystem) Rename(ctx context.Context, oldName, newName string) error {
 	if q.readOnly {
 		return errors.New("webdav: account is read-only")
 	}
-	// Moving a protected file away, or renaming something on top of one, are
-	// both writes to a protected name.
+	// 新旧两个路径都要通过写权限检查。
 	if err := q.checkWriteAllowed(oldName); err != nil {
 		return err
 	}
@@ -478,13 +353,12 @@ func (q *quotaFileSystem) Rename(ctx context.Context, oldName, newName string) e
 	return q.inner.Rename(ctx, oldName, newName)
 }
 
-// Stat is a pure passthrough — quota state doesn't affect metadata.
+// Stat 纯透传，配额状态不影响元数据。
 func (q *quotaFileSystem) Stat(ctx context.Context, name string) (os.FileInfo, error) {
 	return q.inner.Stat(ctx, name)
 }
 
-// quotaFile wraps a webdav.File so Close() can reconcile the byte delta
-// via usageState.addDelta.
+// quotaFile 包装 webdav.File，让 Close 时通过 UsageState.addDelta 对账字节差。
 type quotaFile struct {
 	gdav.File
 	absPath string
@@ -493,7 +367,7 @@ type quotaFile struct {
 	closed  bool
 }
 
-// Close closes the inner file and runs the deferred accounting.
+// Close 关闭内层文件并执行延迟记账。
 func (f *quotaFile) Close() error {
 	err := f.File.Close()
 	if f.closed {
@@ -508,24 +382,13 @@ func (f *quotaFile) Close() error {
 	return err
 }
 
-// resolveInRoot joins a WebDAV-supplied name onto the account's chroot and
-// reports whether the result stays inside it. Returns ("", false) for a path
-// that escapes, in which case the caller must not touch the filesystem through
-// this result.
-//
-// NOTE: `name` arrives from golang.org/x/net/webdav, which strips its prefix
-// from r.URL.Path — a value net/http has ALREADY percent-decoded. The previous
-// implementation ran it through a second decode ("pathUnescape"), so the path
-// used for quota accounting diverged from the one the inner Dir actually
-// touched: "%252e%252e" reached the inner FS as the literal directory
-// "%2e%2e", while accounting resolved ".." and walked the chroot's parent
-// (quota wipe + an attacker-triggered full-tree walk). Never decode twice.
+// resolveInRoot 把 name 拼到账号 chroot 上并报告结果是否仍在其内。切勿二次解码 name：net/http 已对 r.URL.Path 做过百分号解码，再解一次会让记账解析出的路径与内层 FS 实际操作的路径不一致。
 func (q *quotaFileSystem) resolveInRoot(name string) (string, bool) {
 	joined := filepath.Join(q.root, filepath.FromSlash(name))
 	return joined, isUnderDir(joined, q.root)
 }
 
-// isUnderDir reports whether path is dir itself or a descendant of it.
+// isUnderDir 判断 path 是 dir 本身还是其子孙。
 func isUnderDir(path, dir string) bool {
 	cleanDir := filepath.Clean(dir)
 	cleanPath := filepath.Clean(path)
@@ -536,16 +399,7 @@ func isUnderDir(path, dir string) bool {
 		cleanDir+string(filepath.Separator))
 }
 
-// checkWriteAllowed enforces the per-account write restrictions that apply to
-// every mutating operation:
-//
-//   - .ghs.yml is never writable through WebDAV. It is the HTTP access-control
-//     file, so allowing an account to drop one inside its chroot would let it
-//     grant itself upload/edit/delete rights for that directory (the same
-//     escalation the HTTP upload path refuses).
-//   - When the account has ProtectSystemFiles enabled (the admin UI default),
-//     system/dot files are protected as well. The flag was stored, shown in the
-//     UI and never enforced — a security control that silently did nothing.
+// checkWriteAllowed 实施账号写限制：.ghs.yml（HTTP 访问控制文件）永远禁止写入；开启 ProtectSystemFiles 时系统文件与点文件同样受保护。
 func (q *quotaFileSystem) checkWriteAllowed(name string) error {
 	base := filepath.Base(filepath.FromSlash(name))
 	if base == ".ghs.yml" {
@@ -557,43 +411,27 @@ func (q *quotaFileSystem) checkWriteAllowed(name string) error {
 	return nil
 }
 
-// ─── Top-level PROPFIND interceptor ─────────────────────────────────────────
-
-// quotaContext is the per-request quota + chroot snapshot stashed by
-// webdavServer.ServeHTTP and read by handlePropfindRoot. The struct
-// lives in webdav_quota.go because that's the only place it's used;
-// webdav.go just calls setQuotaContext / clearQuotaContext.
+// quotaContext 是 ServeHTTP 暂存、handlePropfindRoot 读取的每请求配额快照。
 type quotaContext struct {
 	accountID  string
 	quotaBytes int64
-	root       string // absolute filesystem path of the account's chroot
+	root       string // 账号 chroot 的绝对文件系统路径
 }
 
-// quotaRequestContext is a package-level concurrent-safe map from
-// *http.Request to the quotaContext for that request. We key on the
-// request pointer (unique per request) because the http.Handler
-// signature is fixed and we can't pass the context through it.
-//
-// SECURITY FIX: Previously this was a plain map[*http.Request]quotaContext
-// with no locking. Go maps are NOT safe for concurrent use — concurrent
-// writes (even to different keys) trigger a fatal runtime panic that
-// crashes the entire process. Under high WebDAV concurrency this was
-// virtually guaranteed. Switched to sync.Map which is safe.
+// 用 sync.Map 是因为普通 map 并发读写不安全。
 var quotaRequestContext sync.Map
 
-// setQuotaContext installs the quota context for r. Caller must defer
-// clearQuotaContext(r) to avoid leaking.
+// setQuotaContext 为 r 安装配额上下文；调用方必须 defer clearQuotaContext(r) 以防泄漏。
 func setQuotaContext(r *http.Request, ctx quotaContext) {
 	quotaRequestContext.Store(r, ctx)
 }
 
-// clearQuotaContext removes the quota context for r. Idempotent.
+// clearQuotaContext 移除 r 的配额上下文，可重复调用。
 func clearQuotaContext(r *http.Request) {
 	quotaRequestContext.Delete(r)
 }
 
-// getQuotaContext returns the quota context for r. Zero value if none
-// has been set (caller is responsible for handling that case).
+// getQuotaContext 返回 r 的配额上下文；未设置时返回零值（由调用方自行处理）。
 func getQuotaContext(r *http.Request) quotaContext {
 	v, ok := quotaRequestContext.Load(r)
 	if !ok {
@@ -602,29 +440,16 @@ func getQuotaContext(r *http.Request) quotaContext {
 	return v.(quotaContext)
 }
 
-// davHref returns the canonical WebDAV href for use in PROPFIND
-// responses. Always ends with a slash per RFC 4918 § 8.3.
+// davHref 返回 PROPFIND 响应使用的规范 href，按 RFC 4918 § 8.3 始终以斜杠结尾。
 func (s *WebdavServer) davHref() string {
 	return "/dav/"
 }
 
-// handlePropfindRoot serves PROPFIND requests targeting the WebDAV
-// root ("/dav/" or "/dav") and emits a 207 multistatus containing
-// DAV:quota-used-bytes and DAV:quota-available-bytes (RFC 4331).
-//
-// All other PROPFIND requests (subdirectory paths) are forwarded to
-// the upstream webdav.Handler unchanged.
-//
-// This handler deliberately ignores the request body — modern clients
-// always use Propfind XML bodies to declare which properties they want,
-// but Windows Explorer and RaiDrive also send raw Depth headers with
-// empty bodies, and both should succeed. We respond with the union of
-// all commonly-requested live properties so the client gets a usable
-// view no matter what it asked for.
+// handlePropfindRoot 处理 WebDAV 根上的 PROPFIND，返回带配额属性（RFC 4331）的 207 multistatus；忽略请求体，让发空体的客户端（Windows 资源管理器、RaiDrive）也能成功。
 func (s *WebdavServer) handlePropfindRoot(w http.ResponseWriter, r *http.Request) {
 	depth := parseDepthHeader(r.Header.Get("Depth"))
 	if depth > 1 {
-		depth = 1 // RFC 4918 forbids infinity on a collection without children-infinity
+		depth = 1 // RFC 4918 禁止在未声明 children-infinity 时使用 infinity
 	}
 
 	qctx := getQuotaContext(r)
@@ -669,7 +494,7 @@ func (s *WebdavServer) handlePropfindRoot(w http.ResponseWriter, r *http.Request
 
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	w.Header().Set("DAV", "1, 2")
-	w.WriteHeader(http.StatusMultiStatus) // 207
+	w.WriteHeader(http.StatusMultiStatus)
 	_, _ = w.Write([]byte(xml.Header))
 	enc := xml.NewEncoder(w)
 	enc.Indent("", "  ")
@@ -679,27 +504,19 @@ func (s *WebdavServer) handlePropfindRoot(w http.ResponseWriter, r *http.Request
 	_, _ = io.WriteString(w, "\n")
 }
 
-// parseDepthHeader converts a Depth header value to an int. RFC 4918
-// defines "0", "1", and "infinity"; anything else is treated as 0 per
-// § 10.2.
+// parseDepthHeader 把 Depth 头转成 int（RFC 4918：0/1/infinity）。
 func parseDepthHeader(v string) int {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "1":
 		return 1
 	case "infinity":
-		return 2 // sentinel for "all the way down"; we'll clamp to 1 anyway
+		return 2 // "一直向下"的哨兵值；调用方反正会截断到 1
 	default:
 		return 0
 	}
 }
 
-// ─── Multistatus XML ────────────────────────────────────────────────────────
-
-// The XML structs below intentionally mirror the element names from
-// RFC 4918 § 14 (multistatus), RFC 4918 § 15 (PROPFIND), and RFC 4331
-// § 3 (quota properties). Field names use D: prefix via the
-// xmlns:D="DAV:" attribute on the root element.
-
+// Multistatus XML 类型（RFC 4918 / RFC 4331）。
 type msResponse struct {
 	XMLName   xml.Name     `xml:"D:response"`
 	Href      string       `xml:"D:href"`
@@ -736,7 +553,7 @@ type msMultistatus struct {
 	Responses []msResponse `xml:"D:response"`
 }
 
-// childInfo mirrors enough of os.FileInfo for the depth-1 child list.
+// childInfo 是 depth-1 子项列表所需的 os.FileInfo 精简版。
 type childInfo struct {
 	name    string
 	size    int64
@@ -744,7 +561,7 @@ type childInfo struct {
 	isDir   bool
 }
 
-// buildMultistatusResponse composes the 207 response body.
+// buildMultistatusResponse 组装 207 响应体。
 func buildMultistatusResponse(
 	rootHref string,
 	rootInfo os.FileInfo,
@@ -779,7 +596,7 @@ func buildMultistatusResponse(
 	for _, c := range children {
 		href := strings.TrimRight(rootHref, "/") + "/" + urlPathEscape(c.name)
 		props := msProp{
-			Resourcetype:    msResourcetype{}, // empty = regular file or non-collection
+			Resourcetype:    msResourcetype{}, // 空表示普通文件或非集合
 			DisplayName:     c.name,
 			CreationDate:    c.modTime.UTC().Format(time.RFC3339),
 			GetLastModified: formatHTTPDate(c.modTime),
@@ -806,45 +623,34 @@ func buildMultistatusResponse(
 	}
 }
 
-// formatHTTPDate returns an RFC 1123 date suitable for DAV:getlastmodified.
+// formatHTTPDate 返回适合 DAV:getlastmodified 的 RFC 1123 日期。
 func formatHTTPDate(t time.Time) string {
 	return t.UTC().Format(http.TimeFormat)
 }
 
-// weakEtag is a "W/<unix>-<size>" style tag, sufficient for clients
-// that only need change detection.
+// weakEtag 生成 "W/<unix>-<size>" 形式的弱校验标签，足够满足只需变更检测的客户端。
 func weakEtag(t time.Time, size int64) string {
 	return fmt.Sprintf(`W/"%x-%x"`, t.Unix(), size)
 }
 
-// isWebdavRootPath reports whether p is the WebDAV mount root, with or
-// without trailing slash. Used by webdavServer.ServeHTTP to decide
-// whether to self-handle the request.
+// isWebdavRootPath 判断 p 是否为 WebDAV 挂载根（带不带结尾斜杠均可），供 ServeHTTP 决定是否自行处理该请求。
 func isWebdavRootPath(p string) bool {
 	trimmed := strings.TrimRight(p, "/")
 	return trimmed == "" || trimmed == "/dav"
 }
 
-// ─── Content-Length pre-check helper ────────────────────────────────────────
-
-// preflightQuota returns ErrInsufficientCapacity if writing
-// contentLength bytes (against a file that already has oldSize bytes)
-// would push the account over its quota. Returns nil when no quota is
-// configured (quotaBytes <= 0) or when the new total fits.
-//
-// Used by webdavServer.ServeHTTP before delegating to the upstream
-// handler for write methods (PUT in particular).
+// preflightQuota 在写入 contentLength 字节会超出配额时返回 ErrInsufficientCapacity；未设配额或长度未知时返回 nil。
 func preflightQuota(used, quotaBytes, oldSize, contentLength int64) error {
 	if quotaBytes <= 0 {
 		return nil
 	}
 	if contentLength < 0 {
-		// Chunked transfer / unknown length — let the post-check catch it.
+		// 长度未知，交给写入后校验兜底。
 		return nil
 	}
 	after := used - oldSize + contentLength
 	if after < 0 {
-		// File is being shrunk; can't exceed quota.
+		// 文件在缩小。
 		return nil
 	}
 	if after > quotaBytes {
@@ -853,12 +659,7 @@ func preflightQuota(used, quotaBytes, oldSize, contentLength int64) error {
 	return nil
 }
 
-// ─── urlPathEscape / urlPathUnescape ────────────────────────────────────────
-//
-// We deliberately avoid importing net/url here (it would pull in net/http
-// cycles in tests that only need path handling). stdlib escape handling
-// for href paths is small enough to inline.
-
+// urlPathEscape 自实现路径转义，避免净引入 net/url（纯路径测试中会形成导入环）。
 func urlPathEscape(s string) string {
 	const safe = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~"
 	const hexDigits = "0123456789ABCDEF"
@@ -867,9 +668,7 @@ func urlPathEscape(s string) string {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if c > 0x7f || strings.IndexByte(safe, c) < 0 {
-			// Two zero-padded digits: "%A"/"%9" are not valid RFC 3986
-			// escapes, so PROPFIND hrefs for names containing control bytes
-			// could not be resolved by clients.
+			// 两位零填充的十六进制。
 			b.WriteByte('%')
 			b.WriteByte(hexDigits[c>>4])
 			b.WriteByte(hexDigits[c&0x0f])
@@ -879,10 +678,3 @@ func urlPathEscape(s string) string {
 	}
 	return b.String()
 }
-
-// urlPathUnescape was removed: the WebDAV handler receives an already
-// percent-decoded path from net/http, and decoding it a second time made the
-// quota accounting resolve a different path than the one the inner
-// filesystem touched. See resolveInRoot.
-
-// (hexDigit was only used by urlPathUnescape.)

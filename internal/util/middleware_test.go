@@ -40,8 +40,7 @@ func TestRequestIDMiddlewareSetsHeader(t *testing.T) {
 	}
 }
 
-// The response wrapper must keep exposing http.Flusher so streaming
-// handlers (upload progress) are not silently buffered.
+// response wrapper 必须保持实现 http.Flusher，避免流式 handler（上传进度）被静默缓冲。
 func TestResponseWriterImplementsFlusher(t *testing.T) {
 	var _ http.Flusher = (*responseWriter)(nil)
 }

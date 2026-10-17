@@ -108,7 +108,6 @@ const url = computed(() => {
     const encodePath = getEncodePath(props.file.name, props.currentPath)
     return window.location.origin + encodePath
   }
-  // View in Phone: QR code for current page
   return window.location.href
 })
 
@@ -172,7 +171,6 @@ watch(
   padding: 4px 4px 2px;
 }
 
-/* ── Header ── */
 .qrcode-header {
   display: flex;
   align-items: center;
@@ -221,7 +219,6 @@ watch(
   line-height: 1.4;
 }
 
-/* ── QR Stage ── */
 .qrcode-stage {
   position: relative;
   width: 240px;
@@ -290,7 +287,6 @@ watch(
   border-radius: var(--radius-sm);
 }
 
-/* Corner brackets — visual "scan frame" */
 .qrcode-corners {
   position: absolute;
   inset: 0;
@@ -338,7 +334,6 @@ watch(
   border-bottom-right-radius: var(--radius-sm);
 }
 
-/* ── URL card ── */
 .qrcode-url-card {
   display: flex;
   align-items: center;
@@ -387,7 +382,6 @@ watch(
   --el-button-text-color: var(--el-color-success);
 }
 
-/* ── Tip ── */
 .qrcode-tip {
   display: inline-flex;
   align-items: center;
@@ -401,20 +395,16 @@ watch(
   flex-shrink: 0;
 }
 
-/* ── Dialog polish ── */
 :deep(.qrcode-dialog .el-dialog__header) {
   margin-right: 0;
   padding-bottom: 12px;
-  padding-right: 32px; /* leave room for the close button */
+  padding-right: 32px;
 }
 
 :deep(.qrcode-dialog .el-dialog__body) {
   padding: 8px 20px 22px;
 }
 
-/* Dialog title: long file names truncate with ellipsis and reveal the full
-   name on hover via the native title attribute. Padding-right reserves space
-   for the close button so the ellipsis never crashes into it. */
 .qrcode-dialog-title,
 :deep(.qrcode-dialog .el-dialog__title) {
   display: inline-block;
@@ -425,7 +415,6 @@ watch(
   vertical-align: bottom;
 }
 
-/* Subtitle: never break the layout, even on the narrowest phones. */
 .qrcode-subtitle {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -433,8 +422,6 @@ watch(
   max-width: 100%;
 }
 
-/* URL link: el-link renders an <a> that needs min-width:0 to let the inner
-   span actually shrink and ellipsize. */
 .qrcode-url {
   min-width: 0;
   max-width: 100%;
@@ -457,9 +444,6 @@ watch(
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  /* The native title attribute on this span is the only way for the user to
-     see the part that was truncated — el-link's own tooltip wouldn't fire
-     because the inner text is wrapped in <a><span>. */
 }
 
 @media (max-width: 480px) {

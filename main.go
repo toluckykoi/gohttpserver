@@ -60,7 +60,7 @@ type Configure struct {
 	Debug           bool     `yaml:"debug"`
 	GoogleTrackerID string   `yaml:"google-tracker-id"`
 	Auth            struct {
-		Type   string   `yaml:"type"` // openid|http|github
+		Type   string   `yaml:"type"`
 		OpenID string   `yaml:"openid"`
 		HTTP   []string `yaml:"http"`
 		ID     string   `yaml:"id"`     // for oauth2
@@ -84,7 +84,6 @@ type Configure struct {
 		LocalPort  int    `yaml:"localPort"`
 		RemotePort int    `yaml:"remotePort"`
 	} `yaml:"frp"`
-	// Logging
 	LogLevel  string `yaml:"log-level"`  // debug, info, warn, error
 	LogFormat string `yaml:"log-format"` // json, text
 }
@@ -121,7 +120,6 @@ func versionMessage() string {
 }
 
 func parseFlags() error {
-	// initial default conf
 	gcfg.Root = "./"
 	gcfg.Port = 8000
 	gcfg.Addr = ""
@@ -164,11 +162,11 @@ func parseFlags() error {
 	kingpin.Flag("log-level", "log level (debug, info, warn, error)").Default("info").StringVar(&gcfg.LogLevel)
 	kingpin.Flag("log-format", "log output format (json, text)").Default("json").StringVar(&gcfg.LogFormat)
 
-	kingpin.Parse() // first parse conf
+	kingpin.Parse() // 先解析一次，取出 conf 文件路径
 
 	if gcfg.Conf != nil {
 		defer func() {
-			kingpin.Parse() // command line priority high than conf
+			kingpin.Parse() // 再解析一次，命令行优先级高于配置文件
 		}()
 		ymlData, err := os.ReadFile(gcfg.Conf.Name())
 		if err != nil {
@@ -190,21 +188,9 @@ func fixPrefix(prefix string) string {
 	return prefix
 }
 
-// cors returns a middleware that applies the configured CORS policy.
-// Previously this unconditionally sent Access-Control-Allow-Origin: *,
-// which let any website issue cross-origin requests with a stolen token
-// (Allow-Headers: * let X-Token through). Now the policy is opt-in:
-//   - --cors-origins not set → no CORS headers (same-origin only)
-//   - --cors-origins '*'     → allow all (the old behaviour; insecure,
-//     only useful for public read-only servers)
-//   - --cors-origins https://a.com --cors-origins https://b.com
-//     → allow only those origins
-//
-// Only the matching origin is echoed back; credentials are not allowed
-// when the origin is "*". Preflight OPTIONS is answered without calling
-// the auth chain.
+// cors 应用 --cors-origins 配置的策略：未设置=仅同源，'*'=允许所有（不安全），
+// 否则只回显列出的 origin。OPTIONS 预检直接应答，不经过认证链。
 func cors(allowedOrigins []string) func(http.Handler) http.Handler {
-	// Normalise once for O(1) lookup.
 	allowAll := false
 	allowSet := make(map[string]bool, len(allowedOrigins))
 	for _, o := range allowedOrigins {
@@ -227,7 +213,7 @@ func cors(allowedOrigins []string) func(http.Handler) http.Handler {
 			}
 			if allowAll || allowSet[origin] {
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-				// Limit headers to what the app actually uses instead of "*".
+				// 只允许应用实际用到的头，不使用 "*"
 				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Token, Authorization")
 				w.Header().Set("Access-Control-Max-Age", "600")
 			}
@@ -263,37 +249,25 @@ func multiBasicAuth(auths []string) func(http.Handler) http.Handler {
 }
 
 func main() {
-	// Parse flags first to get log config
 	if err := parseFlags(); err != nil {
-		// Use default logger for early errors
 		util.InitLogger(&slog.HandlerOptions{Level: slog.LevelInfo})
 		slog.Error("parse flags failed", util.ErrorAttr(err))
 		os.Exit(1)
 	}
 
-	// Initialize structured logger with configured level and format
 	util.InitLoggerWithConfig(util.LoggerConfig{
 		Level:  util.LogLevel(gcfg.LogLevel),
 		Format: util.LogFormat(gcfg.LogFormat),
 	})
 
-	// --login implies upload/delete/edit: an authenticated operator
-	// should be able to manage files without separately passing those
-	// flags. This runs after flag parsing, so passing --no-upload
-	// alongside --login will NOT disable upload — use --auth-type http
-	// or another auth mechanism instead of --login if you need a
-	// read-only authenticated server.
+	// --login 隐含上传/删除/编辑权限，且解析完 flag 才生效，因此
+	// `--login --no-upload` 仍然是可写的：只读认证服务请改用其它 auth-type。
 	if gcfg.Login {
 		gcfg.Upload = true
 		gcfg.Delete = true
 		gcfg.Edit = true
 	}
 	if gcfg.Debug {
-		// Print the config for debugging, but redact secrets — the
-		// marshal below used to dump HTTP basic-auth passwords and the
-		// OAuth2 client secret to stdout, which then flowed into log
-		// collectors. We shallow-copy the config and blank the
-		// sensitive fields before printing.
 		debugCfg := gcfg
 		debugCfg.Auth.HTTP = nil
 		debugCfg.Auth.Secret = ""
@@ -301,7 +275,6 @@ func main() {
 		slog.Debug("config (secrets redacted)", slog.String("config", string(data)))
 	}
 
-	// make sure prefix matches: ^/.*[^/]$
 	gcfg.Prefix = fixPrefix(gcfg.Prefix)
 	if gcfg.Prefix != "" {
 		slog.Info("url prefix configured", slog.String("prefix", gcfg.Prefix))
@@ -334,38 +307,25 @@ func main() {
 
 	var hdlr http.Handler = ss
 
-	// NOTE: there used to be a second logger here
-	// (accesslog.NewLoggingHandler). It logged every request a second time and
-	// re-parsed the private-IP CIDR list on the hot path. The structured
-	// middleware below now emits one line per request, including the
-	// LOCAL/FRP access_type classification.
-
-	// CORS — opt-in via --cors-origins. Empty = same-origin only.
+	// CORS 由 --cors-origins 显式开启，未设置则仅同源
 	hdlr = cors(gcfg.CORSOrigins)(hdlr)
 
 	if gcfg.XHeaders {
 		hdlr = handlers.ProxyHeaders(hdlr)
-		// Only trust proxy-forwarded IP headers when --xheaders is
-		// enabled. This prevents attackers from forging X-Forwarded-For
-		// to bypass login rate limiting when the server is directly
-		// exposed.
+		// 仅在 --xheaders 时信任代理转发头，否则伪造 X-Forwarded-For 可绕过登录限流
 		util.SetTrustProxyHeaders(true)
 	}
 
 	mainRouter := mux.NewRouter()
 
-	// Request ID middleware - adds X-Request-ID header and context
 	mainRouter.Use(util.RequestIDMiddleware)
 
-	// Structured logging middleware
 	mainRouter.Use(util.LoggingMiddleware(util.Logger()))
 
-	// Health check endpoint (before prefix routing)
 	mainRouter.HandleFunc("/healthz", util.HealthCheckHandler(VERSION)).Methods("GET")
 	mainRouter.HandleFunc("/-/healthz", util.HealthCheckHandler(VERSION)).Methods("GET")
 
-	// Prometheus-format metrics (before prefix routing so scrapers can
-	// hit a stable path regardless of --prefix).
+	// 指标路径注册在 prefix 之前，抓取端不受 --prefix 影响
 	mainRouter.HandleFunc("/metrics", util.MetricsHandler(VERSION)).Methods("GET", "HEAD")
 	mainRouter.HandleFunc("/-/metrics", util.MetricsHandler(VERSION)).Methods("GET", "HEAD")
 
@@ -378,7 +338,6 @@ func main() {
 		})
 	}
 
-	// Normalize address early for FRP auto-configuration
 	if gcfg.Addr == "" {
 		gcfg.Addr = fmt.Sprintf(":%d", gcfg.Port)
 	}
@@ -386,22 +345,18 @@ func main() {
 		gcfg.Addr = ":" + gcfg.Addr
 	}
 
-	// Parse local address for FRP auto-configuration
-	// When binding to 0.0.0.0 or ::, use util.GetLocalIP() to get the real LAN IP
-	// When binding to a specific IP, use that IP only if it is a 10/8 or
-	// 192.168/16 LAN address; otherwise fall back to auto-detection or
-	// 127.0.0.1 so the admin panel never shows an unreachable/non-LAN IP.
+	// 为 FRP 自动配置解析本地地址：绑定 0.0.0.0/:: 时用 util.GetLocalIP() 取真实
+	// 局域网 IP；绑定具体 IP 时仅在它属于 10/8 或 192.168/16 时采用，否则回退到
+	// 自动探测或 127.0.0.1，避免管理面板展示不可达/非局域网的 IP。
 	localIP := "127.0.0.1"
 	localPort := gcfg.Port
 	if gcfg.Addr != "" {
 		if host, portStr, err := net.SplitHostPort(gcfg.Addr); err == nil {
-			// If binding to all interfaces, get the real LAN IP
 			if host == "" || host == "0.0.0.0" || host == "::" {
 				if lanIP := util.GetLocalIP(); lanIP != "" {
 					localIP = lanIP
 				}
 			} else if parsed := net.ParseIP(host); parsed != nil && util.IsLANAddress(parsed) {
-				// Binding to a specific LAN IP, use it directly
 				localIP = host
 			} else if lanIP := util.GetLocalIP(); lanIP != "" {
 				localIP = lanIP
@@ -412,15 +367,8 @@ func main() {
 		}
 	}
 
-	// Open database for FRP config persistence (and login/webdav if enabled)
-	// Keep the database in the CURRENT WORKING DIRECTORY, not under
-	// gcfg.Root. gcfg.Root is what gohttpserver serves over HTTP —
-	// putting gohttpserver.db there would let any config mistake (a
-	// misordered middleware, a future route that bypasses the gate,
-	// a --prefix edge case) expose the password hash via a simple
-	// GET /gohttpserver.db. The working directory is the conventional
-	// spot for server-side state and is never served by the file
-	// handler.
+	// DB 放在工作目录而非 gcfg.Root：gcfg.Root 会被 HTTP 直接对外服务，
+	// 若把 DB 放进去，一次 GET /gohttpserver.db 就能拿到密码哈希。
 	dbPath := gcfg.DB
 	if dbPath == "" {
 		dbPath = "gohttpserver.db"
@@ -431,16 +379,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	// FRP client initialization with database for config persistence
 	frpClient := frp.NewFRPClient(db)
 
-	// Try to load FRP config from database first
 	dbFRPCfg, dbFRPEnabled, err := frpClient.LoadFromDB()
 	if err != nil {
 		slog.Error("FRP load config from DB failed", util.ErrorAttr(err))
 	}
 
-	// Auto-fill LocalIP and LocalPort from program's listening address
+	// 用监听地址补齐 LocalIP/LocalPort
+
 	frpLocalIP := gcfg.FRP.LocalIP
 	if frpLocalIP == "" || frpLocalIP == "127.0.0.1" {
 		frpLocalIP = localIP
@@ -450,12 +397,12 @@ func main() {
 		frpLocalPort = localPort
 	}
 
-	// Determine which config to use: config file takes precedence over database
+	// 配置文件优先于数据库
+
 	var frpCfg *frp.FRPConfig
 	var frpEnabled bool
 
 	if gcfg.FRP.Enabled || gcfg.FRP.ServerAddr != "" {
-		// Config file has FRP settings, use them
 		frpCfg = &frp.FRPConfig{
 			ServerAddr: gcfg.FRP.ServerAddr,
 			ServerPort: gcfg.FRP.ServerPort,
@@ -468,14 +415,9 @@ func main() {
 		}
 		frpEnabled = gcfg.FRP.Enabled
 	} else if dbFRPCfg != nil {
-		// No config file settings, use database config
 		frpCfg = dbFRPCfg
 		frpEnabled = dbFRPEnabled
-		// LocalIP/LocalPort are user-editable in the admin panel and
-		// persisted to the DB. Only auto-fill from the program's
-		// listening address when the DB has no value yet (first run
-		// or operator never set one) — once the operator has entered a
-		// value, respect it across restarts so manual edits stick.
+		// LocalIP/LocalPort 可在管理面板编辑，只在 DB 中尚无值时补齐，避免覆盖手动设置
 		if frpCfg.LocalIP == "" || frpCfg.LocalIP == "127.0.0.1" {
 			frpCfg.LocalIP = localIP
 		}
@@ -484,7 +426,6 @@ func main() {
 		}
 	}
 
-	// Apply FRP config if available
 	if frpCfg != nil {
 		if err := frpClient.UpdateConfig(frpCfg); err != nil {
 			slog.Error("FRP config error", util.ErrorAttr(err))
@@ -496,37 +437,22 @@ func main() {
 		}
 	}
 
-	// --login gate. When enabled, an independent username/password login
-	// flow shadows every other auth-type. Must be installed BEFORE the
-	// HTTP Basic / OpenID / oauth2-proxy switch so the gate covers those
-	// wrapped handlers too (a config like `--auth-type http --login`
-	// would otherwise only HTTP-basic-gate on top of an un-gated server).
+	// 登录闸门优先于其它 auth-type：在 HTTP Basic / OpenID / oauth2-proxy 之前
+	// 安装，使其同样覆盖这些被包装的 handler。
 	var loginStateObj *auth.LoginState
 	if gcfg.Login {
 		auth.FrontendFS = frontendDistFS
 		loginStateObj = auth.LoadLoginCredentials(db)
-		// Routes must be registered BEFORE the catch-all router.PathPrefix("/").Handler(hdlr)
-		// below so mux routes /-/login specifically. Middleware is added to
-		// hdlr so the gate wraps everything (file handler, APIs) except
-		// the white-listed paths.
+		// 登录路由必须在下方 catch-all PathPrefix("/").Handler(hdlr) 之前注册，
+		// 否则 mux 不会把 /-/login 交给它
 		auth.RegisterLoginRoutes(router, loginStateObj, true)
 		hdlr = auth.LoginAuthMiddleware(gcfg.Prefix, loginStateObj, hdlr)
 
-		// WebDAV server + admin API. Both depend on loginStateObj:
-		//   - webdav account usernames are bound to the login user
-		//   - admin API handlers re-authenticate against loginStateObj
-		//     for sensitive operations (e.g. username change).
-		// All three subsystems (login, webdav, usage) share the same
-		// SQLite handle — the database is the single source of truth
-		// for server-side state when --login is enabled.
+		// WebDAV 与管理 API 都依赖 loginStateObj，共用同一个 SQLite 句柄
 		webdavState := webdav.LoadWebdavAccounts(db)
 		usageStateObj := webdav.LoadUsageState(db)
 
-		// Startup recalculation: if the storage_usage table is empty but
-		// accounts exist (fresh DB with seeded accounts, or migration
-		// from a pre-quota build), seed the table by walking each
-		// account's chroot. Otherwise trust the cache — the operator
-		// can force a refresh via the admin endpoint.
+		// 仅当用量表为空（全新 DB 或迁移）时才从磁盘播种，管理接口可强制刷新
 		if usageStateObj.IsEmpty() {
 			for _, acc := range webdavState.List() {
 				full := filepath.Join(gcfg.Root, acc.RootPath)
@@ -537,18 +463,12 @@ func main() {
 		}
 
 		webdavSrv := webdav.NewWebdavServer(gcfg.Root, webdavState, usageStateObj)
-		// /dav/ is mounted on a subrouter so PROPFIND/PUT/DELETE/etc.
-		// all funnel through the same handler. PathPrefix matches the
-		// leading "/dav/" and the trailing wildcard is implicit.
+		// 挂到子路由上，让 PROPFIND/PUT/DELETE 等动词共用同一 handler；
+		// PathPrefix 已匹配开头 "/dav/"，尾部的通配是隐式的。
 		router.PathPrefix("/dav/").Handler(webdavSrv)
-		// Some clients (notably GNOME/gvfs on Linux) probe the collection
-		// without a trailing slash ("/dav") during discovery. Route that
-		// exact path to the same handler so it doesn't fall through to the
-		// login gate and get rejected with Unauthorized.
+		// gvfs 在发现阶段会不带尾斜杠探测该 collection
 		router.Handle("/dav", webdavSrv)
-		// Admin API sits behind the login gate (it's not in
-		// loginWhitelist), so an unauthenticated request is redirected
-		// to /-/login rather than reaching the handlers.
+		// 管理 API 位于登录闸门之后，未认证请求会重定向到 /-/login
 		admin.RegisterRoutes(router, &admin.API{
 			Login:     loginStateObj,
 			Webdav:    webdavState,
@@ -559,21 +479,12 @@ func main() {
 			Version:   VERSION,
 		})
 	} else {
-		// SECURITY FIX: When --login is disabled, do NOT register the
-		// admin API routes. Previously the routes were registered with
-		// a nil Login field, and every handler checked
-		// `UserFromLoginSession(r) == nil` and returned 401. While not
-		// directly exploitable (all handlers reject unauthenticated
-		// requests), the routes were still discoverable (returns 401
-		// instead of 404), exposing the API surface. Worse, in OpenID
-		// or oauth2-proxy mode a valid session would satisfy the
-		// `UserFromLoginSession(r)` check — the admin handlers would
-		// proceed despite api.Login being nil, causing nil-pointer
-		// panics on api.Login.ChangeUsername() etc. Not registering
-		// the routes at all is the clean fix.
+		// SECURITY: --login 关闭时不注册管理 API。它不在 loginWhitelist 中，
+		// 用 nil Login 注册后，OpenID / oauth2-proxy 会话能满足
+		// UserFromLoginSession 并在 api.Login 为 nil 时 panic；
+		// 不注册同时也消除了可发现的 401 攻击面。
 	}
 
-	// HTTP Basic Authentication
 	var userHandlerRegistered bool
 	switch gcfg.Auth.Type {
 	case "http":
@@ -584,20 +495,15 @@ func main() {
 		// case "github":
 		// 	handleOAuth2ID(router, gcfg.Auth.Type, gcfg.Auth.ID, gcfg.Auth.Secret) // FIXME(ssx): set secure default to false
 	case "oauth2-proxy":
-		// Wrap the handler chain so the proxy-injected identity headers
-		// are persisted into the session before downstream authorisation
-		// checks read it. Without this the per-user rules in .ghs.yml
-		// never matched, because canDelete/canUpload/canEdit only look
-		// at the session.
+		// 先把代理注入的身份头写入 session 再做下游鉴权，否则 .ghs.yml 的
+		// 按用户规则永远不匹配（canDelete/canUpload/canEdit 只看 session）
 		hdlr = auth.Oauth2ProxyMiddleware(hdlr)
 		auth.HandleOauth2(router)
 		userHandlerRegistered = true
 	}
 
-	// 如果没有通过认证模块注册 /-/user 路由，则添加默认实现。
-	// 当 --login 启用时，从 session 中读取 LoginUser 并返回其信息，
-	// 这样前端 loadUser() 能拿到非 null 的用户对象，不会把已经认证
-	// 的状态又覆盖成 null 而错误地回到登录页。
+	// 没有认证模块注册 /-/user 时的默认实现：从 session 读取 LoginUser 返回，
+	// 使前端 loadUser() 拿到非 null 用户，避免把已认证状态覆盖成 null 并退回登录页。
 	if !userHandlerRegistered {
 		router.HandleFunc("/-/user", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -613,9 +519,7 @@ func main() {
 		}).Methods("GET")
 	}
 
-	// The embedded SPA bundle is served through util.StaticAssets so the
-	// hashed assets get gzip + immutable caching (without it the browser had
-	// neither a compressed body nor any validator to revalidate with).
+	// 内嵌 SPA 走 util.StaticAssets，为带哈希的资源提供 gzip 与 immutable 缓存
 	router.PathPrefix("/-/frontend/").Handler(util.StaticAssets(
 		http.StripPrefix(gcfg.Prefix+"/-/frontend/", http.FileServer(FrontendAssets))))
 
@@ -637,10 +541,8 @@ func main() {
 	}
 	_, port, _ := net.SplitHostPort(gcfg.Addr)
 
-	// oauth2-proxy mode trusts X-Auth-Request-* headers, which any
-	// client can forge if the server is reachable without going through
-	// the proxy. Refuse to start on a non-loopback bind unless the
-	// operator explicitly acknowledges the risk with --allow-public-oauth2.
+	// oauth2-proxy 模式依赖可被任意客户端伪造的 X-Auth-Request-* 头；除非
+	// 用 --allow-public-oauth2 显式确认风险，否则拒绝在非 loopback 上启动。
 	if gcfg.Auth.Type == "oauth2-proxy" && !gcfg.AllowPublicOauth2 && !auth.IsLoopbackAddr(gcfg.Addr) {
 		slog.Error("refusing to start: oauth2-proxy on non-loopback is insecure",
 			slog.String("addr", gcfg.Addr),
@@ -655,28 +557,20 @@ func main() {
 	)
 
 	srv := &http.Server{
-		// SecurityHeaders wraps the whole router (not just the file handler)
-		// so the login page, the admin API, WebDAV, /metrics and the embedded
-		// SPA assets all carry CSP / nosniff / X-Frame-Options too.
+		// SecurityHeaders 包住整个 router（而不只是文件 handler），
+		// 使登录页、管理 API、WebDAV、/metrics 与内嵌 SPA 都带上安全头
 		Handler: util.SecurityHeaders(server.ContentSecurityPolicy)(mainRouter),
 		Addr:    gcfg.Addr,
-		// ReadHeaderTimeout mitigates Slowloris: a client must send the
-		// full request headers within this window or the connection is
-		// dropped. We don't set ReadTimeout/WriteTimeout because they
-		// would cap large file uploads/downloads (the body I/O is
-		// bounded by the handler-level limits already). IdleTimeout
-		// reaps keep-alive connections that have no active request.
+		// ReadHeaderTimeout 缓解 Slowloris：客户端须在此窗口内发完请求头。
+		// 不设 Read/WriteTimeout 是因为它们会限制大文件上传下载的耗时
+		// （body 的 I/O 已由 handler 层限制兜底）；IdleTimeout 回收空闲 keep-alive。
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
 
-	// Session cookie lifetime: --session-ttl controls how long a logged-in
-	// user stays signed in before the cookie expires and re-login is
-	// required. gorilla/sessions treats MaxAge=0 as a session-only cookie
-	// (dropped when the browser closes); we honour --session-ttl=0 the
-	// same way. Cookies persist across server restarts as long as the
-	// operator set GHS_SESSION_KEY (otherwise each restart mints a new
-	// signing key, invalidating all existing cookies).
+	// --session-ttl 控制登录态有效期；gorilla/sessions 中 MaxAge=0 表示
+	// 浏览器会话 cookie（关闭即失效），--session-ttl=0 语义相同。未设置
+	// GHS_SESSION_KEY 时每次重启都会生成新的签名密钥，使既有 cookie 全部失效。
 	if sessionKey := os.Getenv("GHS_SESSION_KEY"); sessionKey != "" {
 		auth.Store.Codecs = securecookie.CodecsFromPairs([]byte(sessionKey))
 		slog.Info("using GHS_SESSION_KEY from environment for session signing")
@@ -690,29 +584,23 @@ func main() {
 	}
 	slog.Info("session cookie ttl configured", slog.String("ttl", gcfg.SessionTTL.String()))
 
-	// When serving over TLS, mark the session cookie Secure so browsers
-	// never send it over a plain-HTTP connection (downgrade sniffing).
+	// 走 TLS 时把 session cookie 标记为 Secure，防止浏览器在明文 HTTP 上发送它
 	if gcfg.Key != "" && gcfg.Cert != "" {
 		auth.Store.Options.Secure = true
 	}
 
-	// Create listener and wrap with proxyproto for FRP real IP support
 	ln, err := net.Listen("tcp", gcfg.Addr)
 	if err != nil {
 		slog.Error("listen failed", util.ErrorAttr(err), slog.String("addr", gcfg.Addr))
 		os.Exit(1)
 	}
 
-	// Wrap listener with proxyproto to support HAProxy PROXY protocol
-	// This allows FRP to pass real client IP when ProxyProtocol is enabled.
+	// 用 proxyproto 包装 listener 以支持 HAProxy PROXY protocol，
+	// 使 FRP 开启 ProxyProtocol 时能传入真实客户端 IP。
 	//
-	// SECURITY FIX: Previously the Policy unconditionally returned USE,
-	// meaning ANY connection's PROXY protocol header was accepted. If the
-	// server is directly exposed (not behind HAProxy/FRP), an attacker can
-	// forge the PROXY protocol header to spoof their source IP. Now we
-	// only accept PROXY protocol from loopback or private IPs (where
-	// FRP/HAProxy would be running). Public connections are handled
-	// normally without PROXY protocol parsing.
+	// SECURITY: 只接受来自 loopback 或私网地址的 PROXY protocol 头（FRP/HAProxy
+	// 所在位置）。若无条件接受，直连暴露时攻击者可伪造该头伪造源 IP；
+	// 公网连接一律按普通方式处理，不解析 PROXY protocol。
 	proxyLn := &proxyproto.Listener{
 		Listener: ln,
 		Policy: func(upstream net.Addr) (proxyproto.Policy, error) {
@@ -726,10 +614,8 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// Serve in a background goroutine so the main goroutine can react to
-	// whichever happens first: a fatal Serve error, or a termination
-	// signal. http.Server.Shutdown closes the listener it was given, so
-	// there is no separate Close() to run here.
+	// 在后台 goroutine 中 Serve，主 goroutine 只等待「Serve 致命错误」或
+	// 「终止信号」二者其一；http.Server.Shutdown 会关闭其 listener，无需另调 Close。
 	serveErr := make(chan error, 1)
 	if gcfg.Key != "" && gcfg.Cert != "" {
 		tlsConfig := &tls.Config{
@@ -741,10 +627,8 @@ func main() {
 		go func() { serveErr <- srv.Serve(proxyLn) }()
 	}
 
-	// Graceful shutdown: drain in-flight requests, then release the
-	// database. Cleanup runs in LIFO order and only after the HTTP
-	// server has stopped, so a request mid-transaction still has a live
-	// DB handle while it finishes.
+	// 优雅退出：先排空在途请求再释放数据库。cleanup 按 LIFO 执行且只在 HTTP
+	// 服务停止后进行，保证事务中的请求全程持有可用的 DB 句柄。
 	shutdownMgr := util.NewShutdownManager(srv, util.Logger(), 30*time.Second)
 	shutdownMgr.RegisterCleanup(func() error {
 		slog.Info("closing database")
@@ -756,9 +640,8 @@ func main() {
 
 	select {
 	case err := <-serveErr:
-		// Serve only returns once the server has stopped. Anything other
-		// than a clean Shutdown is fatal; still run cleanup so the DB
-		// handle and listeners are released before we exit.
+		// Serve 返回即服务已停止；除正常 Shutdown 外的错误都视为致命，
+		// 但仍先跑 cleanup，确保退出前释放 DB 句柄与 listener。
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server stopped unexpectedly", util.ErrorAttr(err))
 			if shutErr := shutdownMgr.Shutdown(); shutErr != nil {
@@ -771,8 +654,7 @@ func main() {
 		if err := shutdownMgr.Shutdown(); err != nil {
 			slog.Error("graceful shutdown did not complete cleanly", util.ErrorAttr(err))
 		}
-		// Wait for Serve to observe the closed listener so we don't race
-		// process exit against in-flight goroutines.
+		// 等 Serve 观察到 listener 已关闭，避免进程退出与在途 goroutine 竞态
 		if err := <-serveErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server stopped unexpectedly during shutdown", util.ErrorAttr(err))
 			os.Exit(1)

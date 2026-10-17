@@ -1,18 +1,11 @@
 import { ref, watch } from 'vue'
 
 const themeKey = 'gohttpserver-theme'
-// Available themes. 'white' is the default — a calm, neutral surface
-// that suits a file manager. 'black', 'green' and 'cyan' are light
-// accent variants; 'dark' is a true dark mode (deep slate surfaces,
-// lifted blue accent) selectable from the same theme picker.
+// 'white' 为默认；'dark' 是真正的深色模式。
 const availableThemes = ['white', 'black', 'green', 'cyan', 'dark'] as const
 type Theme = typeof availableThemes[number]
 
-// Pick the initial theme on first load. Two cases:
-//   1. The user has a saved preference → honour it.
-//   2. No preference yet → fall back to 'white'. A light surface is
-//      the safer default for a file manager (offices, shared
-//      screens) and the three accent variants are one click away.
+// 已保存的偏好优先，否则回退到 'white'。
 function initialTheme(): Theme {
   const stored = localStorage.getItem(themeKey) as Theme | null
   if (stored && availableThemes.includes(stored)) return stored
@@ -21,9 +14,7 @@ function initialTheme(): Theme {
 
 const currentTheme = ref<Theme>(initialTheme())
 
-// Apply the theme class to <html> so we can scope variables globally.
-// Watching in-place means every setTheme() call stays in sync with
-// the DOM — no manual apply() needed in callers.
+// theme 类挂在 <html> 上并自动保持同步。
 if (typeof document !== 'undefined') {
   watch(
     currentTheme,

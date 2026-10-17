@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 )
 
-// LogFormat 日志输出格式
+// LogFormat 日志输出格式。
 type LogFormat string
 
 const (
@@ -17,7 +17,7 @@ const (
 	LogFormatText LogFormat = "text"
 )
 
-// LogLevel 日志级别
+// LogLevel 日志级别。
 type LogLevel string
 
 const (
@@ -27,13 +27,13 @@ const (
 	LogLevelError LogLevel = "error"
 )
 
-// LoggerConfig 日志配置
+// LoggerConfig 日志配置。
 type LoggerConfig struct {
 	Level  LogLevel
 	Format LogFormat
 }
 
-// ParseLogLevel 解析日志级别字符串
+// ParseLogLevel 解析日志级别字符串，无法识别时回退到 info。
 func ParseLogLevel(s string) (slog.Level, error) {
 	switch strings.ToLower(s) {
 	case "debug":
@@ -49,7 +49,7 @@ func ParseLogLevel(s string) (slog.Level, error) {
 	}
 }
 
-// ParseLogFormat 解析日志格式字符串
+// ParseLogFormat 解析日志格式字符串，无法识别时回退到 json。
 func ParseLogFormat(s string) (LogFormat, error) {
 	switch strings.ToLower(s) {
 	case "json":
@@ -61,20 +61,18 @@ func ParseLogFormat(s string) (LogFormat, error) {
 	}
 }
 
-// RequestIDKey is the context key for request ID
+// RequestIDKey 是请求 ID 在 context 中的键。
 type RequestIDKey struct{}
 
 var (
-	// defaultLogger is the global structured logger
 	defaultLogger *slog.Logger
 	loggerInit    atomic.Bool
 )
 
-// InitLogger initializes the global structured logger.
-// Call once at startup. If not called, a default JSON logger to stdout is used.
+// InitLogger 初始化全局结构化日志器，只在启动时调用一次；重复调用会被忽略。
 func InitLogger(opts *slog.HandlerOptions) {
 	if loggerInit.Swap(true) {
-		return // already initialized
+		return
 	}
 	if opts == nil {
 		opts = &slog.HandlerOptions{
@@ -86,7 +84,7 @@ func InitLogger(opts *slog.HandlerOptions) {
 	slog.SetDefault(defaultLogger)
 }
 
-// InitLoggerWithConfig 使用配置初始化日志器
+// InitLoggerWithConfig 按配置初始化日志器（级别与格式）。
 func InitLoggerWithConfig(cfg LoggerConfig) {
 	level, _ := ParseLogLevel(string(cfg.Level))
 	format, _ := ParseLogFormat(string(cfg.Format))
@@ -105,7 +103,7 @@ func InitLoggerWithConfig(cfg LoggerConfig) {
 	loggerInit.Store(true)
 }
 
-// Logger returns the default structured logger.
+// Logger 返回全局结构化日志器。
 func Logger() *slog.Logger {
 	if defaultLogger == nil {
 		InitLogger(nil)
@@ -113,12 +111,12 @@ func Logger() *slog.Logger {
 	return defaultLogger
 }
 
-// WithRequestID adds a request ID to the context.
+// WithRequestID 把请求 ID 写入 context。
 func WithRequestID(ctx context.Context, requestID string) context.Context {
 	return context.WithValue(ctx, RequestIDKey{}, requestID)
 }
 
-// RequestIDFromContext extracts the request ID from context.
+// RequestIDFromContext 从 context 取出请求 ID，无则返回空串。
 func RequestIDFromContext(ctx context.Context) string {
 	if v := ctx.Value(RequestIDKey{}); v != nil {
 		if id, ok := v.(string); ok {
@@ -128,42 +126,42 @@ func RequestIDFromContext(ctx context.Context) string {
 	return ""
 }
 
-// RequestIDAttr creates a slog.Attr for request ID.
+// RequestIDAttr 构造请求 ID 的 slog.Attr。
 func RequestIDAttr(id string) slog.Attr {
 	return slog.String("request_id", id)
 }
 
-// ClientIPAttr creates a slog.Attr for client IP.
+// ClientIPAttr 构造客户端 IP 的 slog.Attr。
 func ClientIPAttr(ip string) slog.Attr {
 	return slog.String("client_ip", ip)
 }
 
-// MethodAttr creates a slog.Attr for HTTP method.
+// MethodAttr 构造 HTTP 方法的 slog.Attr。
 func MethodAttr(method string) slog.Attr {
 	return slog.String("method", method)
 }
 
-// PathAttr creates a slog.Attr for request path.
+// PathAttr 构造请求路径的 slog.Attr。
 func PathAttr(path string) slog.Attr {
 	return slog.String("path", path)
 }
 
-// StatusAttr creates a slog.Attr for HTTP status.
+// StatusAttr 构造 HTTP 状态码的 slog.Attr。
 func StatusAttr(status int) slog.Attr {
 	return slog.Int("status", status)
 }
 
-// LatencyAttr creates a slog.Attr for latency in milliseconds.
+// LatencyAttr 构造耗时（毫秒）的 slog.Attr。
 func LatencyAttr(ms int64) slog.Attr {
 	return slog.Int64("latency_ms", ms)
 }
 
-// ErrorAttr creates a slog.Attr for error.
+// ErrorAttr 构造错误信息的 slog.Attr。
 func ErrorAttr(err error) slog.Attr {
 	return slog.String("error", err.Error())
 }
 
-// PrettyJSON 返回格式化的 JSON 字符串，用于调试
+// PrettyJSON 返回缩进格式的 JSON 字符串，用于调试。
 func PrettyJSON(v any) string {
 	b, _ := json.MarshalIndent(v, "", "  ")
 	return string(b)

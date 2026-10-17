@@ -9,7 +9,6 @@
     append-to-body
   >
     <el-form label-position="top" @submit.prevent="handleSubmit">
-      <!-- 备注名:必填,仅用于展示,不参与鉴权。 -->
       <el-form-item label="备注名" required>
         <el-input
           v-model="form.remark"
@@ -19,8 +18,7 @@
         />
       </el-form-item>
 
-      <!-- 根目录:可手动输入或点击「浏览」从文件树中选择。
-           服务端会校验并拒绝 ".." 等逃逸路径。 -->
+      <!-- 根目录：服务端会校验并拒绝 ".." 等逃逸路径。 -->
       <el-form-item label="相对根目录" required>
         <el-input
           v-model="form.rootPath"
@@ -38,7 +36,6 @@
         <div class="field-hint">选择共享的目录。账号只能访问此目录及其子目录，留空或 "/" 表示根目录。</div>
       </el-form-item>
 
-      <!-- 高级选项:默认折叠,大多数用户用默认值(读写 + 系统文件保护)即可。 -->
       <el-collapse v-model="advancedOpen" class="advanced">
         <el-collapse-item title="高级选项" name="adv">
           <el-form-item>
@@ -109,7 +106,6 @@
     </template>
   </el-dialog>
 
-  <!-- 目录选择器:从文件树中选目录,选好后回填到访问目录输入框。 -->
   <DirectoryPicker
     v-model="form.rootPath"
     v-model:visible="showPicker"
@@ -133,14 +129,11 @@ const emit = defineEmits<{
 
 const adminStore = useAdminStore()
 
-// 表单状态。用 reactive 而不是分散的 ref,方便一次性重置。
 const form = reactive({
   remark: '',
   rootPath: '/',
   readonly: false,
   protectSystemFiles: true,
-  // 配额以「数值 + 单位」录入:quotaValue 是显示值(默认单位 GB),
-  // 提交时乘以 quotaUnit 换算成字节。0 表示不限。
   quotaValue: 0,
 })
 
@@ -149,7 +142,6 @@ const errorMessage = ref('')
 const advancedOpen = ref<string[]>([])
 const showPicker = ref(false)
 
-// 配额单位选择器 (B / KB / MB / GB / TB),默认 GB。
 const quotaUnit = ref<number>(1024 ** 3)
 
 async function handleSubmit() {
@@ -160,8 +152,7 @@ async function handleSubmit() {
   }
   submitting.value = true
   try {
-    // 密码由服务端随机生成,并由 store 缓存到本地,创建后可在账号
-    // 的「基本信息」里查看。这里不再弹出凭据对话框 —— 直接关闭。
+    // 密码由服务端生成，store 会缓存以便稍后查看。
     const res = await adminStore.createWebdavAccount({
       remark: form.remark.trim(),
       root_path: form.rootPath.trim() || '/',
@@ -171,8 +162,6 @@ async function handleSubmit() {
     })
     if (res.ok) {
       ElMessage.success('账号已创建')
-      // The new account may point at a folder that already has files;
-      // recalc so its quota bar shows real usage instead of 0.
       adminStore.recalculateWebdavUsage()
       emit('update:visible', false)
     } else if (res.error === 'unauthorized') {
@@ -185,8 +174,6 @@ async function handleSubmit() {
   }
 }
 
-// 每次打开对话框时重置表单。监听 props.visible(不是 ref)才能
-// 响应父组件驱动的变化。
 watch(
   () => props.visible,
   (open) => {
@@ -229,19 +216,14 @@ watch(
   justify-content: space-between;
   gap: 12px;
   width: 100%;
-  /* Let the quota controls drop below the label on narrow dialogs
-     instead of getting clipped. */
   flex-wrap: wrap;
 }
 
-/* Text block (label + hint) shrinks so the controls always keep room. */
 .switch-text {
   flex: 1 1 200px;
   min-width: 0;
 }
 
-/* Quota value + unit stay together and never shrink so both are fully
-   visible. */
 .quota-controls {
   display: flex;
   align-items: center;
