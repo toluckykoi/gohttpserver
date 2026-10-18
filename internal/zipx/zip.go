@@ -105,7 +105,7 @@ func CompressToZipFiltered(w http.ResponseWriter, rootDir string, filter func(pa
 		if err != nil || info == nil {
 			return nil
 		}
-		if info.Name() == ".ghs.yml" {
+		if accessConfAliases(info.Name()) {
 			return nil
 		}
 		if filter != nil && !filter(path, info) {
@@ -194,6 +194,41 @@ func UnzipFile(ctx context.Context, filename, dest string, onProgress func(idx, 
 	return nil
 }
 
+// accessConfAliases 判断 base 是否为 .ghs.yml 的等价名。必须大小写不敏感——
+// Windows 文件系统不区分大小写，`.GHS.YML` 落盘后就是 `.ghs.yml` 本身，仅上传
+// 权限的攻击者可借 zip 解压植入它为自己授予 delete/edit（提权）。同时识别
+// Windows 8.3 短名（GHS~1.YML），以及尾点变体（`.ghs.yml.` 落盘时被剥离为同名）。
+// 不放在 server 包是因为 server 依赖本包，反向引入会成环。
+func accessConfAliases(base string) bool {
+	// 尾部点/空格在 Windows 落盘时会被剥离：先剥再比较。
+	trimmed := strings.TrimRight(base, ". ")
+	if strings.EqualFold(trimmed, ".ghs.yml") || strings.EqualFold(trimmed, ".ghs.yaml") {
+		return true
+	}
+	upper := strings.ToUpper(trimmed)
+	// 8.3 短名模式：<≤7 位前缀>~<数字>.<扩展名>；.ghs.yml 的短名形如 GHS~1.YML。
+	idx := strings.IndexByte(upper, '~')
+	if idx <= 0 || idx > 7 {
+		return false
+	}
+	rest := upper[idx+1:]
+	dot := strings.IndexByte(rest, '.')
+	if dot < 1 {
+		return false
+	}
+	digits := rest[:dot]
+	for _, c := range digits {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	if digits == "" {
+		return false
+	}
+	ext := rest[dot+1:]
+	return ext == "YML" || ext == "YAML"
+}
+
 // extractZipEntry 写出单个 zip 条目；独立成函数是为了让 defer rc.Close() 逐条执行而非累积。
 func extractZipEntry(f *zip.File, dest string, idx, total int, onProgress func(idx, total int, name string)) error {
 	rc, err := f.Open()
@@ -203,7 +238,7 @@ func extractZipEntry(f *zip.File, dest string, idx, total int, onProgress func(i
 	defer rc.Close()
 
 	filename := sanitizedName(f.Name)
-	if filepath.Base(filename) == ".ghs.yml" {
+	if accessConfAliases(filepath.Base(filename)) {
 		return nil
 	}
 	fpath := filepath.Join(dest, filename)

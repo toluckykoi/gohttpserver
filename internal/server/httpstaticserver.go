@@ -405,6 +405,12 @@ func (s *HTTPStaticServer) hIndex(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Not found", http.StatusNotFound)
 			return
 		}
+		// SECURITY: 服务器私有文件（登录 DB、FRP 密钥）同样不能经 HTTP 读取——
+		// 默认 --root 是工作目录，两者重合时一次 GET 就能拿到密码哈希。
+		if isServerStateName(filepath.Base(path)) {
+			http.Error(w, "Not found", http.StatusNotFound)
+			return
+		}
 		// SECURITY: accessTables 的 allow:false 在列表接口隐藏文件，直接下载也必须同样拒绝，
 		// 否则配置的“隐藏”形同虚设（曾可经 GET、?op=info 与打包下载绕过）。
 		if !s.canAccessPath(r, realPath, filepath.Base(path)) {
@@ -1052,6 +1058,13 @@ func (s *HTTPStaticServer) hInfo(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// SECURITY: 访问控制文件与服务器私有文件连元数据也不暴露——hIndex 的 raw 通道
+	// 已拦截它们，但 ?op=info 与 /-/info/ 直达本处理器，曾绕过拦截泄露
+	// 大小/mtime/md5/sha256（哈希可离线验证对 token/密码的猜测）。
+	if isAccessConfName(fi.Name()) || isServerStateName(fi.Name()) {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
 	// SECURITY: accessTables 隐藏的文件同样不能暴露元数据与哈希。
 	if !fi.IsDir() && !s.canAccessPath(r, relPath, fi.Name()) {
 		http.Error(w, "Not found", http.StatusNotFound)
@@ -1119,7 +1132,7 @@ func (s *HTTPStaticServer) hZip(w http.ResponseWriter, r *http.Request) {
 // 被各目录 .ghs.yml 的 accessTables 拒绝的文件不写入归档。
 func (s *HTTPStaticServer) compressToZipFiltered(w http.ResponseWriter, r *http.Request, rootDir string) {
 	filter := func(path string, fi os.FileInfo) bool {
-		if fi.Name() == YAMLCONF || isAccessConfName(fi.Name()) {
+		if fi.Name() == YAMLCONF || isAccessConfName(fi.Name()) || isServerStateName(fi.Name()) {
 			return false
 		}
 		if fi.IsDir() {
@@ -1185,6 +1198,12 @@ func (s *HTTPStaticServer) hZipMulti(w http.ResponseWriter, r *http.Request) {
 			log.Printf("zip-multi access denied: %q", util.SanitizeLogInput(realPath))
 			continue
 		}
+		// SECURITY: 访问控制文件（含 users[].token）与服务器私有文件（登录 DB、FRP
+		// 密钥）不得经单文件打包路径导出——walk 分支在下方逐文件拦截，单文件分支必须同样拦截。
+		if !info.IsDir() && (isAccessConfName(entryName) || isServerStateName(entryName)) {
+			log.Printf("zip-multi protected file blocked: %q", util.SanitizeLogInput(realPath))
+			continue
+		}
 
 		if info.IsDir() {
 			dirName := entryName + "/"
@@ -1194,7 +1213,7 @@ func (s *HTTPStaticServer) hZipMulti(w http.ResponseWriter, r *http.Request) {
 					log.Printf("zip-multi walk skip %q: %v", util.SanitizeLogInput(path), err)
 					return nil
 				}
-				if fi.Name() == YAMLCONF || isAccessConfName(fi.Name()) {
+				if fi.Name() == YAMLCONF || isAccessConfName(fi.Name()) || isServerStateName(fi.Name()) {
 					return nil
 				}
 				// 逐文件执行访问控制：目录级规则由 readAccessConf 沿父链合并而来。
@@ -1237,6 +1256,15 @@ func (s *HTTPStaticServer) hUnzip(w http.ResponseWriter, r *http.Request) {
 	if !isUnderRoot(absZip, s.Root) {
 		http.Error(w, "Invalid path", http.StatusBadRequest)
 		return
+	}
+
+	// SECURITY: accessTables 隐藏的 zip 不能借条目抽取逐个读出内容（与 hZip 同族绕过）；
+	// 访问控制文件与服务器私有文件即便被改名为 .zip 也不存在，但保持同规则防御。
+	if fi, err := os.Stat(absZip); err == nil && !fi.IsDir() {
+		if !s.canAccessPath(r, absZip, fi.Name()) {
+			http.Error(w, "Not found", http.StatusNotFound)
+			return
+		}
 	}
 
 	ctype := mime.TypeByExtension(filepath.Ext(path))
@@ -1626,6 +1654,17 @@ func (s *HTTPStaticServer) hJSONList(w http.ResponseWriter, r *http.Request) {
 	for itemPath, info := range fileInfoMap {
 		if !auth.canAccess(info.Name()) {
 			continue
+		}
+		// SECURITY: 搜索分支的结果来自全局索引，命中文件可能位于配置了更严
+		// accessTables 的子目录中——只按当前浏览目录过滤会泄露被隐藏的文件名。
+		// 目录列表分支（os.ReadDir）本就读自当前目录，逐项复核等价于原检查。
+		if search != "" {
+			// itemPath 是 URL 形式（带 --prefix），先还原为索引的根相对路径再定位目录。
+			relToRoot := strings.TrimPrefix(itemPath, strings.TrimPrefix(s.Prefix, "/")+"/")
+			itemReal := filepath.Join(s.Root, filepath.FromSlash(relToRoot))
+			if isAccessConfName(info.Name()) || isServerStateName(info.Name()) || !s.canAccessPath(r, itemReal, info.Name()) {
+				continue
+			}
 		}
 		lr := HTTPFileInfo{
 			Name:    info.Name(),
@@ -2039,6 +2078,44 @@ func allDigits(s string) bool {
 		}
 	}
 	return true
+}
+
+// serverStateFiles 是服务器自身的私有文件：登录凭据库（bcrypt 哈希）与 FRP
+// token 的加密密钥。默认 --root 是工作目录，这些文件因此落在对外服务的目录内，
+// 绝不允许经任何 HTTP 通道读取或改写。
+var serverStateFiles = []string{
+	"gohttpserver.db",
+	"gohttpserver.db-wal",
+	"gohttpserver.db-shm",
+	"frp-encryption.key",
+}
+
+// isServerStateName 判断 name 是否指向服务器私有文件。与 isAccessConfName 同样
+// 必须大小写不敏感（Windows 不区分大小写，"GOHTTPSERVER.DB" 与 "gohttpserver.db"
+// 是同一个文件），并识别 8.3 短名（GOHTTP~1.DB / FRP-EN~1.KEY 等）。
+func isServerStateName(name string) bool {
+	for _, sf := range serverStateFiles {
+		if strings.EqualFold(name, sf) {
+			return true
+		}
+	}
+	if runtime.GOOS == "windows" {
+		base := strings.ToUpper(name)
+		// 8.3 短名模式：<≤7 位前缀>~<数字>.<截断到 3 位左右的扩展名>；
+		// gohttpserver.db → GOHTTP~1.DB，gohttpserver.db-wal → GOHTTP~2.DBW/DB-
+		// 形态（截断规则随卷配置浮动），frp-encryption.key → FRP-EN~1.KEY。
+		if idx := strings.IndexByte(base, '~'); idx > 0 && idx <= 7 && len(base) <= 12 {
+			rest := base[idx+1:]
+			dot := strings.IndexByte(rest, '.')
+			if dot >= 1 && allDigits(rest[:dot]) {
+				ext := rest[dot+1:]
+				if strings.HasPrefix(ext, "DB") || ext == "KEY" || ext == "WAL" || ext == "SHM" {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // isUnderRoot 在双方共同 Clean 后判断 path 是 root 本身还是其子孙——破坏性文件操作前的纵深防御。
