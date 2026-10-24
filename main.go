@@ -574,6 +574,13 @@ func main() {
 	if sessionKey := os.Getenv("GHS_SESSION_KEY"); sessionKey != "" {
 		auth.Store.Codecs = securecookie.CodecsFromPairs([]byte(sessionKey))
 		slog.Info("using GHS_SESSION_KEY from environment for session signing")
+		// securecookie 对任意长度 key 都接受，但 HMAC-SHA256 的安全性依赖密钥熵：
+		// 短 key 可被离线爆破，伪造登录 cookie。小于 32 字节给出明确警告。
+		if len(sessionKey) < 32 {
+			slog.Warn("GHS_SESSION_KEY is shorter than 32 bytes; session cookies are brute-forceable. "+
+				"Use at least 32 random bytes, e.g. head -c 32 /dev/urandom | base64",
+				slog.Int("length", len(sessionKey)))
+		}
 	} else {
 		slog.Warn("GHS_SESSION_KEY not set; sessions will be invalidated on restart")
 	}
@@ -584,9 +591,17 @@ func main() {
 	}
 	slog.Info("session cookie ttl configured", slog.String("ttl", gcfg.SessionTTL.String()))
 
-	// 走 TLS 时把 session cookie 标记为 Secure，防止浏览器在明文 HTTP 上发送它
+	// 走 TLS 时把 session cookie 标记为 Secure，防止浏览器在明文 HTTP 上发送它。
+	// SECURITY: 反代终止 TLS（--xheaders）时本进程看到的是明文 HTTP，浏览器侧
+	// 仍是 https——同样必须标记 Secure，否则 cookie 会在降级连接上外泄。
+	// 若部署为「反代 HTTPS + 本机 HTTP」却用明文浏览，运维需自行清除该标记。
 	if gcfg.Key != "" && gcfg.Cert != "" {
 		auth.Store.Options.Secure = true
+		slog.Info("session cookies marked Secure (direct TLS)")
+	} else if gcfg.XHeaders {
+		auth.Store.Options.Secure = true
+		slog.Info("session cookies marked Secure (TLS terminated upstream; --xheaders)",
+			slog.String("hint", "if you serve plain HTTP through the proxy, set --session-ttl accordingly"))
 	}
 
 	ln, err := net.Listen("tcp", gcfg.Addr)

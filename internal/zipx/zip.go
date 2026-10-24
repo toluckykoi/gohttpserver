@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -157,8 +158,63 @@ func ExtractFromZip(zipFile, path string, w io.Writer) (err error) {
 	return fmt.Errorf("file %s not found", strconv.Quote(path))
 }
 
+// serverStateNames 是服务器私有文件（登录凭据库与 FRP 密钥）。与 server 包的
+// serverStateFiles 保持一致——zipx 不能反向 import server（会成环），改动时需同步。
+var serverStateNames = []string{
+	"gohttpserver.db",
+	"gohttpserver.db-wal",
+	"gohttpserver.db-shm",
+	"frp-encryption.key",
+	// 旧版本遗留的同名状态文件，虽不再读取但内容仍是敏感历史。
+	"auth-state.json",
+	"webdav-accounts.json",
+	"storage-usage.json",
+}
+
+// isServerStateAlias 判断 base 是否为服务器私有文件的等价名（大小写不敏感 +
+// 8.3 短名 + 尾点变体——Windows 落盘时剥离尾点并统一大小写）。解压通道曾可借
+// 伪装名覆盖真实 DB，服务重启后即回退默认 admin/admin 凭据。
+func isServerStateAlias(base string) bool {
+	trimmed := strings.TrimRight(base, ". ")
+	for _, n := range serverStateNames {
+		if strings.EqualFold(trimmed, n) {
+			return true
+		}
+	}
+	upper := strings.ToUpper(trimmed)
+	// 8.3 短名模式：<≤7 位前缀>~<数字>.<扩展名>；gohttpserver.db → GOHTTP~1.DB，
+	// frp-encryption.key → FRP-EN~1.KEY。
+	idx := strings.IndexByte(upper, '~')
+	if idx <= 0 || idx > 7 || len(upper) > 14 {
+		return false
+	}
+	rest := upper[idx+1:]
+	dot := strings.IndexByte(rest, '.')
+	if dot < 1 {
+		return false
+	}
+	digits := rest[:dot]
+	if digits == "" {
+		return false
+	}
+	for _, c := range digits {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	ext := rest[dot+1:]
+	return strings.HasPrefix(ext, "DB") || ext == "KEY" || ext == "WAL" ||
+		ext == "SHM" || ext == "JSO" || ext == "JSON"
+}
+
+// MaxUnzipTotalBytes 限制单次解压累计写出的实际字节数（var 以便测试与部署调优）。
+// 声明的 UncompressedSize 可被伪造成极小值绕过压缩比检查，因此限额必须按
+// io.Copy 的实际写出量在拷贝过程中强制执行，而不是信任归档头。
+var MaxUnzipTotalBytes int64 = 20 << 30
+
 // UnzipFile 将 filename 解压到 dest，支持逐条目进度回调与 ctx 取消；
-// 压缩比超过 maxZipExpansionRatio 的条目按 zip 炸弹拒收。
+// 压缩比超过 maxZipExpansionRatio 的条目按 zip 炸弹拒收，累计实际写出量
+// 超过 MaxUnzipTotalBytes 时中止（按实际字节计，不信任声明尺寸）。
 func UnzipFile(ctx context.Context, filename, dest string, onProgress func(idx, total int, name string)) error {
 	zr, err := zip.OpenReader(filename)
 	if err != nil {
@@ -171,6 +227,7 @@ func UnzipFile(ctx context.Context, filename, dest string, onProgress func(idx, 
 	}
 
 	total := len(zr.File)
+	remaining := MaxUnzipTotalBytes
 	for i, f := range zr.File {
 		select {
 		case <-ctx.Done():
@@ -178,7 +235,7 @@ func UnzipFile(ctx context.Context, filename, dest string, onProgress func(idx, 
 		default:
 		}
 
-		// zip 炸弹防御：解压前先检查压缩比。
+		// zip 炸弹防御（快速路径）：按声明尺寸检查压缩比。
 		if f.CompressedSize > 0 && f.UncompressedSize > 0 {
 			ratio := float64(f.UncompressedSize) / float64(f.CompressedSize)
 			if ratio > maxZipExpansionRatio {
@@ -187,7 +244,7 @@ func UnzipFile(ctx context.Context, filename, dest string, onProgress func(idx, 
 			}
 		}
 
-		if err := extractZipEntry(f, dest, i+1, total, onProgress); err != nil {
+		if err := extractZipEntry(f, dest, i+1, total, &remaining, onProgress); err != nil {
 			return err
 		}
 	}
@@ -230,7 +287,9 @@ func accessConfAliases(base string) bool {
 }
 
 // extractZipEntry 写出单个 zip 条目；独立成函数是为了让 defer rc.Close() 逐条执行而非累积。
-func extractZipEntry(f *zip.File, dest string, idx, total int, onProgress func(idx, total int, name string)) error {
+// remaining 是本次解压的累计写出量余量，由本函数按 io.Copy 实际写出量扣减；
+// 条目名指向服务器私有文件（含 Windows 等价名）时跳过。
+func extractZipEntry(f *zip.File, dest string, idx, total int, remaining *int64, onProgress func(idx, total int, name string)) error {
 	rc, err := f.Open()
 	if err != nil {
 		return err
@@ -238,7 +297,9 @@ func extractZipEntry(f *zip.File, dest string, idx, total int, onProgress func(i
 	defer rc.Close()
 
 	filename := sanitizedName(f.Name)
-	if accessConfAliases(filepath.Base(filename)) {
+	// 与 accessConfAliases 同族：服务器私有文件（DB / FRP 密钥）的等价名不得落盘——
+	// 否则上传 + 解压即可覆盖真实 DB，重启后凭据回退 admin/admin。
+	if accessConfAliases(filepath.Base(filename)) || isServerStateAlias(filepath.Base(filename)) {
 		return nil
 	}
 	fpath := filepath.Join(dest, filename)
@@ -276,8 +337,50 @@ func extractZipEntry(f *zip.File, dest string, idx, total int, onProgress func(i
 	if err != nil {
 		return err
 	}
-	_, err = io.Copy(outFile, rc)
+	// 按实际写出量强制执行累计限额：声明的 UncompressedSize 可被伪造，
+	// 限额必须在拷贝过程中由 limitedCopy 自己计量，而不是信任归档头。
+	_, err = limitedCopy(outFile, rc, remaining)
 	outFile.Close()
-
+	if errors.Is(err, errQuotaExceeded) {
+		return fmt.Errorf("unzip aborted: cumulative output exceeds limit (%d bytes)", MaxUnzipTotalBytes)
+	}
 	return err
+}
+
+// errQuotaExceeded 在累计写出量超出剩余配额时由 limitedCopy 返回。
+var errQuotaExceeded = errors.New("unzip output exceeds cumulative limit")
+
+// limitedCopy 把 src 拷贝到 dst，最多再写出 *remaining 字节；实际写出量从 *remaining
+// 中扣减。伪造极小声明尺寸的条目由此在拷贝过程中被截停。
+func limitedCopy(dst io.Writer, src io.Reader, remaining *int64) (int64, error) {
+	if remaining == nil {
+		return io.Copy(dst, src)
+	}
+	var total int64
+	buf := make([]byte, 32*1024)
+	for {
+		if *remaining <= 0 {
+			return total, errQuotaExceeded
+		}
+		// 单轮最多写 min(32K, remaining) 字节，超限即返回错误。
+		chunk := *remaining
+		if chunk > int64(len(buf)) {
+			chunk = int64(len(buf))
+		}
+		n, rerr := src.Read(buf[:chunk])
+		if n > 0 {
+			wn, werr := dst.Write(buf[:n])
+			total += int64(wn)
+			*remaining -= int64(wn)
+			if werr != nil {
+				return total, werr
+			}
+		}
+		if rerr == io.EOF {
+			return total, nil
+		}
+		if rerr != nil {
+			return total, rerr
+		}
+	}
 }

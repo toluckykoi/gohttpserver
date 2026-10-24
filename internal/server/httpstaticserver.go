@@ -331,20 +331,41 @@ func (s *HTTPStaticServer) relFromRoot(path string) string {
 	return filepath.ToSlash(rel)
 }
 
+// stripPrefix 从（已 Clean 的、以 "/" 开头的）URL 路径剥离子路径前缀 prefix。
+// 段感知：必须是完整路径段匹配，"/share" 不会从 "/shareX/leak.txt" 上剥出任何东西
+// （旧实现用 filepath.Rel，此时返回 "../shareX/leak.txt"，Join 后逃逸 Root）。
+// 返回剥完的相对路径（不带前导 "/"，空串表示根）。
+func stripPrefix(prefix, urlPath string) string {
+	if prefix == "" {
+		return strings.TrimPrefix(urlPath, "/")
+	}
+	rest, ok := strings.CutPrefix(urlPath, prefix)
+	if !ok {
+		return ""
+	}
+	if rest == "" {
+		return ""
+	}
+	// 剥完后必须落在路径边界上，否则 prefix 只是目标路径段的字符串前缀。
+	if rest[0] != '/' {
+		return ""
+	}
+	return strings.TrimPrefix(rest, "/")
+}
+
 // resolvePath 把（gorilla/mux 已解码的）URL 路径转换为 s.Root 下的绝对斜杠路径，
 // 由 filepath.Clean 折叠 ".."。
 //
 // SECURITY: 仅 Clean 不能保证路径仍在 Root 内，凡是会改动文件系统的调用方
 // 必须再用 insideRoot / mustResolveRequestPath 复核结果。
+// prefix 剥离走段边界（stripPrefix），非边界字符串前缀按根目录解析——
+// 曾把 /shareX 当 /share 的子路径，resulting 出 Root 之外的绝对路径。
 func (s *HTTPStaticServer) resolvePath(urlPath string) string {
 	if !strings.HasPrefix(urlPath, "/") {
 		urlPath = "/" + urlPath
 	}
-	cleanPath := filepath.Clean(urlPath) // 防止 ".." 引发的安全问题
-	relativePath, err := filepath.Rel(s.Prefix, cleanPath)
-	if err != nil {
-		relativePath = cleanPath
-	}
+	cleanPath := filepath.ToSlash(filepath.Clean(urlPath)) // 防止 ".." 引发的安全问题
+	relativePath := stripPrefix(s.Prefix, cleanPath)
 	return filepath.ToSlash(filepath.Join(s.Root, relativePath))
 }
 
@@ -366,7 +387,14 @@ func (s *HTTPStaticServer) resolveRequestPath(r *http.Request) (string, bool) {
 
 func (s *HTTPStaticServer) hIndex(w http.ResponseWriter, r *http.Request) {
 	path := mux.Vars(r)["path"]
-	realPath := s.getRealPath(r)
+	realPath, inside := s.resolveRequestPath(r)
+	if !inside {
+		// SECURITY: hIndex 是主文件读取通道，必须与写通道一样复核解析结果仍在
+		// Root 内。历史上只此一处漏掉复核，而上层 mux 拓扑一旦变化（亦或 resolvePath
+		// 的 prefix 剥离有缺陷），即成为任意文件读。纵深防御，见到则拒绝。
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
 	if r.FormValue("json") == "true" {
 		s.hJSONList(w, r)
 		return
@@ -388,15 +416,22 @@ func (s *HTTPStaticServer) hIndex(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// 目录列表返回 Vue 3 前端页面
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		f, err := s.Assets.Open("index.html")
-		if err != nil {
+		// Assets 由 main 在启动时注入；nil（未组装完整服务器的调用方）时给明确错误，
+		// 而不是在接口方法上 panic。
+		var indexHTML []byte
+		if s.Assets != nil {
+			f, err := s.Assets.Open("index.html")
+			if err == nil {
+				indexHTML, _ = io.ReadAll(f)
+				f.Close()
+			}
+		}
+		if indexHTML == nil {
 			http.Error(w, "Frontend not built", http.StatusNotFound)
 			return
 		}
-		defer f.Close()
-		data, _ := io.ReadAll(f)
-		w.Write(data)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(indexHTML)
 	} else {
 		// SECURITY: 访问控制文件绝不通过 HTTP 提供——其内容包含所有 users[].token，
 		// 正是 canUploadByToken 接受的凭据。比较必须大小写不敏感并覆盖 8.3 短名，
@@ -429,7 +464,37 @@ func (s *HTTPStaticServer) hIndex(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// riskyInlineExts 是同源渲染时会执行内联脚本/事件的扩展名。
+// inlineSafeExts 是能被浏览器安全内联渲染、且不会在本源执行脚本/事件的扩展名白名单。
+// 使用白名单（而非禁用扩展名黑名单）：旧实现只拦 .html/.svg 等已知类型，
+// 无扩展名文件经 http.ServeFile 内容嗅探判定为 text/html 后仍会被内联渲染，
+// .bak / .tmp 等未列扩展名同样绕过——曾构成存储型 XSS。
+var inlineSafeExts = map[string]bool{
+	// 文本文档
+	".txt": true, ".md": true, ".log": true, ".csv": true, ".tsv": true,
+	".json": true, ".yaml": true, ".yml": true, ".toml": true,
+	".ini": true, ".conf": true, ".cfg": true, ".env": true,
+	// 代码
+	".go": true, ".py": true, ".js": true, ".mjs": true, ".ts": true, ".tsx": true,
+	".jsx": true, ".c": true, ".h": true, ".cpp": true, ".hpp": true, ".cc": true,
+	".java": true, ".kt": true, ".rs": true, ".rb": true, ".php": true, ".pl": true,
+	".sh": true, ".bat": true, ".ps1": true, ".css": true, ".scss": true, ".less": true,
+	".html": false, ".htm": false, ".xhtml": false, // 明确拒绝
+	".svg": false, ".svgz": false,
+	".swf": false, ".xsl": false, ".xslt": false,
+	// 图片（纯数据，不执行脚本）
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true,
+	".bmp": true, ".ico": true, ".avif": true, ".heic": true, ".tiff": true,
+	// 音视频（由 <video>/<audio> 渲染，不会执行 HTML）
+	".mp4": true, ".webm": true, ".ogg": true, ".ogv": true, ".mov": true, ".avi": true,
+	".mkv": true, ".flv": true, ".mp3": true, ".wav": true, ".flac": true, ".aac": true,
+	".m4a": true, ".opus": true,
+	// 字体与归档
+	".woff": true, ".woff2": true, ".ttf": true, ".otf": true, ".eot": true,
+	".pdf":  true,
+}
+
+// riskyInlineExts 是同源渲染时会执行内联脚本/事件的扩展名。白名单模式下仅用于
+// 文档与错误信息的显式说明；inlineSafeExts 是实际判定依据。
 var riskyInlineExts = map[string]bool{
 	".html": true, ".htm": true, ".xhtml": true,
 	".svg": true, ".svgz": true,
@@ -437,10 +502,69 @@ var riskyInlineExts = map[string]bool{
 	".swf": true,
 }
 
-// forcesAttachment 判断该路径是否必须以附件形式下发（按扩展名，大小写不敏感）。
+// maxSniffCheckBytes 是内容嗅探兜底读取的字节数上限（足够覆盖常见文档头）。
+const maxSniffCheckBytes = 512
+
+// forcesAttachment 判断该路径是否必须以附件形式下发，防止浏览器在本源执行脚本。
+// 白名单策略：扩展名不在 inlineSafeExts 内一律 attachment（含无扩展名文件—
+// 旧黑名单实现下 http.ServeFile 对无扩展名文件嗅探出 text/html 后内联渲染，构成 XSS）。
+// 即便扩展名在白名单内，仍做内容嗅探兜底：文件开头含 HTML 标签特征时也强制 attachment。
 func forcesAttachment(realPath string) bool {
+	base := filepath.Base(realPath)
+	// 访问控制文件与服务器私有文件不应走到这里（调用方已拦截），双保险。
+	if isAccessConfName(base) || isServerStateName(base) {
+		return true
+	}
+
 	ext := strings.ToLower(filepath.Ext(realPath))
-	return riskyInlineExts[ext]
+	safe, known := inlineSafeExts[ext]
+	if !known {
+		// 未知扩展名（含无扩展名）默认 attachment：内容嗅探测出 HTML 也会放行，
+		// 宁可误伤也不给同源执行留口子。
+		return true
+	}
+	if !safe {
+		// 白名单内显式标记为 unsafe 的类型。
+		return true
+	}
+	// 白名单扩展名（如 .txt）仍可能实际是 HTML：嗅探前若干字节做兜底。
+	return looksLikeHTML(realPath)
+}
+
+// looksLikeHTML 读取文件前若干字节，判断是否含 HTML 标签特征。
+// http.ServeFile 的内容嗅探会把此类文件判为 text/html 并内联渲染，
+// 因此需要显式覆盖。读取失败（权限/不存在）时保守返回 false，交由调用方按
+// 扩展名策略处理，避免把 IO 错误升级为"强制下载"。
+func looksLikeHTML(realPath string) bool {
+	f, err := os.Open(realPath)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	buf := make([]byte, maxSniffCheckBytes)
+	n, _ := f.Read(buf)
+	if n <= 0 {
+		return false
+	}
+	// 跳过 BOM 与常见 XML 声明，定位首个有意义字符。
+	head := bytes.ToLower(buf[:n])
+	head = bytes.TrimPrefix(head, []byte("\xef\xbb\xbf")) // UTF-8 BOM
+	head = bytes.TrimSpace(head)
+	// HTML 起始标签特征：<!DOCTYPE / <html / <?xml（后者可能是 xhtml）/ <svg / <script
+	htmlMarkers := [][]byte{
+		[]byte("<!doctype"), []byte("<html"), []byte("<head"),
+		[]byte("<body"), []byte("<?xml"), []byte("<svg"),
+		[]byte("<script"), []byte("<iframe"), []byte("<!entity"),
+	}
+	for _, marker := range htmlMarkers {
+		if bytes.HasPrefix(head, marker) {
+			return true
+		}
+	}
+	// 兜底：含 "<meta" 或 "<title" 的 xhtml 变形也拦。
+	return bytes.Contains(head, []byte("<meta")) ||
+		bytes.Contains(head, []byte("<title")) ||
+		bytes.Contains(head, []byte("<link"))
 }
 
 // canAccessPath 按目标路径所在目录的 .ghs.yml 判断请求者能否访问该文件名。
@@ -485,6 +609,18 @@ func (s *HTTPStaticServer) hDelete(w http.ResponseWriter, req *http.Request) {
 	auth := s.readAccessConf(realPath)
 	if !auth.canDelete(req) {
 		http.Error(w, "Delete forbidden", http.StatusForbidden)
+		return
+	}
+	// SECURITY: 服务器私有文件绝不允许经 HTTP 删除——曾可 DELETE /gohttpserver.db，
+	// 重启后凭据回退 admin/admin 而被接管。与读取通道的 isServerStateName 拦截对称。
+	if isServerStateName(filepath.Base(realPath)) {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+	// SECURITY: 删除目录不得连带其内的私有文件——os.RemoveAll 是递归的，
+	// 直接删 Root 下的目录会连 gohttpserver.db 一起消失。
+	if containsServerStateFile(realPath) {
+		http.Error(w, "Refusing to delete a directory containing server state files", http.StatusBadRequest)
 		return
 	}
 
@@ -592,6 +728,12 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 			}
 		}
 		dstPath = filepath.Join(dirpath, filepath.FromSlash(cleaned))
+		// 纵深防御：逐段校验已拒绝 ".."，仍复核最终路径未离开 Root
+		//（与其它写通道的 resolveRequestPath 保持一致）。
+		if !s.insideRoot(dstPath) {
+			http.Error(w, "Invalid path", http.StatusBadRequest)
+			return
+		}
 		// 按相对路径创建缺失的中间目录。
 		if parent := filepath.Dir(dstPath); parent != dirpath {
 			if err := os.MkdirAll(parent, os.ModePerm); err != nil {
@@ -606,6 +748,12 @@ func (s *HTTPStaticServer) hUploadOrMkdir(w http.ResponseWriter, req *http.Reque
 			return
 		}
 		dstPath = filepath.Join(dirpath, filename)
+		// 纵深防御：复核最终路径未离开 Root（checkFilename 已拒分隔符，这里
+		// 兜底防止 filename 取 ".." 之类名义值时的意外）。
+		if !s.insideRoot(dstPath) {
+			http.Error(w, "Invalid path", http.StatusForbidden)
+			return
+		}
 	}
 
 	// 记录覆盖前的旧大小，以便目录大小缓存按精确增量修正。
@@ -734,6 +882,12 @@ func (s *HTTPStaticServer) hEdit(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "Not editable", http.StatusForbidden)
 		return
 	}
+	// SECURITY: 同理，服务器私有文件（登录 DB、FRP 密钥）不可经 PUT 覆盖——
+	// 曾可用伪造 SQLite 文件替换真实凭据库，重启后以攻击者已知密码登录。
+	if isServerStateName(filepath.Base(dstPath)) {
+		http.Error(w, "Not editable", http.StatusForbidden)
+		return
+	}
 
 	// 拒绝对目录的写入——建目录走 POST 且不带 multipart。
 	fi, err := os.Stat(dstPath)
@@ -826,7 +980,7 @@ func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error
 	for _, ip := range ips {
 		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
 			ip.IsInterfaceLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() ||
-			isPrivateIPv4(ip) {
+			isPrivateIPv4(ip) || isZeroNetOrCGNAT(ip) {
 			return nil, fmt.Errorf("refusing to connect to private/loopback address %s", ip)
 		}
 	}
@@ -855,6 +1009,23 @@ func isPrivateIPv4(ip net.IP) bool {
 	// 唯一本地地址 fc00::/7（IPv6 私有地址）
 	if len(ip) == net.IPv6len && (ip[0]&0xfe) == 0xfc {
 		return true
+	}
+	return false
+}
+
+// isZeroNetOrCGNAT 判断是否属于两类会被 safeDialContext 拒绝的"准私网"段：
+// 0.0.0.0/8（"this network"，RFC 5735；部分平台会把它解析为 localhost）
+// 与 100.64.0.0/10（运营商级 NAT，RFC 6598；CGNAT 之后的家庭宽带出口常在此段，
+// 拨进去会到达网关而非公网主机）。放在 isPrivateIPv4 之外是因为它们语义上
+// 不是 RFC1918 私网，但对 SSRF 防护而言同样必须拒绝。
+func isZeroNetOrCGNAT(ip net.IP) bool {
+	if ip4 := ip.To4(); ip4 != nil {
+		if ip4[0] == 0 {
+			return true // 0.0.0.0/8
+		}
+		if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+			return true // 100.64.0.0/10
+		}
 	}
 	return false
 }
@@ -1258,6 +1429,12 @@ func (s *HTTPStaticServer) hUnzip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SECURITY: 同上。zip 自身是服务器私有文件（DB / FRP 密钥）时拒绝抽取——
+	// 与 hIndex 的私有文件拦截对称（此处若无拦截，把它们改名成 .zip 仍可读取）。
+	if isAccessConfName(filepath.Base(absZip)) || isServerStateName(filepath.Base(absZip)) {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
 	// SECURITY: accessTables 隐藏的 zip 不能借条目抽取逐个读出内容（与 hZip 同族绕过）；
 	// 访问控制文件与服务器私有文件即便被改名为 .zip 也不存在，但保持同规则防御。
 	if fi, err := os.Stat(absZip); err == nil && !fi.IsDir() {
@@ -1266,6 +1443,11 @@ func (s *HTTPStaticServer) hUnzip(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// SECURITY: 沿路径边界剥掉 zip 内部条目的 Content-Type 探测后，仍可能内联渲染
+	// HTML/SVG/XHTML——不加 attachment 时曾构成 H2/H3 同族的存储型 XSS 通道
+	// （zip 内 x.html 经 mime.TypeByExtension 被识别为 text/html 内联执行）。
+	w.Header().Set("Content-Disposition", "attachment")
 
 	ctype := mime.TypeByExtension(filepath.Ext(path))
 	if ctype != "" {
@@ -1295,7 +1477,13 @@ func (s *HTTPStaticServer) hPlist(w http.ResponseWriter, r *http.Request) {
 		path = path[0:len(path)-6] + ".ipa"
 	}
 
-	relPath := s.getRealPath(r)
+	relPath, inside := s.resolveRequestPath(r)
+	if !inside {
+		// SECURITY: hPlist 会打开并解析 zip，解析结果写进下发 plist，因此必须
+		// 与其它读通道一样复核解析结果仍在 Root 内（纵深防御任意文件读）。
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
 	plinfo, err := ipa.ParseIPA(relPath)
 	if err != nil {
 		// parseIPA 的错误可能含服务器绝对路径。
@@ -1324,6 +1512,12 @@ func (s *HTTPStaticServer) hPlist(w http.ResponseWriter, r *http.Request) {
 
 func (s *HTTPStaticServer) hIpaLink(w http.ResponseWriter, r *http.Request) {
 	path := mux.Vars(r)["path"]
+	// SECURITY: 不直接读文件，但 path 会拼进下载页展示与外发 URL；按与其它通道
+	// 相同的规则拒绝访问控制文件与服务器私有文件（实际读取由 hPlist 兜底）。
+	if isAccessConfName(filepath.Base(path)) || isServerStateName(filepath.Base(path)) {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
 	var plistUrl string
 
 	if r.URL.Scheme == "https" {
@@ -2033,6 +2227,11 @@ func checkFilename(name string) error {
 	if isAccessConfName(name) {
 		return errors.New("reserved file name")
 	}
+	// SECURITY: 同理，服务器私有文件（登录 DB、FRP 密钥）也绝不允许经 HTTP 写入——
+	// 曾可用伪造 SQLite 文件覆盖真实凭据库，服务重启后即回退默认 admin/admin。
+	if isServerStateName(name) {
+		return errors.New("reserved file name")
+	}
 	// 拒绝尾部点与空格：Windows 落盘时会剥离，".ghs.yml." 会变成 ".ghs.yml"。
 	if name != strings.TrimRight(name, ". ") {
 		return errors.New("name should not end with dot or space")
@@ -2088,6 +2287,10 @@ var serverStateFiles = []string{
 	"gohttpserver.db-wal",
 	"gohttpserver.db-shm",
 	"frp-encryption.key",
+	// 旧版本遗留的同名状态文件，虽然不再被读取但其内容仍是敏感历史。
+	"auth-state.json",
+	"webdav-accounts.json",
+	"storage-usage.json",
 }
 
 // isServerStateName 判断 name 是否指向服务器私有文件。与 isAccessConfName 同样
@@ -2103,19 +2306,46 @@ func isServerStateName(name string) bool {
 		base := strings.ToUpper(name)
 		// 8.3 短名模式：<≤7 位前缀>~<数字>.<截断到 3 位左右的扩展名>；
 		// gohttpserver.db → GOHTTP~1.DB，gohttpserver.db-wal → GOHTTP~2.DBW/DB-
-		// 形态（截断规则随卷配置浮动），frp-encryption.key → FRP-EN~1.KEY。
-		if idx := strings.IndexByte(base, '~'); idx > 0 && idx <= 7 && len(base) <= 12 {
+		// 形态（截断规则随卷配置浮动），frp-encryption.key → FRP-EN~1.KEY，
+		// webdav-accounts.json → WEBDAV~1.JSO。放宽到 14 以覆盖 ~10 之后的序号。
+		if idx := strings.IndexByte(base, '~'); idx > 0 && idx <= 7 && len(base) <= 14 {
 			rest := base[idx+1:]
 			dot := strings.IndexByte(rest, '.')
 			if dot >= 1 && allDigits(rest[:dot]) {
 				ext := rest[dot+1:]
-				if strings.HasPrefix(ext, "DB") || ext == "KEY" || ext == "WAL" || ext == "SHM" {
+				if strings.HasPrefix(ext, "DB") || ext == "KEY" || ext == "WAL" || ext == "SHM" ||
+					ext == "JSO" || ext == "JSON" {
 					return true
 				}
 			}
 		}
 	}
 	return false
+}
+
+// containsServerStateFile 判断 path 自身或其子树内是否存在服务器私有文件。
+// 用于阻止 DELETE 递归删除：os.RemoveAll 会连带删除目录内的 gohttpserver.db，
+// 服务重启后即回退默认凭据。非递归路径（普通文件）只做一次 base 比较。
+func containsServerStateFile(path string) bool {
+	if isServerStateName(filepath.Base(path)) {
+		return true
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	found := false
+	_ = filepath.WalkDir(path, func(_ string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil || found {
+			return nil
+		}
+		if !d.IsDir() && isServerStateName(d.Name()) {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
 }
 
 // isUnderRoot 在双方共同 Clean 后判断 path 是 root 本身还是其子孙——破坏性文件操作前的纵深防御。
@@ -2140,6 +2370,10 @@ func checkPathSegment(seg string) error {
 	}
 	// 同 checkFilename：.ghs.yml 绝不允许通过 HTTP 写入（含大小写与尾点变体）。
 	if isAccessConfName(seg) {
+		return errors.New("reserved file name")
+	}
+	// 同理：服务器私有文件（登录 DB、FRP 密钥）不被许经任何写通道覆盖。
+	if isServerStateName(seg) {
 		return errors.New("reserved file name")
 	}
 	if seg != strings.TrimRight(seg, ". ") {

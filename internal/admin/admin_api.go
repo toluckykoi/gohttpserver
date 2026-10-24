@@ -447,6 +447,11 @@ func (api *API) handleFRPUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
 }
 
+// handleFRPRevealToken 向已登录会话返回 FRP auth token 明文。
+// 有意为之：--login 目前是单管理员模型，任何已登录会话就是管理员本人，
+// 而管理员必须能读回自己保存过的 token 才能修改其它 FRP 配置（否则改一次
+// serverAddr 就得连同 token 一起重输）。若未来引入多用户/角色模型，
+// 此端点必须改为「仅首次设置时返回」或加二次确认。
 func (api *API) handleFRPRevealToken(w http.ResponseWriter, r *http.Request) {
 	if auth.UserFromLoginSession(r) == nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)

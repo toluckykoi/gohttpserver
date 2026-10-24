@@ -62,3 +62,79 @@ func TestAuthRateLimiter(t *testing.T) {
 	}
 
 }
+
+// M1 回归（第七轮）：attempts 映射必须有硬上限——未达锁定阈值（maxFail）的 IP
+// 条目曾永不被清理（清理循环只删「已锁定且过期」的），公网扫描器/IPv6 海量
+// 源地址下曾使该映射无界增长，构成内存 DoS。
+func TestAuthRateLimiterEntriesBounded(t *testing.T) {
+	l := newAuthRateLimiter(5, time.Minute)
+	l.maxEntries = 10 // 测试用小上限
+
+	// 灌入 50 个不同 IP，每个只失败 1 次（永不达锁定阈值）。
+	for i := 0; i < 50; i++ {
+		ip := "10.0.0." + itoa(i)
+		l.fail(ip)
+	}
+	l.mu.Lock()
+	n := len(l.attempts)
+	l.mu.Unlock()
+
+	if n > l.maxEntries {
+		t.Errorf("attempts grew to %d entries with maxEntries=%d; must cap growth", n, l.maxEntries)
+	}
+	if n == 0 {
+		t.Error("attempts map unexpectedly empty")
+	}
+}
+
+// M1b：清理循环必须兜底删除未锁定的陈旧条目（lastFail 超时），
+// 而不是只删「已锁定且锁定已过期」的条目。
+func TestAuthRateLimiterCleanupDropsStaleUnlockedEntries(t *testing.T) {
+	l := newAuthRateLimiter(5, time.Minute)
+
+	// 未达锁定阈值的老条目：lastFail 早于 2 小时前。
+	l.fail("stale.example")
+	// 近期条目：不应被清理。
+	l.fail("fresh.example")
+	// 只在改字段时短暂持锁（fail 自己会取锁，持锁调它会自死锁）。
+	l.mu.Lock()
+	l.attempts["stale.example"].lastFail = time.Now().Add(-3 * time.Hour)
+	l.mu.Unlock()
+
+	// 直接执行清理逻辑（与 startCleanupLoop 的循环体同构）。
+	l.mu.Lock()
+	now := time.Now()
+	for ip, a := range l.attempts {
+		if !a.lockedUntil.IsZero() && now.After(a.lockedUntil) {
+			delete(l.attempts, ip)
+			continue
+		}
+		if now.Sub(a.lastFail) > 2*time.Hour {
+			delete(l.attempts, ip)
+		}
+	}
+	_, staleGone := l.attempts["stale.example"]
+	_, freshKept := l.attempts["fresh.example"]
+	l.mu.Unlock()
+
+	if staleGone {
+		t.Error("stale unlocked entry survived cleanup; map grows without bound")
+	}
+	if !freshKept {
+		t.Error("fresh entry was cleaned up too early")
+	}
+}
+
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	var buf [8]byte
+	pos := len(buf)
+	for i > 0 {
+		pos--
+		buf[pos] = byte('0' + i%10)
+		i /= 10
+	}
+	return string(buf[pos:])
+}

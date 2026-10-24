@@ -40,23 +40,33 @@ func NewWebdavServer(root string, accounts *WebdavAccountState, usage *UsageStat
 
 // authRateLimiter 是轻量的按 IP 失败计数器：maxFail 次失败后锁定 lockDuration。
 // 结构与 --login 的限流一致；只统计失败，成功即清零。
+// SECURITY: maxEntries 是 attempts 映射的硬上限——未达锁定阈值（maxFail）的 IP
+// 条目曾永不被清理（清理循环只删「已锁定且锁定已过期」的），公网扫描器/IPv6
+// 海量源地址下曾使该映射无界增长形成内存 DoS。装满时拒绝新 IP 而非继续增长。
 type authRateLimiter struct {
-	mu           sync.Mutex
-	attempts     map[string]*authAttempt
-	maxFail      int
-	lockDuration time.Duration
+	mu               sync.Mutex
+	attempts         map[string]*authAttempt
+	maxFail          int
+	lockDuration     time.Duration
+	maxEntries       int
+	saturationLogged bool // 映射已满的摘要日志只打一次，腾出空间后可再打
 }
 
 type authAttempt struct {
 	count       int
+	lastFail    time.Time
 	lockedUntil time.Time
 }
+
+// authRateLimiterMaxEntries 与 login 包的 maxLoginAttemptsEntries 保持同一量级。
+const authRateLimiterMaxEntries = 10000
 
 func newAuthRateLimiter(maxFail int, lockDuration time.Duration) *authRateLimiter {
 	return &authRateLimiter{
 		attempts:     make(map[string]*authAttempt),
 		maxFail:      maxFail,
 		lockDuration: lockDuration,
+		maxEntries:   authRateLimiterMaxEntries,
 	}
 }
 
@@ -82,13 +92,31 @@ func (l *authRateLimiter) fail(ip string) {
 	defer l.mu.Unlock()
 	a, ok := l.attempts[ip]
 	if !ok {
+		// 硬上限：映射满时拒绝记录新 IP 而非继续增长（无界增长曾是内存 DoS 面）。
+		// 不在此处逐条打日志——公网扫描会在瞬间灌满，逐条记录会刷爆 stdout。
+		if len(l.attempts) >= l.maxEntries {
+			l.warnFullOnceLocked()
+			return
+		}
 		a = &authAttempt{}
 		l.attempts[ip] = a
 	}
 	a.count++
+	a.lastFail = time.Now()
 	if a.count >= l.maxFail {
 		a.lockedUntil = time.Now().Add(l.lockDuration)
 	}
+}
+
+// warnFullOnceLocked 在映射首次到达上限时打一条摘要日志，之后静默直到清理腾出空间。
+// 调用方必须持有 l.mu。
+func (l *authRateLimiter) warnFullOnceLocked() {
+	if l.saturationLogged {
+		return
+	}
+	l.saturationLogged = true
+	log.Printf("webdav: rate limit map is full (%d entries); new failure IPs are not tracked "+
+		"until periodic cleanup frees space — existing lockouts still apply", l.maxEntries)
 }
 
 func (l *authRateLimiter) reset(ip string) {
@@ -98,6 +126,9 @@ func (l *authRateLimiter) reset(ip string) {
 }
 
 // startCleanupLoop 定期清理过期条目，防止 attempts 无界增长。
+// SECURITY: 不只删「已锁定且锁定已过期」——失败 1..maxFail-1 次（未达锁定阈值）
+// 的条目曾永不被清理，配合公网扫描即可无界增长。这里对 lastFail 超过 2 小时的
+// 条目兜底删除（与 login 包的 startCleanupLoop 同策略）。
 func (l *authRateLimiter) startCleanupLoop() {
 	go func() {
 		ticker := time.NewTicker(15 * time.Minute)
@@ -108,8 +139,14 @@ func (l *authRateLimiter) startCleanupLoop() {
 			for ip, a := range l.attempts {
 				if !a.lockedUntil.IsZero() && now.After(a.lockedUntil) {
 					delete(l.attempts, ip)
+					continue
+				}
+				if now.Sub(a.lastFail) > 2*time.Hour {
+					delete(l.attempts, ip)
 				}
 			}
+			// 腾出空间后允许再次报告饱和。
+			l.saturationLogged = false
 			l.mu.Unlock()
 		}
 	}()
