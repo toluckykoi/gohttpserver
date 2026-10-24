@@ -1,7 +1,7 @@
 ﻿# @Author      ：幸运锦鲤
 # @Time        : 2026-08-02 18:00:00
 # @version     : powershell
-# @Update time :
+# @Update time : 2026-10-24
 # @Description : gohttpserver 一键安装脚本（Windows 版，对应 install-gohttpserver.sh）
 
 <#
@@ -74,7 +74,7 @@ $DefaultPort  = 8000
 $ListenPort   = 0
 $Repo         = 'toluckykoi/gohttpserver'
 
-# 发布通道: stable（稳定版）或 dev（开发版）
+# 发布通道: stable（稳定版）或 beta（Beta 版）
 $Channel = 'stable'
 # 镜像源: github 或 gitee（根据网络环境自动检测）
 $Mirror  = 'github'
@@ -195,10 +195,10 @@ function Show-Banner {
 function Select-Channel {
     $choice = Read-Menu '选择发布通道' '请选择要使用的发布通道：' @(
         '稳定版 (推荐)',
-        '开发版 (最新功能)'
+        'Beta 版 (最新功能)'
     )
     switch ($choice) {
-        '2' { $script:Channel = 'dev' }
+        '2' { $script:Channel = 'beta' }
         default { $script:Channel = 'stable' }
     }
     Write-Info "已选择通道: $($script:Channel)"
@@ -224,12 +224,13 @@ function Assert-Admin {
 }
 
 # 检测系统架构
+# 返回产物文件名中的架构标识（与 build.sh 的产物命名一致）
 function Get-Arch {
     $arch = $env:PROCESSOR_ARCHITECTURE
     # 32 位 PowerShell 跑在 64 位系统上时，真实架构在 PROCESSOR_ARCHITEW6432
     if ($env:PROCESSOR_ARCHITEW6432) { $arch = $env:PROCESSOR_ARCHITEW6432 }
     switch ($arch) {
-        'AMD64' { return 'amd64' }
+        'AMD64' { return 'x64' }
         'ARM64' { return 'arm64' }
         default {
             Write-Err "不支持的架构: $arch"
@@ -287,43 +288,55 @@ function Test-ProcessRunning {
     return [bool] (Get-Process -Name 'gohttpserver' -ErrorAction SilentlyContinue)
 }
 
+# 将 git tag 转换为产物文件名中的 "版本-通道" 段（与 build.sh 的产物命名规则一致）:
+#   v1.2.0        -> 1.2.0-stable
+#   v1.3.0-beta.1 -> 1.3.0-beta.1
+#   其他（dev/rc 等）-> X.Y.Z-beta
+function Get-VersionChannel {
+    param([string] $Tag)
+    $ver = $Tag.Trim() -replace '^[vV]', ''
+    if ($ver -match '^\d+\.\d+\.\d+$') {
+        return "$ver-stable"
+    } elseif ($ver -match '^\d+\.\d+\.\d+-beta(\.[0-9A-Za-z.]+)?$') {
+        return $ver
+    } elseif ($ver -match '^(\d+\.\d+\.\d+)') {
+        return "$($Matches[1])-beta"
+    } else {
+        return "$ver-beta"
+    }
+}
+
 # 获取下载链接（对应 bash 版的 get_download_url）
 function Get-DownloadUrl {
     param([string] $Arch)
 
-    $fileName = "gohttpserver-win-$Arch.exe"
-    $headers  = @{ 'User-Agent' = 'gohttpserver-installer' }
-    $devPattern = '(?i)(dev|snapshot|pre|alpha|beta|rc)'
+    $headers    = @{ 'User-Agent' = 'gohttpserver-installer' }
+    $betaPattern = '-beta'
 
     if ($script:Mirror -eq 'gitee') {
-        if ($script:Channel -eq 'dev') {
-            Write-Info '从 Gitee 获取最新开发版版本...'
-            $rels = Invoke-RestMethod "https://gitee.com/api/v5/repos/$Repo/releases?page=1&per_page=30" -Headers $headers
-            $tag = ($rels | Where-Object { $_.tag_name -match $devPattern } | Select-Object -First 1).tag_name
-            if (-not $tag) { throw '未找到开发版版本' }
-        } else {
-            Write-Info '从 Gitee 获取最新稳定版本...'
-            $rel = Invoke-RestMethod "https://gitee.com/api/v5/repos/$Repo/releases/latest" -Headers $headers
-            $tag = $rel.tag_name
-            if (-not $tag) { throw '未找到稳定版本' }
-        }
-        Write-Info "版本: $tag"
-        return "https://gitee.com/$Repo/releases/download/$tag/$fileName"
+        $apiBase = "https://gitee.com/api/v5/repos/$Repo/releases"
+        $dlBase  = "https://gitee.com/$Repo/releases/download"
     } else {
-        if ($script:Channel -eq 'dev') {
-            Write-Info '从 GitHub 获取最新开发版版本...'
-            $rels = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases?per_page=30" -Headers $headers
-            $tag = ($rels | Where-Object { $_.tag_name -match $devPattern } | Select-Object -First 1).tag_name
-            if (-not $tag) { throw '未找到开发版版本' }
-        } else {
-            Write-Info '从 GitHub 获取最新稳定版本...'
-            $rel = Invoke-RestMethod "https://api.github.com/repos/$Repo/releases/latest" -Headers $headers
-            $tag = $rel.tag_name
-            if (-not $tag) { throw '未找到稳定版本' }
-        }
-        Write-Info "版本: $tag"
-        return "https://github.com/$Repo/releases/download/$tag/$fileName"
+        $apiBase = "https://api.github.com/repos/$Repo/releases"
+        $dlBase  = "https://github.com/$Repo/releases/download"
     }
+
+    $tag = $null
+    if ($script:Channel -eq 'beta') {
+        Write-Info "从 $($script:Mirror) 获取最新 Beta 版本..."
+        $rels = Invoke-RestMethod "$apiBase?page=1&per_page=30" -Headers $headers
+        $tag = ($rels | Where-Object { $_.tag_name -match $betaPattern } | Select-Object -First 1).tag_name
+        if (-not $tag) { throw '未找到 Beta 版本' }
+    } else {
+        Write-Info "从 $($script:Mirror) 获取最新稳定版本..."
+        $rel = Invoke-RestMethod "$apiBase/latest" -Headers $headers
+        $tag = $rel.tag_name
+        if (-not $tag) { throw '未找到稳定版本' }
+    }
+
+    Write-Info "版本: $tag"
+    $vc = Get-VersionChannel $tag
+    return "$dlBase/$tag/gohttpserver-$vc-windows-$Arch.exe"
 }
 
 # ==========================================================

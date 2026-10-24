@@ -103,7 +103,8 @@ net session >nul 2>&1
 exit /b %errorlevel%
 
 :GetArch
-set "Arch=amd64"
+REM 返回产物文件名中的架构标识（与 build.sh 的产物命名一致）
+set "Arch=x64"
 if "%PROCESSOR_ARCHITECTURE%"=="ARM64" set "Arch=arm64"
 if defined PROCESSOR_ARCHITEW6432 (
     if "%PROCESSOR_ARCHITEW6432%"=="ARM64" set "Arch=arm64"
@@ -151,11 +152,11 @@ echo ==============================================================
 echo   Select Release Channel
 echo ==============================================================
 echo   1) Stable (recommended)
-echo   2) Development (latest features)
+echo   2) Beta (latest features)
 echo.
-set /p channelChoice=Enter option: 
+set /p channelChoice=Enter option:
 if "!channelChoice!"=="2" (
-    set "Channel=dev"
+    set "Channel=beta"
 ) else (
     set "Channel=stable"
 )
@@ -202,17 +203,16 @@ exit /b 0
 
 :GetDownloadUrl
 call :GetArch
-set "FileName=gohttpserver-win-!Arch!.exe"
 set "Tag="
 set "DownloadUrl="
 if "%Mirror%"=="gitee" (
-    if "!Channel!"=="dev" (
+    if "!Channel!"=="beta" (
         set "ApiUrl=https://gitee.com/api/v5/repos/%Repo%/releases?page=1&per_page=30"
     ) else (
         set "ApiUrl=https://gitee.com/api/v5/repos/%Repo%/releases/latest"
     )
 ) else (
-    if "!Channel!"=="dev" (
+    if "!Channel!"=="beta" (
         set "ApiUrl=https://api.github.com/repos/%Repo%/releases?per_page=30"
     ) else (
         set "ApiUrl=https://api.github.com/repos/%Repo%/releases/latest"
@@ -226,8 +226,8 @@ if errorlevel 1 (
 )
 REM Use PowerShell to parse JSON reliably
 set "PsCmd=(Get-Content '%TmpFile%' -Raw | ConvertFrom-Json)"
-if "!Channel!"=="dev" (
-    set "PsCmd=!PsCmd! | ForEach-Object { $_.tag_name } | Where-Object { $_ -match 'dev|snapshot|pre|alpha|beta|rc' } | Select-Object -First 1"
+if "!Channel!"=="beta" (
+    set "PsCmd=!PsCmd! | ForEach-Object { $_.tag_name } | Where-Object { $_ -match '-beta' } | Select-Object -First 1"
 ) else (
     set "PsCmd=!PsCmd!.tag_name"
 )
@@ -239,6 +239,13 @@ if not defined Tag (
     call :WriteErr "Version not found"
     exit /b 1
 )
+REM Convert tag to the version-channel segment of the artifact name
+REM (v1.2.0 -> 1.2.0-stable, v1.3.0-beta.1 -> 1.3.0-beta.1)
+set "VerSegment=!Tag!"
+if /i "!Tag:~0,1!"=="v" set "VerSegment=!Tag:~1!"
+echo !Tag!|findstr /c:"-beta" >nul
+if errorlevel 1 set "VerSegment=!VerSegment!-stable"
+set "FileName=gohttpserver-!VerSegment!-windows-!Arch!.exe"
 call :WriteInfo "Version: !Tag!"
 call :WriteInfo "File: !FileName!"
 if "%Mirror%"=="gitee" (

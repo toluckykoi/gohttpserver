@@ -3,7 +3,7 @@
 # @Author      ：幸运锦鲤
 # @Time        : 2026-07-20 23:55:44
 # @version     : bash
-# @Update time :
+# @Update time : 2026-10-24
 # @Description : gohttpserver 一键安装脚本
 
 
@@ -40,7 +40,7 @@ DB_FILE="$INSTALL_DIR/gohttpserver.db"
 DEFAULT_PORT="8000"
 LISTEN_PORT=""
 REPO="toluckykoi/gohttpserver"
-# 发布通道: stable（稳定版）或 dev（开发版）
+# 发布通道: stable（稳定版）或 beta（Beta 版）
 CHANNEL="stable"
 # 镜像源: github 或 gitee（根据网络环境自动检测）
 MIRROR="github"
@@ -193,11 +193,11 @@ select_channel() {
     local choice
     choice=$(ui_menu "选择发布通道" "请选择要使用的发布通道：" \
         "stable" "稳定版 (推荐)" \
-        "dev" "开发版 (最新功能)")
+        "beta" "Beta 版 (最新功能)")
 
     case "$choice" in
-        dev|2)
-            CHANNEL="dev"
+        beta|2)
+            CHANNEL="beta"
             ;;
         stable|1|"")
             CHANNEL="stable"
@@ -264,23 +264,18 @@ check_systemd() {
 }
 
 # Detect system architecture
+# 返回产物文件名中的架构标识（与 build.sh 的产物命名一致）
 detect_arch() {
     local arch=$(uname -m)
     case $arch in
         x86_64)
-            echo "amd64"
+            echo "x64"
             ;;
         aarch64)
             echo "arm64"
             ;;
-        i386|i686)
-            echo "386"
-            ;;
-        riscv64)
-            echo "riscv64"
-            ;;
         *)
-            log_error "不支持的架构: $arch"
+            log_error "不支持的架构: $arch (仅提供 x64 / arm64 产物)"
             exit 1
             ;;
     esac
@@ -317,66 +312,59 @@ install_dependencies() {
     fi
 }
 
+# 将 git tag 转换为产物文件名中的 "版本-通道" 段（与 build.sh 的产物命名规则一致）:
+#   v1.2.0        -> 1.2.0-stable
+#   v1.3.0-beta.1 -> 1.3.0-beta.1
+#   其他（dev/rc 等）-> X.Y.Z-beta
+version_channel_from_tag() {
+    local ver
+    ver=$(echo "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^[vV]//')
+    if [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "${ver}-stable"
+    elif [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+-beta(\.[0-9A-Za-z.]+)?$ ]]; then
+        echo "$ver"
+    elif [[ "$ver" =~ ^([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+        echo "${BASH_REMATCH[1]}-beta"
+    else
+        echo "${ver}-beta"
+    fi
+}
+
 # Get download URL based on channel and mirror
 get_download_url() {
-    local arch=$1
-    local file_name="gohttpserver-linux-${arch}"
+    local arch=$1 # x64 / arm64
+    local api_base dl_base
 
     if [ "$MIRROR" = "gitee" ]; then
-        # Gitee 镜像
-        if [ "$CHANNEL" = "dev" ]; then
-            # 获取最新的开发版预发布版本
-            log_info "从 Gitee 获取最新开发版版本..." >&2
-            local latest_dev=$(curl -s "https://gitee.com/api/v5/repos/${REPO}/releases" | grep '"tag_name"' | grep -E '(dev|Dev|snapshot|Snapshot|pre|alpha|beta|rc)' | head -1 | sed -e 's/.*"tag_name": *"//' -e 's/".*//')
-
-            if [ -z "$latest_dev" ]; then
-                log_error "未找到开发版版本" >&2
-                return 1
-            fi
-
-            log_info "最新开发版版本: $latest_dev" >&2
-            echo "https://gitee.com/${REPO}/releases/download/${latest_dev}/${file_name}"
-        else
-            # 稳定版：先获取最新版本号
-            log_info "从 Gitee 获取最新稳定版本..." >&2
-            local latest_version=$(curl -s "https://gitee.com/api/v5/repos/${REPO}/releases/latest" | grep '"tag_name"' | head -1 | sed -e 's/.*"tag_name": *"//' -e 's/".*//')
-
-            if [ -z "$latest_version" ]; then
-                log_error "未找到稳定版本" >&2
-                return 1
-            fi
-
-            log_info "最新版本: $latest_version" >&2
-            echo "https://gitee.com/${REPO}/releases/download/${latest_version}/${file_name}"
-        fi
+        api_base="https://gitee.com/api/v5/repos/${REPO}/releases"
+        dl_base="https://gitee.com/${REPO}/releases/download"
     else
-        # GitHub 镜像
-        if [ "$CHANNEL" = "dev" ]; then
-            # 获取最新的开发版预发布版本
-            log_info "从 GitHub 获取最新开发版版本..." >&2
-            local latest_dev=$(curl -s "https://api.github.com/repos/${REPO}/releases" | grep '"tag_name"' | grep -E '(dev|Dev|snapshot|Snapshot|pre|alpha|beta|rc)' | head -1 | sed -e 's/.*"tag_name": *"//' -e 's/".*//')
-
-            if [ -z "$latest_dev" ]; then
-                log_error "未找到开发版版本" >&2
-                return 1
-            fi
-
-            log_info "最新开发版版本: $latest_dev" >&2
-            echo "https://github.com/${REPO}/releases/download/${latest_dev}/${file_name}"
-        else
-            # 稳定版：先获取最新版本号
-            log_info "从 GitHub 获取最新稳定版本..." >&2
-            local latest_version=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | head -1 | sed -e 's/.*"tag_name": *"//' -e 's/".*//')
-
-            if [ -z "$latest_version" ]; then
-                log_error "未找到稳定版本" >&2
-                return 1
-            fi
-
-            log_info "最新版本: $latest_version" >&2
-            echo "https://github.com/${REPO}/releases/download/${latest_version}/${file_name}"
-        fi
+        api_base="https://api.github.com/repos/${REPO}/releases"
+        dl_base="https://github.com/${REPO}/releases/download"
     fi
+
+    local tag
+    if [ "$CHANNEL" = "beta" ]; then
+        log_info "从 ${MIRROR} 获取最新 Beta 版本..." >&2
+        tag=$(curl -s "$api_base" | grep '"tag_name"' | grep -E -- '-beta' | head -1 | sed -e 's/.*"tag_name": *"//' -e 's/".*//')
+    else
+        log_info "从 ${MIRROR} 获取最新稳定版本..." >&2
+        tag=$(curl -s "${api_base}/latest" | grep '"tag_name"' | head -1 | sed -e 's/.*"tag_name": *"//' -e 's/".*//')
+    fi
+
+    if [ -z "$tag" ]; then
+        if [ "$CHANNEL" = "beta" ]; then
+            log_error "未找到 Beta 版本" >&2
+        else
+            log_error "未找到稳定版本" >&2
+        fi
+        return 1
+    fi
+
+    log_info "最新版本: $tag" >&2
+    local vc
+    vc=$(version_channel_from_tag "$tag")
+    echo "${dl_base}/${tag}/gohttpserver-${vc}-linux-${arch}"
 }
 
 # ==========================================================

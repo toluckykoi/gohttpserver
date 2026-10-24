@@ -3,8 +3,8 @@
 # @Author      ：幸运锦鲤
 # @Time        : 2026-07-11 19:18:52
 # @version     : bash
-# @Update time : 2026-08-05
-# @Description : gohttpserver 一键构建脚本
+# @Update time : 2026-10-24
+# @Description : gohttpserver 一键构建脚本（产物名: gohttpserver-版本-通道-系统-架构）
 
 # 用法:
 #   ./build.sh                 # 构建前端 + 多平台 Go 二进制
@@ -67,8 +67,13 @@ gohttpserver 一键构建脚本
   EX_LDFLAGS        追加额外的 Go ldflags（例: EX_LDFLAGS="-s -w"）
 
 构建目标:
-  linux-amd64, linux-arm64, darwin-amd64, darwin-arm64,
-  windows-amd64, windows-arm64
+  linux-x64, linux-arm64, macos-x64, macos-arm64,
+  windows-x64, windows-arm64（Windows 产物带 .exe 后缀）
+
+产物命名:
+  gohttpserver-<版本>-<stable|beta.N>-<系统>-<架构>[.exe]
+  例: gohttpserver-1.2.0-stable-windows-x64.exe
+      gohttpserver-1.3.0-beta.1-macos-arm64
 EOF
 }
 
@@ -168,7 +173,35 @@ if git rev-parse "$VERSION" >/dev/null 2>&1; then
         VERSION="$VERSION.dev$DEVCNT"
     fi
 fi
-echo "VER: $VERSION"
+# 用于产物文件名的版本标识：去掉首尾空白和 "v" 前缀，其他非法字符统一替换为 "-"
+# （例: 干净 tag -> v1.2.0 -> 1.2.0；tag 后有提交 -> v1.2.0.dev3 -> 1.2.0.dev3）
+FILE_VERSION=$(echo "$VERSION" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^[vV]//' -e 's#[^0-9A-Za-z._-]#-#g')
+if [[ -z "$FILE_VERSION" ]]; then
+    FILE_VERSION="0.0.0"
+fi
+
+# 拆分基础版本与发布通道，通道只有 stable / beta 两种:
+#   1.2.0        -> 基础版本 1.2.0，通道 stable
+#   1.3.0-beta.1 -> 基础版本 1.3.0，通道 beta.1
+#   其他情况（tag 后有提交的 dev 构建、rc 等）一律归入 beta 通道，
+#   基础版本只取 X.Y.Z，dev/rc 等后缀不进产物名
+BASE_VERSION=""
+CHANNEL=""
+if [[ "$FILE_VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+    BASE_VERSION="$FILE_VERSION"
+    CHANNEL="stable"
+elif [[ "$FILE_VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-beta(\.[0-9A-Za-z.]+)?$ ]]; then
+    BASE_VERSION="${BASH_REMATCH[1]}"
+    CHANNEL="beta${BASH_REMATCH[2]}"
+elif [[ "$FILE_VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+    BASE_VERSION="${BASH_REMATCH[1]}"
+    CHANNEL="beta"
+else
+    BASE_VERSION="$FILE_VERSION"
+    CHANNEL="beta"
+fi
+
+echo "VER: $VERSION  (产物名: gohttpserver-${BASE_VERSION}-${CHANNEL}-<系统>-<架构>)"
 
 GITCOMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
 BUILDTIME=$(date +%Y/%m/%d-%H:%M:%S)
@@ -187,20 +220,20 @@ log_step "构建多平台二进制"
 mkdir -p dist
 
 build() {
-    local goos=$1 goarch=$2 name=$3
+    local goos=$1 goarch=$2 osname=$3 archname=$4 ext=$5
     echo "  -> $goos/$goarch ..."
     CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch go build \
         -trimpath \
         -ldflags "$LDFLAGS" \
-        -o "dist/gohttpserver-${name}"
+        -o "dist/gohttpserver-${BASE_VERSION}-${CHANNEL}-${osname}-${archname}${ext}"
 }
 
-build linux   amd64 linux-amd64
-build linux   arm64 linux-arm64
-build darwin  amd64 mac-amd64
-build darwin  arm64 mac-arm64
-build windows amd64 win-amd64.exe
-build windows arm64 win-arm64.exe
+build linux   amd64 linux   x64   ""
+build linux   arm64 linux   arm64 ""
+build darwin  amd64 macos   x64   ""
+build darwin  arm64 macos   arm64 ""
+build windows amd64 windows x64   ".exe"
+build windows arm64 windows arm64 ".exe"
 
 # -----------------------------------------------------------------------------
 # 汇总
