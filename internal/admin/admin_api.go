@@ -470,6 +470,8 @@ func (api *API) handleFRPRevealToken(w http.ResponseWriter, r *http.Request) {
 	if cfg != nil {
 		token = cfg.AuthToken
 	}
+	// 密钥明文不得进入浏览器/共享代理缓存。
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"authToken":    token,

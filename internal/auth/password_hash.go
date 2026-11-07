@@ -168,11 +168,22 @@ func (u *Upgrader) TryUpgrade(key string, currentHash string, password string, s
 }
 
 // ErrInvalidPassword 表示密码不满足强度策略。
-var ErrInvalidPassword = errors.New("password must be at least 4 characters")
+var ErrInvalidPassword = errors.New("password must be 8-72 characters")
 
-// ValidatePassword 校验最小长度策略。
+// minPasswordLength 抬高到 8：4 位密码对在线爆破几乎无抵抗，锁定机制只是延缓。
+// 仅约束新设置的密码；既有短密码仍可正常登录。
+const minPasswordLength = 8
+
+// maxPasswordBytes 是 bcrypt 的有效输入上限（超出部分被静默截断）。显式拒绝，
+// 避免「改密成功但登录失败」的错位体验。
+const maxPasswordBytes = 72
+
+// ValidatePassword 校验密码强度策略。
 func ValidatePassword(password string) error {
-	if len(password) < 4 {
+	if len(password) < minPasswordLength {
+		return ErrInvalidPassword
+	}
+	if len(password) > maxPasswordBytes {
 		return ErrInvalidPassword
 	}
 	return nil

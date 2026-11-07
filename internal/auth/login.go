@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -45,12 +46,23 @@ const (
 	maxLoginAttemptsEntries = 10000 // loginAttempts 映射的硬上限
 )
 
+// 默认密码判定缓存（defaultPwdKnown 字段）的三态值。
+const (
+	defaultPwdUnknown int32 = iota // 尚未计算，需做一次 bcrypt
+	defaultPwdTrue                 // 当前凭据仍是 admin/admin
+	defaultPwdFalse                // 已确认不是默认密码
+)
+
 // LoginState 持有由互斥锁保护的内存登录凭据。
 type LoginState struct {
 	mu     sync.RWMutex
 	creds  *loginCredentials
 	db     *sql.DB
 	dbPath string // 保留供测试重开同一数据库验证持久化
+
+	// defaultPwdKnown 缓存 isDefaultPassword 的判定结果。handleAuthStatus 每次
+	// 认证探测都调用它，旧实现每请求全价 bcrypt（~60ms）；凭据变化即失效。
+	defaultPwdKnown atomic.Int32
 
 	rateLimitMu       sync.Mutex
 	loginAttempts     map[string]*loginAttempt // 键为客户端 IP
@@ -164,20 +176,47 @@ func (s *LoginState) upgradePasswordHash(newHash string) {
 		log.Printf("login: failed to save upgraded password hash: %v", err)
 		return
 	}
+	s.invalidateDefaultPasswordCache()
 	log.Println("login: successfully upgraded password hash from SHA-256 to bcrypt")
 }
 
+// isDefaultPassword 判断当前凭据是否仍是 admin/admin。
+// 性能（第 10 轮性能审查）：判定结果按凭据缓存，命中零 bcrypt；未命中时锁内
+// 只快照用户名与哈希，bcrypt 在锁外执行，不阻塞并发登录与改密。
 func (s *LoginState) isDefaultPassword() bool {
+	switch s.defaultPwdKnown.Load() {
+	case defaultPwdTrue:
+		return true
+	case defaultPwdFalse:
+		return false
+	}
+
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.creds == nil {
+	var username, storedHash string
+	if s.creds != nil {
+		username, storedHash = s.creds.Username, s.creds.PasswordSHA
+	}
+	s.mu.RUnlock()
+	if username == "" {
 		return false
 	}
-	if s.creds.Username != defaultUsername {
-		return false
+
+	result := false
+	if username == defaultUsername {
+		ph := NewPasswordHashFromStored(storedHash)
+		result = ph.IsDefaultPassword()
 	}
-	ph := NewPasswordHashFromStored(s.creds.PasswordSHA)
-	return ph.IsDefaultPassword()
+	if result {
+		s.defaultPwdKnown.Store(defaultPwdTrue)
+	} else {
+		s.defaultPwdKnown.Store(defaultPwdFalse)
+	}
+	return result
+}
+
+// invalidateDefaultPasswordCache 在凭据变化后丢弃缓存的默认密码判定。
+func (s *LoginState) invalidateDefaultPasswordCache() {
+	s.defaultPwdKnown.Store(defaultPwdUnknown)
 }
 
 func (s *LoginState) changePassword(old, new string) error {
@@ -204,7 +243,11 @@ func (s *LoginState) changePassword(old, new string) error {
 
 	s.creds.PasswordSHA = newHash
 	s.creds.UpdatedAtUnix = time.Now().Unix()
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		return err
+	}
+	s.invalidateDefaultPasswordCache()
+	return nil
 }
 
 // ChangeUsername 更新存储的用户名；oldName 用于防御会话与磁盘状态不一致时误改他人账号。
@@ -219,7 +262,11 @@ func (s *LoginState) ChangeUsername(oldName, newName string) error {
 	}
 	s.creds.Username = newName
 	s.creds.UpdatedAtUnix = time.Now().Unix()
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		return err
+	}
+	s.invalidateDefaultPasswordCache()
+	return nil
 }
 
 func (s *LoginState) credsUsername() string {
@@ -286,10 +333,14 @@ func (s *LoginState) recordFailedLogin(ip string) {
 
 	attempt, exists := s.loginAttempts[ip]
 	if !exists {
-		// 硬上限：映射满时拒绝新 IP 而非继续增长
+		// 硬上限：映射满时淘汰 lastFail 最旧的条目腾位后正常记录。
+		// SECURITY: 旧实现直接 return——新 IP 的失败不被记录，而 checkRateLimit
+		// 对未知 IP 恒放行，登录限流对新 IP 完全失效（fail-open）。淘汰最旧
+		// 条目不可被攻击者定向利用（最旧条目本就最接近 2 小时清理线）。
 		if len(s.loginAttempts) >= s.maxAttemptEntries {
-			log.Printf("login: rate limit map full (%d entries), rejecting IP %s", s.maxAttemptEntries, ip)
-			return
+			s.evictOldestAttemptLocked()
+			log.Printf("login: rate limit map full (%d entries), evicted oldest entry for new IP %s",
+				s.maxAttemptEntries, ip)
 		}
 		attempt = &loginAttempt{
 			count:    0,
@@ -317,6 +368,22 @@ func (s *LoginState) recordSuccessfulLogin(ip string) {
 	defer s.rateLimitMu.Unlock()
 
 	delete(s.loginAttempts, ip)
+}
+
+// evictOldestAttemptLocked 删除 lastFail 最旧的条目；调用方必须持有 rateLimitMu。
+// 映射至多 maxAttemptEntries 条，全量扫描一次的成本可接受。
+func (s *LoginState) evictOldestAttemptLocked() {
+	var oldestIP string
+	var oldest time.Time
+	first := true
+	for ip, attempt := range s.loginAttempts {
+		if first || attempt.lastFail.Before(oldest) {
+			oldestIP, oldest, first = ip, attempt.lastFail, false
+		}
+	}
+	if !first {
+		delete(s.loginAttempts, oldestIP)
+	}
 }
 
 func (s *LoginState) getRemainingAttempts(ip string) int {
@@ -382,7 +449,13 @@ func isLoginWhitelisted(path string) bool {
 		return true
 	}
 	for _, p := range loginWhitelist {
-		if strings.HasPrefix(path, p) {
+		// SECURITY: 精确名一律整串比较；目录型条目（以 "/" 结尾）才按前缀匹配。
+		// 旧实现无条件 HasPrefix，"/-/login" 会放行 "/-/loginX" 等任意后缀路径，
+		// 使其穿透登录闸门直达文件服务。
+		if path == p {
+			return true
+		}
+		if strings.HasSuffix(p, "/") && strings.HasPrefix(path, p) {
 			return true
 		}
 	}

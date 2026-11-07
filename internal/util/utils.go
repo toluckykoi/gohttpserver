@@ -143,12 +143,18 @@ func isTrustProxyHeaders() bool {
 
 // GetClientIP 提取客户端 IP：仅在 --xheaders 开启时才采信 X-Forwarded-For /
 // X-Real-IP，否则只用 RemoteAddr，避免伪造代理头进行 IP 欺骗。
+//
+// SECURITY: XFF 取最右（最后一个）元素而非最左。append 型反代（nginx
+// $proxy_add_x_forwarded_for）把客户端自带的 XFF 原样保留、真实 IP 追加在
+// 末尾——取最左值时每个伪造 IP 都能开出全新的限流桶并污染审计日志（第 8 轮
+// 审计实证）。取最右值：单层可信代理下即为真实客户端 IP；多层代理下退化为
+// 最内层可信代理的地址，所有客户端共享一个桶——牺牲区分度换取不可伪造。
 func GetClientIP(r *http.Request) string {
 	if isTrustProxyHeaders() {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			// XFF 形如 "client, proxy1, proxy2"，取最原始的客户端
-			if idx := strings.Index(xff, ","); idx != -1 {
-				return strings.TrimSpace(xff[:idx])
+			// XFF 形如 "client, proxy1, proxy2"，最右元素由最近的信任代理写入。
+			if idx := strings.LastIndex(xff, ","); idx != -1 {
+				return strings.TrimSpace(xff[idx+1:])
 			}
 			return strings.TrimSpace(xff)
 		}

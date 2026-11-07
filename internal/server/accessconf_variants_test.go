@@ -17,15 +17,22 @@ func TestAccessConfNameVariants(t *testing.T) {
 		t.Skip("Windows 专属：大小写不敏感与 8.3 短名")
 	}
 	cases := map[string]bool{
-		".ghs.yml":   true,
-		".GHS.YML":   true,
-		".Ghs.Yml":   true,
-		"GHS~1.YML":  true,
-		".ghs.yml.":  false, // checkPathSegment 会先拒绝尾点；isAccessConfName 本身不管
-		"keep.txt":   false,
-		"ghs.yml":    false,
-		"other.yml":  false,
-		"data.GHS~1": false,
+		".ghs.yml":  true,
+		".GHS.YML":  true,
+		".Ghs.Yml":  true,
+		"GHS~1.YML": true,
+		// 第 8 轮审计：尾点/ADS 变体在 Windows 上与原文件同体，必须一并拦截
+		//（旧断言认为 isAccessConfName 不匹配尾点变体，实测可借 ".ghs.yml."
+		// 读取 token，因此行为收紧为匹配）。
+		".ghs.yml.":       true,
+		".ghs.yml ":       true,
+		".ghs.yml::$DATA": true,
+		".GHS.YML::$DATA": true,
+		"keep.txt":        false,
+		"ghs.yml":         false,
+		"other.yml":       false,
+		"data.GHS~1":      false,
+		"keep.txt::$DATA": false,
 	}
 	for name, want := range cases {
 		if got := isAccessConfName(name); got != want {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -58,6 +59,41 @@ func cspNonce() string {
 		return strconv.FormatInt(time.Now().UnixNano(), 36)
 	}
 	return hex.EncodeToString(buf[:])
+}
+
+// unsafeMethods 是浏览器可跨站发起、需要 CSRF 防护的方法。WebDAV 专有动词
+// （MKCOL/MOVE 等）无法由普通 HTML 表单发出，且原生客户端不带 Origin，不列。
+var unsafeMethods = map[string]bool{
+	http.MethodPost:   true,
+	http.MethodPut:    true,
+	http.MethodDelete: true,
+	http.MethodPatch:  true,
+}
+
+// OriginCheckMiddleware 对带 Origin 头的不安全方法请求做同源校验：浏览器发起的
+// 跨站 POST/PUT/DELETE 必带 Origin，其 host 与请求 Host 不一致即拒绝。作为
+// SameSite=Lax 之外的 CSRF 纵深防御，覆盖同站子域与不支持 SameSite 的老客户端。
+// 非浏览器客户端（curl、WebDAV 挂载、rclone）不带 Origin，直接放行。
+func OriginCheckMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if unsafeMethods[r.Method] {
+			if origin := r.Header.Get("Origin"); origin != "" {
+				oj, err := url.Parse(origin)
+				// "null"（沙箱 iframe）或解析不出 host 的 Origin 一律拒绝。
+				if err != nil || oj.Host == "" || !strings.EqualFold(oj.Host, r.Host) {
+					slog.Warn("cross-origin request rejected",
+						slog.String("origin", SanitizeLogInput(origin)),
+						slog.String("host", SanitizeLogInput(r.Host)),
+						slog.String("method", r.Method),
+						slog.String("path", SanitizeLogInput(r.URL.Path)),
+					)
+					http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+					return
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // RequestIDMiddleware 为每个请求生成唯一 ID，写入 context 与 X-Request-ID 响应头。

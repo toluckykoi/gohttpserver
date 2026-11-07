@@ -77,6 +77,12 @@ func OpenDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("enable WAL: %w", err)
 	}
+	// WAL 模式下 NORMAL 是标准组合：写只落 WAL 不逐次 fsync（第 8 轮性能审查，
+	// WebDAV 记账每 PUT 一次写），掉电至多丢失最后几笔提交且不会损坏库。
+	if _, err := db.Exec("PRAGMA synchronous=NORMAL;"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("set synchronous mode: %w", err)
+	}
 	if _, err := db.Exec("PRAGMA foreign_keys=ON;"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("enable foreign_keys: %w", err)

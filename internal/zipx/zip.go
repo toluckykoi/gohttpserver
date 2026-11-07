@@ -2,6 +2,7 @@ package zipx
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -16,6 +17,8 @@ import (
 
 	dkignore "github.com/codeskyblue/dockerignore"
 	"golang.org/x/text/encoding/simplifiedchinese"
+
+	"github.com/codeskyblue/gohttpserver/internal/util"
 )
 
 // maxZipExpansionRatio 限制解压/压缩体积比，超过 100:1 几乎必为 zip 炸弹。
@@ -37,9 +40,20 @@ func sanitizedName(filename string) string {
 }
 
 func statFile(filename string) (info os.FileInfo, reader io.ReadCloser, err error) {
-	info, err = os.Lstat(filename)
-	if err != nil {
-		return
+	return statFileWithInfo(filename, nil)
+}
+
+// statFileWithInfo 与 statFile 相同，但允许调用方传入已取得的 FileInfo：
+// filepath.Walk 回调给出的就是 lstat 结果，直接复用可省去重复 lstat
+// （第 10 轮性能审查）。known 为 nil 时自行 os.Lstat。
+func statFileWithInfo(filename string, known os.FileInfo) (info os.FileInfo, reader io.ReadCloser, err error) {
+	if known != nil {
+		info = known
+	} else {
+		info, err = os.Lstat(filename)
+		if err != nil {
+			return
+		}
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
 		var target string
@@ -59,8 +73,43 @@ func statFile(filename string) (info os.FileInfo, reader io.ReadCloser, err erro
 	return
 }
 
+// storeExts 是「压缩收益趋近于零」的扩展名集合：本就是压缩/高熵容器或媒体
+// （zip/jar/gz/mp4/jpg 等）。对这些条目改用 Store（不压缩），省去整段 deflate
+// CPU，归档体积几乎不变；混合 method 的 zip 是标准格式，通用解压器均支持。
+var storeExts = map[string]bool{
+	// 压缩容器与归档
+	".zip": true, ".jar": true, ".war": true, ".ear": true, ".apk": true,
+	".7z": true, ".rar": true, ".gz": true, ".tgz": true, ".bz2": true,
+	".tbz": true, ".xz": true, ".txz": true, ".zst": true, ".lz4": true,
+	".br": true, ".cab": true, ".iso": true, ".dmg": true,
+	".whl": true, ".nupkg": true, ".docx": true, ".xlsx": true, ".pptx": true,
+	// 图片（已压缩格式）
+	".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true,
+	".avif": true, ".heic": true, ".heif": true, ".jxl": true,
+	// 视频
+	".mp4": true, ".m4v": true, ".mov": true, ".mkv": true, ".webm": true,
+	".avi": true, ".mpg": true, ".mpeg": true, ".ts": true, ".flv": true, ".wmv": true,
+	// 音频（已压缩格式；wav/bmp 等可压格式不在此列）
+	".mp3": true, ".flac": true, ".ogg": true, ".opus": true, ".m4a": true, ".aac": true, ".wma": true,
+}
+
+// zipMethodFor 按条目扩展名选择压缩方法：不可压缩类型用 Store，其余 Deflate。
+func zipMethodFor(name string) uint16 {
+	if storeExts[strings.ToLower(filepath.Ext(name))] {
+		return zip.Store
+	}
+	return zip.Deflate
+}
+
+// Add 以 relpath 为名把 abspath 加入归档；内部自行 lstat。
 func (z *Zip) Add(relpath, abspath string) error {
-	info, rdc, err := statFile(abspath)
+	return z.AddWithInfo(relpath, abspath, nil)
+}
+
+// AddWithInfo 与 Add 相同，但可传入 walk 已给出的 FileInfo 省去重复 lstat；
+// info 为 nil 时行为与 Add 完全一致。
+func (z *Zip) AddWithInfo(relpath, abspath string, info os.FileInfo) error {
+	info, rdc, err := statFileWithInfo(abspath, info)
 	if err != nil {
 		return err
 	}
@@ -74,13 +123,25 @@ func (z *Zip) Add(relpath, abspath string) error {
 	if info.IsDir() {
 		hdr.Name += "/"
 	}
-	hdr.Method = zip.Deflate
+	hdr.Method = zipMethodFor(hdr.Name)
 	writer, err := z.CreateHeader(hdr)
 	if err != nil {
 		return err
 	}
 	_, err = io.Copy(writer, rdc)
 	return err
+}
+
+// zipBufSize 是 zip 写出缓冲的大小：zip.Writer 每次 Write 都会向底层写出，
+// 直连 ResponseWriter 会为每个文件头/数据块产生多次小 syscall。
+const zipBufSize = 64 * 1024
+
+// NewBufferedZip 把 w 包装为带 64 KiB 缓冲的 zip 写入器。返回的 flush 必须在
+// zw.Close() 之后调用，把 central directory 与残尾字节冲给客户端。
+func NewBufferedZip(w io.Writer) (zw *Zip, flush func()) {
+	bw := bufio.NewWriterSize(w, zipBufSize)
+	zw = &Zip{Writer: zip.NewWriter(bw)}
+	return zw, func() { _ = bw.Flush() }
 }
 
 // CompressToZip 将 rootDir 以 .zip 附件形式流式发送给客户端。
@@ -98,8 +159,11 @@ func CompressToZipFiltered(w http.ResponseWriter, rootDir string, filter func(pa
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+zipFileName+`"`)
 
-	zw := &Zip{Writer: zip.NewWriter(w)}
-	defer zw.Close()
+	zw, flush := NewBufferedZip(w)
+	defer func() {
+		zw.Close()
+		flush()
+	}()
 
 	filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
 		// 跳过无法 lstat 的条目，避免解引用 nil info。
@@ -117,7 +181,8 @@ func CompressToZipFiltered(w http.ResponseWriter, rootDir string, filter func(pa
 			// 归档单个文件时避免出现 "." 条目。
 			zipPath = info.Name()
 		}
-		if addErr := zw.Add(zipPath, path); addErr != nil {
+		// walk 已给出 lstat 结果，直接复用省去每文件一次重复 lstat。
+		if addErr := zw.AddWithInfo(zipPath, path, info); addErr != nil {
 			// 首次失败即停止，此时客户端通常已断开。
 			return addErr
 		}
@@ -159,7 +224,8 @@ func ExtractFromZip(zipFile, path string, w io.Writer) (err error) {
 }
 
 // serverStateNames 是服务器私有文件（登录凭据库与 FRP 密钥）。与 server 包的
-// serverStateFiles 保持一致——zipx 不能反向 import server（会成环），改动时需同步。
+// serverStateFiles 保持一致——zipx 不能反向 import server（会成环），改动时需同步；
+// 自定义 --db 文件名经 RegisterServerStateName 动态并入。
 var serverStateNames = []string{
 	"gohttpserver.db",
 	"gohttpserver.db-wal",
@@ -171,17 +237,33 @@ var serverStateNames = []string{
 	"storage-usage.json",
 }
 
-// isServerStateAlias 判断 base 是否为服务器私有文件的等价名（大小写不敏感 +
-// 8.3 短名 + 尾点变体——Windows 落盘时剥离尾点并统一大小写）。解压通道曾可借
-// 伪装名覆盖真实 DB，服务重启后即回退默认 admin/admin 凭据。
-func isServerStateAlias(base string) bool {
-	trimmed := strings.TrimRight(base, ". ")
+// RegisterServerStateName 把额外文件基名（如自定义 --db 的文件名）并入解压
+// 保护名单，须在启动阶段调用。与 server 包的注册入口配套，main 两者都调。
+func RegisterServerStateName(name string) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" || strings.ContainsAny(name, `/\`) {
+		return
+	}
 	for _, n := range serverStateNames {
-		if strings.EqualFold(trimmed, n) {
+		if strings.EqualFold(n, name) {
+			return
+		}
+	}
+	serverStateNames = append(serverStateNames, name)
+}
+
+// isServerStateAlias 判断 base 是否为服务器私有文件的等价名（大小写不敏感 +
+// 8.3 短名 + Windows 名字归一化——尾点变体与 ADS 流名 `::$DATA` 落盘/打开时都与
+// 原文件同体）。解压通道曾可借伪装名覆盖真实 DB，服务重启后即回退默认
+// admin/admin 凭据。
+func isServerStateAlias(base string) bool {
+	base = util.WindowsNormaliseName(base)
+	for _, n := range serverStateNames {
+		if strings.EqualFold(base, n) {
 			return true
 		}
 	}
-	upper := strings.ToUpper(trimmed)
+	upper := strings.ToUpper(base)
 	// 8.3 短名模式：<≤7 位前缀>~<数字>.<扩展名>；gohttpserver.db → GOHTTP~1.DB，
 	// frp-encryption.key → FRP-EN~1.KEY。
 	idx := strings.IndexByte(upper, '~')
@@ -257,12 +339,13 @@ func UnzipFile(ctx context.Context, filename, dest string, onProgress func(idx, 
 // Windows 8.3 短名（GHS~1.YML），以及尾点变体（`.ghs.yml.` 落盘时被剥离为同名）。
 // 不放在 server 包是因为 server 依赖本包，反向引入会成环。
 func accessConfAliases(base string) bool {
-	// 尾部点/空格在 Windows 落盘时会被剥离：先剥再比较。
-	trimmed := strings.TrimRight(base, ". ")
-	if strings.EqualFold(trimmed, ".ghs.yml") || strings.EqualFold(trimmed, ".ghs.yaml") {
+	// Windows 名字归一化：尾部点/空格剥离 + ADS 流名截断（".ghs.yml::$DATA"
+	// 曾绕过仅剥尾点的旧实现，直接覆盖真实配置——第 8 轮审计实证）。
+	base = util.WindowsNormaliseName(base)
+	if strings.EqualFold(base, ".ghs.yml") || strings.EqualFold(base, ".ghs.yaml") {
 		return true
 	}
-	upper := strings.ToUpper(trimmed)
+	upper := strings.ToUpper(base)
 	// 8.3 短名模式：<≤7 位前缀>~<数字>.<扩展名>；.ghs.yml 的短名形如 GHS~1.YML。
 	idx := strings.IndexByte(upper, '~')
 	if idx <= 0 || idx > 7 {

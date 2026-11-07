@@ -38,6 +38,7 @@ import (
 	"github.com/codeskyblue/gohttpserver/internal/store"
 	"github.com/codeskyblue/gohttpserver/internal/util"
 	"github.com/codeskyblue/gohttpserver/internal/webdav"
+	"github.com/codeskyblue/gohttpserver/internal/zipx"
 	"github.com/gorilla/securecookie"
 )
 
@@ -320,6 +321,11 @@ func main() {
 
 	mainRouter.Use(util.RequestIDMiddleware)
 
+	// CSRF 纵深防御：拒绝带跨站 Origin 的 POST/PUT/DELETE/PATCH（浏览器跨站
+	// 写请求必带 Origin，原生客户端不带）。挂在 mainRouter 上以覆盖登录、
+	// 管理 API、WebDAV 与文件处理全部通道。
+	mainRouter.Use(util.OriginCheckMiddleware)
+
 	mainRouter.Use(util.LoggingMiddleware(util.Logger()))
 
 	mainRouter.HandleFunc("/healthz", util.HealthCheckHandler(VERSION)).Methods("GET")
@@ -373,6 +379,16 @@ func main() {
 	if dbPath == "" {
 		dbPath = "gohttpserver.db"
 	}
+	// 自定义 --db 的文件名不在内置保护名单内：若它恰好落在对外服务的 root 下
+	//（例如 --db ./data/config.db），一次 GET 就能拿到凭据库。动态注册进
+	// server / zipx / webdav 三处保护名单，使其与默认 gohttpserver.db 受
+	// 同样的名字变体（大小写/尾点/ADS/8.3）拦截。
+	if gcfg.DB != "" {
+		base := filepath.Base(filepath.ToSlash(filepath.Clean(dbPath)))
+		server.RegisterServerStateName(base)
+		zipx.RegisterServerStateName(base)
+		webdav.RegisterServerStateName(base)
+	}
 	db, err := store.OpenDB(dbPath)
 	if err != nil {
 		slog.Error("open database failed", util.ErrorAttr(err), slog.String("path", dbPath))
@@ -424,6 +440,16 @@ func main() {
 		if frpCfg.LocalPort == 0 {
 			frpCfg.LocalPort = localPort
 		}
+	}
+
+	// SECURITY: oauth2-proxy 的鉴权完全依赖可被任意客户端伪造的 X-Auth-Request-*
+	// 头，下方 loopback 绑定守卫只覆盖直连面；FRP 隧道会把本服务整体发布到公网，
+	// 隧道侧请求同样能伪造这些头直接获得会话身份。两者同时启用等于把服务裸奔
+	// 到公网，拒绝启动并要求运维显式择一（或改用 --login）。
+	if frpEnabled && frpCfg != nil && gcfg.Auth.Type == "oauth2-proxy" {
+		slog.Error("refusing to start: FRP tunnel together with auth-type=oauth2-proxy is insecure",
+			slog.String("reason", "clients reaching the service through the FRP tunnel can forge X-Auth-Request-* headers and gain a session; use --login instead or disable one of the two"))
+		os.Exit(1)
 	}
 
 	if frpCfg != nil {

@@ -2,7 +2,9 @@ package webdav
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/codeskyblue/gohttpserver/internal/auth"
 	storedb "github.com/codeskyblue/gohttpserver/internal/store"
+	"github.com/codeskyblue/gohttpserver/internal/util"
 )
 
 // WebdavAccount 表示一条 WebDAV 凭据：Username 绑定登录用户、密码独立随机，仅存哈希，明文只在创建/重置时返回一次。
@@ -42,9 +45,75 @@ type WebdavAccountState struct {
 	data   *WebdavAccountsFile
 	db     *sql.DB
 	dbPath string // 供测试重开同一 DB 验证持久化
+
+	// 凭据缓存：Basic Auth 客户端每个请求都携带用户名密码，全价 bcrypt
+	//（实测 ~60ms/次）曾使每个 WebDAV 请求都付出一次哈希成本。缓存
+	// (username, password) 的哈希 → 账号 ID，TTL 内命中即零 bcrypt。
+	// 任何账号变更（增删改/改密/哈希升级）经 saveLocked 统一清空。
+	credMu    sync.Mutex
+	credCache map[string]webdavCredEntry
 }
 
-// systemFileNames 中的文件禁止通过 WebDAV 写入或删除。
+// credCacheTTL 是凭据缓存的有效期。所有账号变更路径都会立即清空缓存，
+// TTL 只是外部改动（无进程内失效点）的兜底。
+const credCacheTTL = 5 * time.Minute
+
+type webdavCredEntry struct {
+	accountID string
+	expiresAt time.Time
+}
+
+// credCacheKey 派生缓存键：对 (username, password) 整体做 SHA-256，避免明文
+// 密码驻留内存，也让命中比较不暴露任何可逐字节猜测的原料。
+func credCacheKey(username, password string) string {
+	sum := sha256.Sum256([]byte(username + "\x00" + password))
+	return hex.EncodeToString(sum[:])
+}
+
+// lookupCredCache 返回缓存命中的账号 ID；过期条目顺带剔除。调用方持有 s.mu
+// （读锁即可），账号快照由调用方按 ID 从当前列表读取，因此 RootPath/ReadOnly
+// 等属性始终是最新值。
+func (s *WebdavAccountState) lookupCredCache(username, password string) (string, bool) {
+	s.credMu.Lock()
+	defer s.credMu.Unlock()
+	if s.credCache == nil {
+		return "", false
+	}
+	key := credCacheKey(username, password)
+	entry, ok := s.credCache[key]
+	if !ok {
+		return "", false
+	}
+	if time.Now().After(entry.expiresAt) {
+		delete(s.credCache, key)
+		return "", false
+	}
+	return entry.accountID, true
+}
+
+// storeCredCache 记录一次验证成功的凭据。只在验证成功后写入，错误密码无法
+// 污染缓存；条目数不超过账号数 × 未失效的旧密码轮次，天然有界。
+func (s *WebdavAccountState) storeCredCache(username, password, accountID string) {
+	s.credMu.Lock()
+	defer s.credMu.Unlock()
+	if s.credCache == nil {
+		s.credCache = make(map[string]webdavCredEntry)
+	}
+	s.credCache[credCacheKey(username, password)] = webdavCredEntry{
+		accountID: accountID,
+		expiresAt: time.Now().Add(credCacheTTL),
+	}
+}
+
+// invalidateCredCache 清空凭据缓存。WebdavAccountState 的所有持久化变更都
+// 经过 saveLocked，在此统一失效即可覆盖全部变更点（含密码哈希升级）。
+func (s *WebdavAccountState) invalidateCredCache() {
+	s.credMu.Lock()
+	s.credCache = nil
+	s.credMu.Unlock()
+}
+
+// systemFileNames 中的文件在开启 ProtectSystemFiles 时禁止通过 WebDAV 写入或删除。
 var systemFileNames = map[string]bool{
 	"auth-state.json":      true,
 	"webdav-accounts.json": true,
@@ -52,9 +121,51 @@ var systemFileNames = map[string]bool{
 	"gohttpserver.db":      true,
 	"gohttpserver.db-wal":  true,
 	"gohttpserver.db-shm":  true,
+	"frp-encryption.key":   true, // 第 8 轮审计补：此前漏列，WebDAV 账号可覆盖 FRP 密钥
 	".ghs.yml":             true,
 	"favicon.ico":          true,
 	"favicon.png":          true,
+}
+
+// serverStateFileNames 是无论 ProtectSystemFiles 开关如何都禁止经 WebDAV
+// 读写的服务器私有文件：账号 chroot 默认就是服务根，能读出凭据库/密钥即等同
+// 泄露（第 8 轮审计实证：写保护只拦写，GET 从未受限）。
+var serverStateFileNames = []string{
+	"gohttpserver.db",
+	"gohttpserver.db-wal",
+	"gohttpserver.db-shm",
+	"frp-encryption.key",
+	"auth-state.json",
+	"webdav-accounts.json",
+	"storage-usage.json",
+}
+
+// RegisterServerStateName 把额外文件基名（如自定义 --db 的文件名）并入
+// serverStateFileNames；须在启动阶段调用，与 server/zipx 包的注册入口配套。
+func RegisterServerStateName(name string) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" || strings.ContainsAny(name, `/\`) {
+		return
+	}
+	for _, n := range serverStateFileNames {
+		if strings.EqualFold(n, name) {
+			return
+		}
+	}
+	serverStateFileNames = append(serverStateFileNames, name)
+}
+
+// isServerStateNameWebdav 判断 base 是否为服务器私有文件的等价名（先做 Windows
+// 名字归一化，再大小写不敏感比较——与 util.WindowsNormaliseName 的说明一致，
+// 尾点与 ADS 变体都必须拦）。
+func isServerStateNameWebdav(base string) bool {
+	base = util.WindowsNormaliseName(base)
+	for _, n := range serverStateFileNames {
+		if strings.EqualFold(base, n) {
+			return true
+		}
+	}
+	return false
 }
 
 // LoadWebdavAccounts 从 SQLite 读取 WebDAV 账号状态。
@@ -137,7 +248,10 @@ func generateWebdavID() (string, error) {
 	}
 	// Use simple hex encoding without importing encoding/hex
 	const hexChars = "0123456789abcdef"
-	result := make([]byte, 7) // "wd_" + 6 chars
+	// "wd_"（3 字节）+ 3 字节各产生 2 个十六进制字符（6 字节）= 9 字节。
+	// 旧实现缓冲区只有 7 字节，写入 result[7]/result[8] 必然越界 panic，
+	// 导致 CreateAccount 永远失败（第 8 轮审计实证）。
+	result := make([]byte, 9) // "wd_" + 6 chars
 	result[0] = 'w'
 	result[1] = 'd'
 	result[2] = '_'
@@ -368,23 +482,44 @@ func (s *WebdavAccountState) SyncUsernamesTo(oldName, newName string) (int, erro
 }
 
 // VerifyWebdav 按用户名查账号并校验密码；同名账号可能多个、需全部尝试，且不提前返回以免泄露用户名是否存在。
+//
+// 性能（第 8 轮性能审查）：Basic Auth 每请求携带凭据，全价 bcrypt 实测 ~60ms/次
+// 曾让每个 WebDAV 请求都付出一次哈希成本。TTL 内验证成功的凭据直接从缓存命中，
+// 零 bcrypt；缓存键为 (username, password) 的 SHA-256。
+//
+// 性能（第 10 轮性能审查）：bcrypt 移到 s.mu 之外执行——旧实现缓存未命中时整个
+// 验证过程持有 RLock，并发未命中会烧满 CPU，且管理员账号操作要等所有验证结束。
+// 锁内只拷贝同名账号的值副本（避免与原地改密竞争），验证命中后按 ID 取当前
+// 账号对象返回，RootPath/ReadOnly 等属性不受锁外验证期间变更的影响。
 func (s *WebdavAccountState) VerifyWebdav(username, password string) (WebdavAccount, bool) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	var matched WebdavAccount
-	found := false
-	userMatched := 0
+	cachedID, hasCached := s.lookupCredCache(username, password)
+	var candidates []WebdavAccount
 	for _, acc := range s.data.Accounts {
-		if acc.Username != username {
-			continue
+		if acc.Username == username {
+			candidates = append(candidates, acc) // 值拷贝，脱离锁后 bcrypt 不再触碰共享状态
 		}
-		userMatched++
+	}
+	totalAccounts := len(s.data.Accounts)
+	s.mu.RUnlock()
+
+	if hasCached {
+		if acc, ok := s.accountByID(cachedID); ok {
+			return acc, true
+		}
+		// 缓存指向的账号已不存在：落到慢路径（理论上不可达，变更即失效）。
+	}
+
+	var matchedID string
+	found := false
+	for i := range candidates {
+		acc := candidates[i]
 		ph := auth.NewPasswordHashFromStored(acc.PasswordSHA)
 		if ph.Verify(password, func(newHash string) {
 			// 校验成功后异步把旧哈希升级为 bcrypt。
 			go s.upgradeWebdavPasswordHash(acc.ID, newHash)
 		}) {
-			matched = acc
+			matchedID = acc.ID
 			found = true
 			break
 		}
@@ -392,9 +527,29 @@ func (s *WebdavAccountState) VerifyWebdav(username, password string) (WebdavAcco
 	if !found {
 		// 记录用户名是否命中任何账号，便于区分「用户名错误」与「密码错误」。
 		log.Printf("webdav: verify failed user=%q (accounts with matching username=%d, total accounts=%d)",
-			username, userMatched, len(s.data.Accounts))
+			username, len(candidates), totalAccounts)
+		return WebdavAccount{}, false
 	}
-	return matched, found
+
+	// 命中后重取当前账号：锁外验证期间账号可能已被管理员修改或删除。
+	acc, ok := s.accountByID(matchedID)
+	if !ok {
+		return WebdavAccount{}, false
+	}
+	s.storeCredCache(username, password, matchedID)
+	return acc, true
+}
+
+// accountByID 返回当前列表中指定 ID 的账号快照。
+func (s *WebdavAccountState) accountByID(id string) (WebdavAccount, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, acc := range s.data.Accounts {
+		if acc.ID == id {
+			return acc, true
+		}
+	}
+	return WebdavAccount{}, false
 }
 
 // upgradeWebdavPasswordHash 在登录成功后以 goroutine 将旧 SHA-256 哈希升级为 bcrypt。
@@ -448,10 +603,12 @@ func normaliseWebdavRoot(input string) (string, error) {
 }
 
 // saveLocked 在单个事务中持久化全部账号状态；调用方必须持有 s.mu 写锁。
+// 任何变更（增删改/改密/重命名）都走这里，凭据缓存随之整体失效。
 func (s *WebdavAccountState) saveLocked() error {
 	if s.data == nil {
 		return errors.New("webdav: no state loaded")
 	}
+	s.invalidateCredCache()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -493,7 +650,10 @@ func (s *WebdavAccountState) saveLocked() error {
 
 // isProtectedFilename 判断文件名在开启 ProtectSystemFiles 时是否禁止写入/删除。
 // 大小写不敏感：Windows 上 "GOHTTPSERVER.DB" 与 "gohttpserver.db" 是同一个文件。
+// 比较前先做 Windows 名字归一化——"gohttpserver.db." 与 "gohttpserver.db::$DATA"
+// 落盘/打开时都指向同一文件，精确 EqualFold 曾被绕过（第 8 轮审计实证）。
 func isProtectedFilename(name string) bool {
+	name = util.WindowsNormaliseName(name)
 	for sysName := range systemFileNames {
 		if strings.EqualFold(name, sysName) {
 			return true

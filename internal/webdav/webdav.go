@@ -1,6 +1,7 @@
 package webdav
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -92,11 +93,13 @@ func (l *authRateLimiter) fail(ip string) {
 	defer l.mu.Unlock()
 	a, ok := l.attempts[ip]
 	if !ok {
-		// 硬上限：映射满时拒绝记录新 IP 而非继续增长（无界增长曾是内存 DoS 面）。
-		// 不在此处逐条打日志——公网扫描会在瞬间灌满，逐条记录会刷爆 stdout。
+		// 硬上限：映射满时淘汰 lastFail 最旧的条目腾位后正常记录。
+		// SECURITY: 旧实现直接 return——新 IP 的失败不被记录，而 allow() 对
+		// 未知 IP 恒放行，限流对新 IP 完全失效（fail-open）。淘汰最旧条目
+		// 不可被攻击者定向利用（最旧的条目本就最接近过期）。
 		if len(l.attempts) >= l.maxEntries {
+			l.evictOldestLocked()
 			l.warnFullOnceLocked()
-			return
 		}
 		a = &authAttempt{}
 		l.attempts[ip] = a
@@ -108,6 +111,22 @@ func (l *authRateLimiter) fail(ip string) {
 	}
 }
 
+// evictOldestLocked 删除 lastFail 最旧的条目；调用方必须持有 l.mu。
+// 映射至多 maxEntries 条，全量扫描一次的成本可接受。
+func (l *authRateLimiter) evictOldestLocked() {
+	var oldestIP string
+	var oldest time.Time
+	first := true
+	for ip, a := range l.attempts {
+		if first || a.lastFail.Before(oldest) {
+			oldestIP, oldest, first = ip, a.lastFail, false
+		}
+	}
+	if !first {
+		delete(l.attempts, oldestIP)
+	}
+}
+
 // warnFullOnceLocked 在映射首次到达上限时打一条摘要日志，之后静默直到清理腾出空间。
 // 调用方必须持有 l.mu。
 func (l *authRateLimiter) warnFullOnceLocked() {
@@ -115,8 +134,8 @@ func (l *authRateLimiter) warnFullOnceLocked() {
 		return
 	}
 	l.saturationLogged = true
-	log.Printf("webdav: rate limit map is full (%d entries); new failure IPs are not tracked "+
-		"until periodic cleanup frees space — existing lockouts still apply", l.maxEntries)
+	log.Printf("webdav: rate limit map is full (%d entries); oldest entries are evicted to make room — "+
+		"existing lockouts still apply", l.maxEntries)
 }
 
 func (l *authRateLimiter) reset(ip string) {
@@ -208,6 +227,15 @@ func (s *WebdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 	defer clearQuotaContext(r)
 
+	// PUT 请求体传输失败（客户端中断、网络断开）发生在读取侧，OpenFile 拿不到
+	// 该信息；包装请求体把失败标记注入 context，供 quotaFile.Close 决定是否
+	// 提交临时文件——中断的 PUT 不再把已有文件截断。
+	if r.Method == "PUT" {
+		bts := &bodyTransferState{}
+		r.Body = &errorTrackingBody{rc: r.Body, onErr: bts.markFailed}
+		r = r.WithContext(context.WithValue(r.Context(), bodyTransferKey{}, bts))
+	}
+
 	if r.Method == "PROPFIND" && isWebdavRootPath(r.URL.Path) {
 		s.handlePropfindRoot(w, r)
 		return
@@ -215,13 +243,20 @@ func (s *WebdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 用 Content-Length 预检配额；谎报长度或分块传输的客户端由 quotaFileSystem 的写入后检查兜底。
 	if r.Method == "PUT" && acc.QuotaBytes > 0 {
-		if err := s.preflightPut(r, acc, accountRoot); err != nil {
+		oldSize, targetAbs, err := s.preflightPut(r, acc, accountRoot)
+		if err != nil {
 			status := http.StatusInternalServerError
 			if errors.Is(err, ErrInsufficientCapacity) {
 				status = http.StatusInsufficientStorage // 507
 			}
 			http.Error(w, err.Error(), status)
 			return
+		}
+		// 把预检时 stat 到的旧大小带入请求 context，quotaFileSystem.OpenFile
+		// 对同一目标不再重复 stat（第 10 轮性能审查）。
+		if targetAbs != "" {
+			r = r.WithContext(context.WithValue(r.Context(), putOldSizeKey{},
+				putOldSizeInfo{absPath: targetAbs, size: oldSize}))
 		}
 	}
 
@@ -236,6 +271,17 @@ func (s *WebdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		readOnly:           acc.ReadOnly,
 		protectSystemFiles: acc.ProtectSystemFiles,
 	}
+	// 同文件 COPY（Windows 大小写变体）与全部 MOVE 在进入 gdav 前接管，
+	// 避免其「先删除目标再改名/重建」语义销毁唯一副本或掏空目录。
+	if r.Method == "COPY" {
+		if qfs.handleSameFileCopy(w, r) {
+			return
+		}
+	} else if r.Method == "MOVE" {
+		if qfs.handleMove(w, r) {
+			return
+		}
+	}
 	handler := &gdav.Handler{
 		Prefix:     "/dav/",
 		FileSystem: qfs,
@@ -245,18 +291,26 @@ func (s *WebdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // preflightPut 用 Content-Length 做快速配额预检，写入后的记账由 FileSystem 包装层完成。
-func (s *WebdavServer) preflightPut(r *http.Request, acc WebdavAccount, accountRoot string) error {
+// 返回值 (oldSize, targetAbs) 是预检时 stat 到的目标绝对路径与覆盖前大小，供
+// OpenFile 复用；目标不存在或为目录（非法 PUT 目标）时不复用，返回 ""。
+func (s *WebdavServer) preflightPut(r *http.Request, acc WebdavAccount, accountRoot string) (int64, string, error) {
 	if s.usage == nil || r.ContentLength < 0 {
-		return nil
+		return 0, "", nil
 	}
 	used := s.usage.Get(acc.ID)
 	// 扣除旧文件大小：用 1KB 覆盖 2GB 文件时不应按 +2GB 拒绝。
 	var oldSize int64
+	injectable := false
 	target := filepath.Join(accountRoot, urlPathClean(r.URL.Path))
 	if info, err := os.Stat(target); err == nil && info != nil {
 		oldSize = info.Size()
+		injectable = !info.IsDir()
 	}
-	return preflightQuota(used, acc.QuotaBytes, oldSize, r.ContentLength)
+	err := preflightQuota(used, acc.QuotaBytes, oldSize, r.ContentLength)
+	if injectable {
+		return oldSize, target, err
+	}
+	return 0, "", err
 }
 
 // writeBasicChallenge 设置质询响应头，让 Windows/Finder/RaiDrive 弹出凭据输入框而不是静默失败。
