@@ -44,8 +44,20 @@ export default defineConfig({
       '/': {
         target: 'http://localhost:8000',
         changeOrigin: true,
+        // 后端有 Origin 同源校验（CSRF 防护），dev 代理需把 Origin 重写为后端地址。
+        headers: { origin: 'http://localhost:8000' },
         bypass: (req) => {
-          if (req.url?.startsWith('/@') || req.url?.endsWith('.ts') || req.url?.endsWith('.vue')) {
+          const u = (req.url || '').split('?')[0]
+          // Vite 的整个 base 前缀（入口 HTML、源码模块、依赖、虚拟模块、模板资产
+          // ?import 等）一律由 Vite 伺服；其余（API、文件 JSON、文件内容、下载）
+          // 代理到后端，与生产行为一致。漏掉任何一种都会让模块图卡住——例如
+          // favicon.png?import 被代理到后端时返回 image/png，模块校验直接失败。
+          if (
+            u === '/-/frontend' ||
+            u.startsWith('/-/frontend/') ||
+            u.startsWith('/@') ||
+            u.startsWith('/node_modules/')
+          ) {
             return req.url
           }
           return null

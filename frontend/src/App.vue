@@ -222,6 +222,7 @@ import { useFileStore } from './stores/fileStore'
 import { useTheme } from './composables/useTheme'
 import FileList from './components/FileList.vue'
 import Login from './views/Login.vue'
+import { currentListingPath } from './utils/path'
 import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
 const AdminPanel = defineAsyncComponent(() => import('./views/AdminPanel.vue'))
 const QRCodeModal = defineAsyncComponent(() => import('./components/QrCodeModal.vue'))
@@ -242,7 +243,7 @@ const showAdminPanel = ref(false)
 const userPopoverRef = ref<{ hide: () => void } | null>(null)
 
 const version = computed(() => fileStore.version)
-const currentPath = computed(() => window.location.pathname)
+const currentPath = computed(() => currentListingPath())
 
 // 必须等鉴权探测完成，否则登录页会闪现。
 const showLoginGate = computed(() => {
@@ -262,7 +263,7 @@ const pendingPath = computed(() => {
   if (next && next.startsWith('/') && !next.startsWith('//') && !next.includes('\\')) {
     return next
   }
-  return window.location.pathname || '/'
+  return currentListingPath() || '/'
 })
 
 const isPhone = ref(window.innerWidth < 640)
@@ -325,7 +326,7 @@ function handleShortcut(e: KeyboardEvent) {
 }
 
 function handlePopState() {
-  fileStore.loadFiles(window.location.pathname)
+  fileStore.loadFiles(currentListingPath())
 }
 
 onMounted(async () => {
@@ -333,7 +334,7 @@ onMounted(async () => {
 
   if (!showLoginGate.value) {
     await Promise.all([
-      fileStore.loadFiles(window.location.pathname),
+      fileStore.loadFiles(currentListingPath()),
       fileStore.loadUser(),
       fileStore.loadSystemInfo()
     ])
@@ -373,6 +374,22 @@ onBeforeUnmount(() => {
   transition:
     background-color var(--transition-base),
     border-color var(--transition-base);
+}
+
+/* 顶部品牌渐变线：极细、低存在感，但给页面一个可识别的品牌色锚点。 */
+.app-header::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--el-color-primary) 70%, transparent) 0%,
+    color-mix(in srgb, var(--el-color-primary) 28%, transparent) 40%,
+    transparent 78%);
+  opacity: 0.75;
+  pointer-events: none;
 }
 
 @media (prefers-reduced-transparency: reduce) {

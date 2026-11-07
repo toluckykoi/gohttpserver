@@ -187,12 +187,19 @@
       <el-table-column type="selection" width="40" />
       <el-table-column label="Name" min-width="300" prop="name" sortable="custom">
         <template #default="{ row }">
-          <div
-            class="file-name-cell-wrap"
-            :title="rowClickLabel(row)"
+          <el-tooltip
+            :content="rowClickLabel(row)"
+            placement="top"
+            :show-after="350"
+            :hide-after="0"
+            :offset="7"
+            :enterable="false"
+            popper-class="row-hint-popper"
           >
-            <FileItem :file="row" />
-          </div>
+            <div class="file-name-cell-wrap">
+              <FileItem :file="row" />
+            </div>
+          </el-tooltip>
         </template>
       </el-table-column>
 
@@ -210,7 +217,7 @@
         </template>
       </el-table-column>
 
-      <el-table-column label="Actions" width="120" class-name="col-actions">
+      <el-table-column label="Actions" width="132" class-name="col-actions">
         <template #default="{ row }">
           <div class="action-buttons action-desktop" @click.stop>
             <template v-if="row.type === 'dir'">
@@ -303,7 +310,6 @@
           'mobile-file-card--dir': row.type === 'dir',
           'mobile-file-card--selected': fileStore.selectedFiles.has(row.path)
         }"
-        :title="rowClickLabel(row)"
         @click="handleRowClick(row)"
       >
         <el-checkbox
@@ -327,15 +333,29 @@
             </template>
             <span class="data-mono">{{ formatBytes(row.size) }}</span>
             <span class="mobile-file-sep">·</span>
-            <span>{{ formatMtime(row.mtime) }}</span>
+            <span>{{ formatMtimeMobile(row.mtime) }}</span>
           </div>
         </div>
         <div v-if="!fileStore.selectionMode" class="mobile-file-actions" @click.stop>
+          <!-- 高频操作直达：文件直接下载，文件夹 ZIP 下载 -->
+          <el-tooltip
+            :content="row.type === 'dir' ? 'Download as ZIP' : 'Download'"
+            placement="top"
+            :show-after="350"
+          >
+            <el-button
+              class="mobile-quick-btn"
+              :icon="Download"
+              circle
+              :aria-label="row.type === 'dir' ? 'Download as ZIP' : 'Download'"
+              @click="row.type === 'dir' ? handleDownloadArchive(row) : handleDownload(row)"
+            />
+          </el-tooltip>
           <el-dropdown
             trigger="click"
             @command="(cmd: string) => handleMobileAction(cmd, row)"
           >
-            <el-button :icon="MoreFilled" circle size="small" />
+            <el-button class="mobile-quick-btn" :icon="MoreFilled" circle aria-label="More actions" />
             <template #dropdown>
               <el-dropdown-menu>
                 <template v-if="row.type === 'dir'">
@@ -536,7 +556,10 @@ function iconTileStyle(file: FileItemType) {
   const color = getFileIconColor(file.name, file.type)
   return {
     color,
-    background: `color-mix(in srgb, ${color} 12%, transparent)`
+    background: `linear-gradient(145deg,
+      color-mix(in srgb, ${color} 18%, transparent),
+      color-mix(in srgb, ${color} 7%, transparent))`,
+    boxShadow: `inset 0 0 0 1px color-mix(in srgb, ${color} 14%, transparent)`
   }
 }
 
@@ -655,6 +678,11 @@ function formatMtime(timestamp: number): string {
   return dayjs(timestamp).format('YYYY-MM-DD HH:mm:ss')
 }
 
+/** 移动端卡片专用：固定相对时间，省空间且适合触屏扫读。 */
+function formatMtimeMobile(timestamp: number): string {
+  return dayjs(timestamp).fromNow()
+}
+
 function hasQrCode(file: FileItemType): boolean {
   return shouldHaveQrcode(file.name)
 }
@@ -710,7 +738,8 @@ function handleNavigateImage(target: FileItemType) {
 
 /** Element Plus 的 row-class-name 钩子：设置光标样式并同步勾选列的选中态。 */
 function rowClassName({ row }: { row: FileItemType }): string {
-  const classes = [row.type === 'dir' ? 'row-action-navigate' : 'row-action-select']
+  // file-row 是行级悬停效果（FileItem 图标缩放）的锚点类。
+  const classes = ['file-row', row.type === 'dir' ? 'row-action-navigate' : 'row-action-select']
   if (fileStore.selectedFiles.has(row.path)) {
     classes.push('file-row-selected')
   }
@@ -930,14 +959,17 @@ function handleToggleSelectionMode() {
 
 .panel-card {
   background: color-mix(in srgb, var(--el-bg-color) 80%, transparent);
-  border: 1px solid var(--el-border-color-lighter);
+  border: 1px solid color-mix(in srgb, var(--el-border-color-lighter) 80%, transparent);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm);
+  box-shadow:
+    var(--shadow-sm),
+    0 12px 40px -18px color-mix(in srgb, var(--el-color-primary) 10%, transparent);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   overflow: hidden;
   transition: background-color var(--transition-base),
-              border-color var(--transition-base);
+              border-color var(--transition-base),
+              box-shadow var(--transition-base);
 }
 
 .toolbar {
@@ -1287,7 +1319,7 @@ function handleToggleSelectionMode() {
   --el-table-border: none;
   --el-table-row-hover-bg-color: color-mix(
     in srgb,
-    var(--el-color-primary) 4%,
+    var(--el-color-primary) 5%,
     transparent
   );
   --el-table-selected-row-bg-color: color-mix(
@@ -1316,39 +1348,34 @@ function handleToggleSelectionMode() {
 }
 
 .file-list-container :deep(.el-table__body td) {
-  padding: 8px 0;
-  border-bottom: 1px solid color-mix(in srgb, var(--el-border-color-lighter) 60%, transparent);
+  padding: 7px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--el-border-color-lighter) 55%, transparent);
   background: transparent;
-  transition: background-color var(--transition-base);
-  /* 锁定 43px，让行高保持紧凑。 */
-  height: 43px !important;
-  max-height: 43px !important;
+  transition: background-color var(--transition-base),
+              box-shadow var(--transition-base);
+  /* 锁定 42px：紧凑行距，内容（28px 芯片/按钮）上下各留 7px。 */
+  height: 42px !important;
+  max-height: 42px !important;
 }
 
 .file-list-container :deep(.el-table__body tr) {
   cursor: pointer;
   transition: background-color var(--transition-base);
-  height: 43px !important;
-  max-height: 43px !important;
+  height: 42px !important;
+  max-height: 42px !important;
 }
 
 /* 紧凑行专用 line-height。 */
 .file-list-container :deep(.el-table .cell) {
-  line-height: 24px;
-  max-height: 24px;
+  line-height: 28px;
+  max-height: 28px;
   overflow: hidden;
 }
 
 .file-list-container :deep(.el-table-column--selection > .cell),
 .file-list-container :deep(.col-actions .cell) {
-  height: 24px;
-  max-height: 24px;
-}
-
-.file-list-container :deep(.col-actions .el-button) {
-  height: 24px;
-  min-height: 24px;
-  padding: 0 6px;
+  height: 28px;
+  max-height: 28px;
 }
 
 .file-list-container :deep(.el-table__body td .cell) {
@@ -1376,8 +1403,15 @@ function handleToggleSelectionMode() {
   transition: background-color var(--transition-base);
 }
 
-.file-list-container :deep(.el-table__body tr:hover > td) {
-  background: var(--el-fill-color-light);
+/* 行悬停：干净的统一色调（EP 悬停变量负责 background-color）+
+   左侧主题色强调条。不叠加渐变——渐变压在 EP 底色上会形成浑浊的两段色。 */
+.file-list-container :deep(.el-table__body tr:hover > td.el-table__cell:first-child) {
+  box-shadow: inset 3px 0 0 0 var(--el-color-primary);
+}
+
+/* 选中行常驻强调条，与悬停的视觉语言保持一致。 */
+.file-list-container :deep(.el-table__body tr.file-row-selected > td.el-table__cell:first-child) {
+  box-shadow: inset 3px 0 0 0 var(--el-color-primary);
 }
 
 .file-list-container :deep(.el-table__body tr:last-child td) {
@@ -1392,7 +1426,7 @@ function handleToggleSelectionMode() {
   font-family: var(--font-mono);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
-  color: var(--el-text-color-regular);
+  color: var(--el-text-color-secondary);
 }
 
 .data-muted {
@@ -1411,7 +1445,7 @@ function handleToggleSelectionMode() {
 
 .action-buttons {
   display: flex;
-  gap: 4px;
+  gap: 6px;
   flex-wrap: nowrap;
 }
 
@@ -1447,16 +1481,18 @@ function handleToggleSelectionMode() {
   display: inline-flex;
 }
 
+/* 操作按钮：常显芯片式——默认即有柔和底色与描边，一眼可见；
+   行悬停时浮起，按钮自身悬停染上主题色。 */
 .action-buttons :deep(.row-action-btn.el-button) {
-  width: 24px;
-  height: 24px;
-  min-height: 24px;
+  width: 26px;
+  height: 26px;
+  min-height: 26px;
   padding: 0;
   margin-left: 0;
-  border-radius: 6px;
-  color: var(--el-text-color-secondary);
-  background: transparent;
-  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--el-text-color-regular);
+  background: color-mix(in srgb, var(--el-fill-color) 75%, transparent);
+  border: 1px solid color-mix(in srgb, var(--el-border-color-lighter) 90%, transparent);
   box-shadow: none;
   transition: color var(--transition-base),
               border-color var(--transition-base),
@@ -1465,27 +1501,29 @@ function handleToggleSelectionMode() {
               transform var(--transition-fast);
 }
 
-/* 行悬停时图标背后浮现底色。 */
+/* 行悬停/选中：按钮浮起，更贴近可点击的实体感。 */
 .file-list-container :deep(.el-table__body tr:hover .row-action-btn.el-button),
 .file-list-container :deep(.el-table__body tr.file-row-selected .row-action-btn.el-button) {
-  color: var(--el-text-color-regular);
+  color: var(--el-text-color-primary);
   background: var(--el-bg-color);
-  border-color: var(--el-border-color-lighter);
-  box-shadow: var(--shadow-xs);
+  border-color: var(--el-border-color);
+  box-shadow: var(--shadow-sm);
 }
 
 .action-buttons :deep(.row-action-btn.el-button:hover) {
   color: var(--el-color-primary);
-  border-color: color-mix(in srgb, var(--el-color-primary) 35%, transparent);
-  background: color-mix(in srgb, var(--el-color-primary) 6%, var(--el-bg-color));
+  border-color: color-mix(in srgb, var(--el-color-primary) 45%, transparent);
+  background: color-mix(in srgb, var(--el-color-primary) 9%, var(--el-bg-color));
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--el-color-primary) 16%, transparent);
 }
 
 .action-buttons :deep(.row-action-btn.el-button:active) {
-  transform: scale(0.9);
+  transform: scale(0.92) translateY(0);
 }
 
 .action-buttons :deep(.row-action-btn .el-icon) {
-  font-size: 14px;
+  font-size: 15px;
 }
 
 .empty-state {
@@ -1602,12 +1640,12 @@ function handleToggleSelectionMode() {
 .mobile-file-card {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 14px 16px;
+  gap: 12px;
+  padding: 11px 14px;
   background: color-mix(in srgb, var(--el-bg-color) 80%, transparent);
   border: 1px solid var(--el-border-color-lighter);
   border-radius: var(--radius-lg);
-  margin-bottom: 8px;
+  margin-bottom: 7px;
   cursor: pointer;
   box-shadow: var(--shadow-xs);
   transition:
@@ -1658,8 +1696,8 @@ function handleToggleSelectionMode() {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 44px;
-  height: 44px;
+  width: 40px;
+  height: 40px;
   border-radius: var(--radius-md);
   /* color 与 background 由 iconTileStyle 按文件类型注入 */
   transition: background var(--transition-base),
@@ -1671,8 +1709,8 @@ function handleToggleSelectionMode() {
 }
 
 .mobile-file-glyph {
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   display: block;
 }
 
@@ -1713,17 +1751,56 @@ function handleToggleSelectionMode() {
 
 .mobile-file-actions {
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 快捷按钮（下载 / 更多）：36px 触摸目标，芯片式与桌面行按钮同一视觉语言。 */
+.mobile-quick-btn {
+  width: 36px;
+  height: 36px;
+  min-height: 36px;
+  padding: 0;
+  border-radius: var(--radius-pill);
+  color: var(--el-text-color-regular);
+  background: color-mix(in srgb, var(--el-fill-color) 75%, transparent);
+  border: 1px solid color-mix(in srgb, var(--el-border-color-lighter) 90%, transparent);
+  transition: color var(--transition-base),
+              border-color var(--transition-base),
+              background var(--transition-base),
+              transform var(--transition-fast);
+}
+
+.mobile-quick-btn:active {
+  transform: scale(0.92);
+  color: var(--el-color-primary);
+  border-color: color-mix(in srgb, var(--el-color-primary) 45%, transparent);
+  background: color-mix(in srgb, var(--el-color-primary) 9%, var(--el-bg-color));
+}
+
+@media (pointer: fine) {
+  .mobile-quick-btn:hover {
+    color: var(--el-color-primary);
+    border-color: color-mix(in srgb, var(--el-color-primary) 45%, transparent);
+    background: color-mix(in srgb, var(--el-color-primary) 9%, var(--el-bg-color));
+  }
 }
 
 @media (max-width: 400px) {
   .mobile-file-card {
-    padding: 12px 14px;
+    padding: 10px 12px;
     gap: 10px;
   }
 
   .mobile-file-icon {
-    width: 38px;
-    height: 38px;
+    width: 36px;
+    height: 36px;
+  }
+
+  .mobile-file-glyph {
+    width: 18px;
+    height: 18px;
   }
 
   .mobile-file-name {
@@ -1732,6 +1809,12 @@ function handleToggleSelectionMode() {
 
   .mobile-file-meta {
     font-size: 11px;
+  }
+
+  .mobile-quick-btn {
+    width: 34px;
+    height: 34px;
+    min-height: 34px;
   }
 }
 </style>

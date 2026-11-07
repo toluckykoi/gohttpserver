@@ -57,3 +57,14 @@ export function getQueryString(name: string, search: string = window.location.se
   const urlParams = new URLSearchParams(search)
   return urlParams.get(name)
 }
+
+/** 当前目录路径：dev server 下 pathname 带 Vite base 前缀（/-/frontend/），需剥掉。 */
+export function currentListingPath(): string {
+  const base = import.meta.env.BASE_URL
+  const path = window.location.pathname
+  if (base && base !== '/' && (path === base || path.startsWith(base))) {
+    const stripped = path.slice(base.length)
+    return stripped.startsWith('/') ? stripped : '/' + stripped
+  }
+  return path || '/'
+}

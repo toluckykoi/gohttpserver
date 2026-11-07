@@ -22,9 +22,13 @@ const props = defineProps<Props>()
 
 const iconPaths = computed(() => getFileIconPaths(props.file.name, props.file.type))
 const iconColor = computed(() => getFileIconColor(props.file.name, props.file.type))
+/* 渐变底 + 同色细边框：比纯色块更有体积感，且在明暗主题下都成立。 */
 const chipStyle = computed(() => ({
   color: iconColor.value,
-  background: `color-mix(in srgb, ${iconColor.value} 12%, transparent)`
+  background: `linear-gradient(145deg,
+    color-mix(in srgb, ${iconColor.value} 18%, transparent),
+    color-mix(in srgb, ${iconColor.value} 7%, transparent))`,
+  boxShadow: `inset 0 0 0 1px color-mix(in srgb, ${iconColor.value} 14%, transparent)`
 }))
 </script>
 
@@ -33,23 +37,28 @@ const chipStyle = computed(() => ({
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 24px;
+  height: 28px;
 }
 
 .file-icon-chip {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
   flex-shrink: 0;
-  border-radius: 7px;
+  border-radius: 8px;
   transition: transform var(--transition-base);
 }
 
+.file-row:hover .file-icon-chip,
+.file-name-cell:hover .file-icon-chip {
+  transform: scale(1.08);
+}
+
 .file-icon-glyph {
-  width: 14px;
-  height: 14px;
+  width: 15px;
+  height: 15px;
   display: block;
 }
 
