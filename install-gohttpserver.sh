@@ -312,22 +312,12 @@ install_dependencies() {
     fi
 }
 
-# 将 git tag 转换为产物文件名中的 "版本-通道" 段（与 build.sh 的产物命名规则一致）:
-#   v1.2.0        -> 1.2.0-stable
+# 将 git tag 转换为产物文件名中的版本号（与 build.sh 的产物命名规则一致）:
+#   v1.2.0        -> 1.2.0
 #   v1.3.0-beta.1 -> 1.3.0-beta.1
-#   其他（dev/rc 等）-> X.Y.Z-beta
-version_channel_from_tag() {
-    local ver
-    ver=$(echo "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^[vV]//')
-    if [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        echo "${ver}-stable"
-    elif [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+-beta(\.[0-9A-Za-z.]+)?$ ]]; then
-        echo "$ver"
-    elif [[ "$ver" =~ ^([0-9]+\.[0-9]+\.[0-9]+) ]]; then
-        echo "${BASH_REMATCH[1]}-beta"
-    else
-        echo "${ver}-beta"
-    fi
+# 规则：去掉首尾空白和 v 前缀，非法字符统一替换为 -
+version_from_tag() {
+    echo "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^[vV]//' -e 's#[^0-9A-Za-z._-]#-#g'
 }
 
 # Get download URL based on channel and mirror
@@ -362,9 +352,10 @@ get_download_url() {
     fi
 
     log_info "最新版本: $tag" >&2
-    local vc
-    vc=$(version_channel_from_tag "$tag")
-    echo "${dl_base}/${tag}/gohttpserver-${vc}-linux-${arch}"
+    local ver
+    ver=$(version_from_tag "$tag")
+    # 产物名: gohttpserver-<版本号>-<系统>-<架构>
+    echo "${dl_base}/${tag}/gohttpserver-${ver}-linux-${arch}"
 }
 
 # ==========================================================

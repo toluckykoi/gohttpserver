@@ -470,11 +470,12 @@ server {
 2、运行程序
 
 ```bash
+# 产物命名为 gohttpserver-<版本号>-<系统>-<架构>[.exe]
 # 命令格式
-./dist/gohttpserver-win-amd64.exe -r 共享文件夹 --addr IP:端口 --启动参数
+./dist/gohttpserver-1.3.0-windows-x64.exe -r 共享文件夹 --addr IP:端口 --启动参数
 
 # 例如 windows 中运行
-./dist/gohttpserver-win-amd64.exe -r ./testdata --addr 0.0.0.0:8000 --login
+./dist/gohttpserver-1.3.0-windows-x64.exe -r ./testdata --addr 0.0.0.0:8000 --login
 ```
 
 ## 支持

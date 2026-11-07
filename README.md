@@ -485,11 +485,12 @@ Search follows Google-like universal format. Keywords are space-separated, and a
 2. Run the program:
 
    ```bash
+   # Artifacts are named gohttpserver-<version>-<os>-<arch>[.exe]
    # Command format
-   ./dist/gohttpserver-win-amd64.exe -r <shared_folder> --addr <IP>:<port> --<flags>
+   ./dist/gohttpserver-1.3.0-windows-x64.exe -r <shared_folder> --addr <IP>:<port> --<flags>
 
    # Example: run on Windows
-   ./dist/gohttpserver-win-amd64.exe -r ./testdata --addr 0.0.0.0:8000 --login
+   ./dist/gohttpserver-1.3.0-windows-x64.exe -r ./testdata --addr 0.0.0.0:8000 --login
    ```
 
 ## Support

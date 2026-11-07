@@ -288,22 +288,13 @@ function Test-ProcessRunning {
     return [bool] (Get-Process -Name 'gohttpserver' -ErrorAction SilentlyContinue)
 }
 
-# 将 git tag 转换为产物文件名中的 "版本-通道" 段（与 build.sh 的产物命名规则一致）:
-#   v1.2.0        -> 1.2.0-stable
+# 将 git tag 转换为产物文件名中的版本号（与 build.sh 的产物命名规则一致）:
+#   v1.2.0        -> 1.2.0
 #   v1.3.0-beta.1 -> 1.3.0-beta.1
-#   其他（dev/rc 等）-> X.Y.Z-beta
-function Get-VersionChannel {
+# 规则：去掉首尾空白和 v 前缀，非法字符统一替换为 -
+function Get-VersionFromTag {
     param([string] $Tag)
-    $ver = $Tag.Trim() -replace '^[vV]', ''
-    if ($ver -match '^\d+\.\d+\.\d+$') {
-        return "$ver-stable"
-    } elseif ($ver -match '^\d+\.\d+\.\d+-beta(\.[0-9A-Za-z.]+)?$') {
-        return $ver
-    } elseif ($ver -match '^(\d+\.\d+\.\d+)') {
-        return "$($Matches[1])-beta"
-    } else {
-        return "$ver-beta"
-    }
+    return $Tag.Trim() -replace '^[vV]', '' -replace '[^0-9A-Za-z._-]', '-'
 }
 
 # 获取下载链接（对应 bash 版的 get_download_url）
@@ -335,8 +326,9 @@ function Get-DownloadUrl {
     }
 
     Write-Info "版本: $tag"
-    $vc = Get-VersionChannel $tag
-    return "$dlBase/$tag/gohttpserver-$vc-windows-$Arch.exe"
+    $ver = Get-VersionFromTag $tag
+    # 产物名: gohttpserver-<版本号>-<系统>-<架构>.exe
+    return "$dlBase/$tag/gohttpserver-$ver-windows-$Arch.exe"
 }
 
 # ==========================================================

@@ -239,13 +239,12 @@ if not defined Tag (
     call :WriteErr "Version not found"
     exit /b 1
 )
-REM Convert tag to the version-channel segment of the artifact name
-REM (v1.2.0 -> 1.2.0-stable, v1.3.0-beta.1 -> 1.3.0-beta.1)
-set "VerSegment=!Tag!"
-if /i "!Tag:~0,1!"=="v" set "VerSegment=!Tag:~1!"
-echo !Tag!|findstr /c:"-beta" >nul
-if errorlevel 1 set "VerSegment=!VerSegment!-stable"
-set "FileName=gohttpserver-!VerSegment!-windows-!Arch!.exe"
+REM Convert tag to the version part of the artifact name
+REM (v1.2.0 -> 1.2.0, v1.3.0-beta.1 -> 1.3.0-beta.1)
+REM Artifact name: gohttpserver-<version>-<os>-<arch>.exe
+set "TagVersion=!Tag!"
+if /i "!Tag:~0,1!"=="v" set "TagVersion=!Tag:~1!"
+set "FileName=gohttpserver-!TagVersion!-windows-!Arch!.exe"
 call :WriteInfo "Version: !Tag!"
 call :WriteInfo "File: !FileName!"
 if "%Mirror%"=="gitee" (

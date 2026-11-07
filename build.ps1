@@ -1,8 +1,8 @@
 ﻿# @Author      ：幸运锦鲤
 # @Time        : 2026-07-11 19:18:52
 # @version     : powershell
-# @Update time : 2026-08-05
-# @Description : gohttpserver 一键构建脚本
+# @Update time : 2026-11-07
+# @Description : gohttpserver 一键构建脚本（产物名: gohttpserver-版本-系统-架构[.exe]）
 
 <#
 .SYNOPSIS
@@ -68,8 +68,13 @@ gohttpserver 一键构建脚本 (PowerShell)
   EX_LDFLAGS      追加额外的 Go ldflags（例: `$env:EX_LDFLAGS="-s -w"）
 
 构建目标:
-  linux-amd64, linux-arm64, darwin-amd64, darwin-arm64,
-  windows-amd64, windows-arm64
+  linux-x64, linux-arm64, macos-x64, macos-arm64,
+  windows-x64, windows-arm64
+
+产物命名:
+  gohttpserver-<版本号>-<系统>-<架构>[.exe]
+  例: gohttpserver-1.3.0-windows-x64.exe
+      gohttpserver-1.3.0-macos-arm64
 "@
     Write-Host $help
 }
@@ -182,6 +187,11 @@ if (Invoke-GitSafe "rev-parse $Version") {
 }
 Write-Host "VER: $Version"
 
+# 用于产物文件名的版本号：去掉首尾空白和 v 前缀，其他非法字符统一替换为 -
+# （例: v1.2.0 -> 1.2.0；v1.2.0.dev3 -> 1.2.0.dev3）
+$FileVersion = $Version.Trim() -replace '^[vV]', '' -replace '[^0-9A-Za-z._-]', '-'
+if (-not $FileVersion) { $FileVersion = '0.0.0' }
+
 $GitCommit = Invoke-GitSafe 'rev-parse HEAD'
 if (-not $GitCommit) { $GitCommit = 'unknown' }
 $BuildTime = (Get-Date).ToString('yyyy/MM/dd-HH:mm:ss')
@@ -199,18 +209,19 @@ Write-Step '构建多平台二进制'
 
 if (-not (Test-Path 'dist')) { New-Item -ItemType Directory -Path 'dist' | Out-Null }
 
-# 目标定义: GOOS, GOARCH, 输出文件名后缀
+# 目标定义: GOOS, GOARCH, 系统名, 架构名, 后缀
 $Targets = @(
-    @{ GOOS = 'linux';   GOARCH = 'amd64'; Name = 'linux-amd64' },
-    @{ GOOS = 'linux';   GOARCH = 'arm64'; Name = 'linux-arm64' },
-    @{ GOOS = 'darwin';  GOARCH = 'amd64'; Name = 'mac-amd64' },
-    @{ GOOS = 'darwin';  GOARCH = 'arm64'; Name = 'mac-arm64' },
-    @{ GOOS = 'windows'; GOARCH = 'amd64'; Name = 'win-amd64.exe' },
-    @{ GOOS = 'windows'; GOARCH = 'arm64'; Name = 'win-arm64.exe' }
+    @{ GOOS = 'linux';   GOARCH = 'amd64'; OSName = 'linux';   ArchName = 'x64';   Ext = '' },
+    @{ GOOS = 'linux';   GOARCH = 'arm64'; OSName = 'linux';   ArchName = 'arm64'; Ext = '' },
+    @{ GOOS = 'darwin';  GOARCH = 'amd64'; OSName = 'macos';   ArchName = 'x64';   Ext = '' },
+    @{ GOOS = 'darwin';  GOARCH = 'arm64'; OSName = 'macos';   ArchName = 'arm64'; Ext = '' },
+    @{ GOOS = 'windows'; GOARCH = 'amd64'; OSName = 'windows'; ArchName = 'x64';   Ext = '.exe' },
+    @{ GOOS = 'windows'; GOARCH = 'arm64'; OSName = 'windows'; ArchName = 'arm64'; Ext = '.exe' }
 )
 
 foreach ($t in $Targets) {
-    $outFile = "dist/gohttpserver-$($t.Name)"
+    # 产物名: gohttpserver-<版本号>-<系统>-<架构>[.exe]
+    $outFile = "dist/gohttpserver-$FileVersion-$($t.OSName)-$($t.ArchName)$($t.Ext)"
     Write-Host "  -> $($t.GOOS)/$($t.GOARCH) ..."
 
     $env:CGO_ENABLED = '0'
