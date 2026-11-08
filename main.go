@@ -101,14 +101,14 @@ var (
 	SITE      = "https://github.com/codeskyblue/gohttpserver"
 )
 
-// updateServerConfig 是内置的自我更新配置：更新服务器信息直接写入代码，
-// 不再通过配置文件或命令行参数设置。私有软件的 Bearer 令牌仍可通过
-// GHS_UPDATE_TOKEN 环境变量注入。BaseURL 置空可整体禁用更新功能。
+// updateServerConfig 是内置的自我更新配置；Bearer 令牌可经 GHS_UPDATE_TOKEN 注入，BaseURL 置空则禁用更新。
+// 更新源同时支持 http/https（明文 HTTP 启动时仅告警）；有条件时建议换成 https:// 以
+// 消除包与 SHA-256 被链路中间人同时替换的风险。
 var updateServerConfig = update.Options{
 	BaseURL: "http://update.toluckykoi.com:50003/",
 	App:     "gohttpserver",
 	Channel: "stable",
-	// package_type 上报值必须与 update_core 后台登记的完全一致，否则拿不到任何包。
+	// package_type 必须与 update_core 后台登记一致，否则拿不到包。
 	PackageTypes: map[string]string{
 		"windows": "exe",
 		"linux":   "bin",
@@ -206,8 +206,8 @@ func fixPrefix(prefix string) string {
 	return prefix
 }
 
-// cors 应用 --cors-origins 配置的策略：未设置=仅同源，'*'=允许所有（不安全），
-// 否则只回显列出的 origin。OPTIONS 预检直接应答，不经过认证链。
+// cors 按 --cors-origins 应用策略：未设置=仅同源，'*'=允许所有，否则只回显列出的 origin。
+// OPTIONS 预检直接应答，不经过认证链。
 func cors(allowedOrigins []string) func(http.Handler) http.Handler {
 	allowAll := false
 	allowSet := make(map[string]bool, len(allowedOrigins))
@@ -278,8 +278,7 @@ func main() {
 		Format: util.LogFormat(gcfg.LogFormat),
 	})
 
-	// --login 隐含上传/删除/编辑权限，且解析完 flag 才生效，因此
-	// `--login --no-upload` 仍然是可写的：只读认证服务请改用其它 auth-type。
+	// --login 隐含开启上传/删除/编辑，`--login --no-upload` 仍可写；只读服务请用其它 auth-type。
 	if gcfg.Login {
 		gcfg.Upload = true
 		gcfg.Delete = true
@@ -297,6 +296,16 @@ func main() {
 	if gcfg.Prefix != "" {
 		slog.Info("url prefix configured", slog.String("prefix", gcfg.Prefix))
 	}
+
+	// Root 统一转绝对路径：相对 root（默认 ./）时 insideRoot 的前缀比较会误判全部
+	// 子路径（Join("./","x")="x" 与 Clean 后的 "." 不构成前缀关系），文件 GET/上传/
+	// 删除一律 400/403；绝对化同时保证 WebDAV chroot 与日志路径口径一致。
+	absRoot, err := filepath.Abs(gcfg.Root)
+	if err != nil {
+		slog.Error("invalid --root path (cannot be made absolute)", util.ErrorAttr(err), slog.String("root", gcfg.Root))
+		os.Exit(1)
+	}
+	gcfg.Root = absRoot
 
 	ss := server.NewHTTPStaticServer(gcfg.Root, gcfg.NoIndex)
 	ss.Assets = FrontendAssets
@@ -325,7 +334,6 @@ func main() {
 
 	var hdlr http.Handler = ss
 
-	// CORS 由 --cors-origins 显式开启，未设置则仅同源
 	hdlr = cors(gcfg.CORSOrigins)(hdlr)
 
 	if gcfg.XHeaders {
@@ -338,9 +346,7 @@ func main() {
 
 	mainRouter.Use(util.RequestIDMiddleware)
 
-	// CSRF 纵深防御：拒绝带跨站 Origin 的 POST/PUT/DELETE/PATCH（浏览器跨站
-	// 写请求必带 Origin，原生客户端不带）。挂在 mainRouter 上以覆盖登录、
-	// 管理 API、WebDAV 与文件处理全部通道。
+	// CSRF 纵深防御：拒绝带跨站 Origin 的写请求，挂在 mainRouter 上覆盖全部通道。
 	mainRouter.Use(util.OriginCheckMiddleware)
 
 	mainRouter.Use(util.LoggingMiddleware(util.Logger()))
@@ -355,10 +361,15 @@ func main() {
 	router := mainRouter
 	if gcfg.Prefix != "" {
 		router = mainRouter.PathPrefix(gcfg.Prefix).Subrouter()
-		mainRouter.Handle(gcfg.Prefix, hdlr)
-		mainRouter.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			http.Redirect(w, r, gcfg.Prefix, http.StatusTemporaryRedirect)
-		})
+		// SECURITY(H1): 精确 prefix 路径（如 "/files" 不带尾斜杠）不被子路由的
+		// PathPrefix("/") 命中，必须等全部认证中间件包装完成后再用最终 hdlr 注册
+		//（见下方 PathPrefix("/") 之前）；若在此处提前注册，会以未认证的裸 handler
+		// 抢先匹配，造成未认证目录列表/打包下载/上传。
+		if gcfg.Prefix != "/" {
+			mainRouter.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, gcfg.Prefix, http.StatusTemporaryRedirect)
+			})
+		}
 	}
 
 	if gcfg.Addr == "" {
@@ -368,9 +379,8 @@ func main() {
 		gcfg.Addr = ":" + gcfg.Addr
 	}
 
-	// 为 FRP 自动配置解析本地地址：绑定 0.0.0.0/:: 时用 util.GetLocalIP() 取真实
-	// 局域网 IP；绑定具体 IP 时仅在它属于 10/8 或 192.168/16 时采用，否则回退到
-	// 自动探测或 127.0.0.1，避免管理面板展示不可达/非局域网的 IP。
+	// 解析 FRP 本地地址：绑定通配地址时探测真实局域网 IP，绑定具体 IP 时仅私网段才采用，
+	// 避免管理面板展示不可达地址。
 	localIP := "127.0.0.1"
 	localPort := gcfg.Port
 	if gcfg.Addr != "" {
@@ -390,16 +400,13 @@ func main() {
 		}
 	}
 
-	// DB 放在工作目录而非 gcfg.Root：gcfg.Root 会被 HTTP 直接对外服务，
-	// 若把 DB 放进去，一次 GET /gohttpserver.db 就能拿到密码哈希。
+	// DB 放在工作目录而非 gcfg.Root：root 会被 HTTP 对外服务，放进去一次 GET 就能拿到密码哈希。
 	dbPath := gcfg.DB
 	if dbPath == "" {
 		dbPath = "gohttpserver.db"
 	}
-	// 自定义 --db 的文件名不在内置保护名单内：若它恰好落在对外服务的 root 下
-	//（例如 --db ./data/config.db），一次 GET 就能拿到凭据库。动态注册进
-	// server / zipx / webdav 三处保护名单，使其与默认 gohttpserver.db 受
-	// 同样的名字变体（大小写/尾点/ADS/8.3）拦截。
+	// 自定义 --db 文件名不在内置保护名单内，若落在对外服务的 root 下可被一次 GET 拿走；
+	// 注册进 server/zipx/webdav 名单后与默认 DB 受同样的名字变体拦截。
 	if gcfg.DB != "" {
 		base := filepath.Base(filepath.ToSlash(filepath.Clean(dbPath)))
 		server.RegisterServerStateName(base)
@@ -459,10 +466,8 @@ func main() {
 		}
 	}
 
-	// SECURITY: oauth2-proxy 的鉴权完全依赖可被任意客户端伪造的 X-Auth-Request-*
-	// 头，下方 loopback 绑定守卫只覆盖直连面；FRP 隧道会把本服务整体发布到公网，
-	// 隧道侧请求同样能伪造这些头直接获得会话身份。两者同时启用等于把服务裸奔
-	// 到公网，拒绝启动并要求运维显式择一（或改用 --login）。
+	// SECURITY: FRP 隧道把服务整体发布到公网，隧道侧请求可伪造 X-Auth-Request-* 头获得会话，
+	// 与 oauth2-proxy 同时启用等于裸奔到公网，拒绝启动并要求运维择一（或改用 --login）。
 	if frpEnabled && frpCfg != nil && gcfg.Auth.Type == "oauth2-proxy" {
 		slog.Error("refusing to start: FRP tunnel together with auth-type=oauth2-proxy is insecure",
 			slog.String("reason", "clients reaching the service through the FRP tunnel can forge X-Auth-Request-* headers and gain a session; use --login instead or disable one of the two"))
@@ -480,18 +485,15 @@ func main() {
 		}
 	}
 
-	// 登录闸门优先于其它 auth-type：在 HTTP Basic / OpenID / oauth2-proxy 之前
-	// 安装，使其同样覆盖这些被包装的 handler。
-	// 自我更新的"立即重启"经 restartCh 通知主 select 循环优雅停机退出；
-	// updSvc 的后台检查循环在 shutdownMgr 就绪后才启动（见下方 RegisterCleanup）。
+	// 登录闸门安装在其它 auth-type 之前，使其同样覆盖被包装的 handler；
+	// 更新的"立即重启"经 restartCh 触发优雅停机，后台检查循环在 shutdownMgr 就绪后才启动。
 	restartCh := make(chan struct{}, 1)
 	var updSvc *update.Service
 	var loginStateObj *auth.LoginState
 	if gcfg.Login {
 		auth.FrontendFS = frontendDistFS
 		loginStateObj = auth.LoadLoginCredentials(db)
-		// 登录路由必须在下方 catch-all PathPrefix("/").Handler(hdlr) 之前注册，
-		// 否则 mux 不会把 /-/login 交给它
+		// 登录路由必须在 catch-all 之前注册，否则 mux 不会把 /-/login 交给它
 		auth.RegisterLoginRoutes(router, loginStateObj, true)
 		hdlr = auth.LoginAuthMiddleware(gcfg.Prefix, loginStateObj, hdlr)
 
@@ -510,8 +512,7 @@ func main() {
 		}
 
 		webdavSrv := webdav.NewWebdavServer(gcfg.Root, webdavState, usageStateObj)
-		// 挂到子路由上，让 PROPFIND/PUT/DELETE 等动词共用同一 handler；
-		// PathPrefix 已匹配开头 "/dav/"，尾部的通配是隐式的。
+		// 挂到子路由上让各动词共用 handler；PathPrefix 已含开头 "/dav/"，尾部通配是隐式的。
 		router.PathPrefix("/dav/").Handler(webdavSrv)
 		// gvfs 在发现阶段会不带尾斜杠探测该 collection
 		router.Handle("/dav", webdavSrv)
@@ -526,10 +527,7 @@ func main() {
 			Version:   VERSION,
 		})
 
-		// 自我更新与 admin API 同级保护：仅 --login 模式注册（下载并替换
-		// 二进制是特权操作，不能暴露给匿名访客）。更新服务器信息内置在
-		// 代码中（updateServerConfig）；私有软件令牌支持 GHS_UPDATE_TOKEN
-		// 环境变量注入。
+		// 自我更新仅 --login 模式注册：下载并替换二进制是特权操作，不能暴露给匿名访客。
 		if updateServerConfig.BaseURL != "" {
 			opts := updateServerConfig // 拷贝一份，避免共享可变的 map/字段
 			opts.CurrentVersion = VERSION
@@ -552,10 +550,8 @@ func main() {
 			}
 		}
 	} else {
-		// SECURITY: --login 关闭时不注册管理 API。它不在 loginWhitelist 中，
-		// 用 nil Login 注册后，OpenID / oauth2-proxy 会话能满足
-		// UserFromLoginSession 并在 api.Login 为 nil 时 panic；
-		// 不注册同时也消除了可发现的 401 攻击面。
+		// SECURITY: --login 关闭时不注册管理 API：非 login 会话会使 api.Login 为 nil 的代码
+		// panic，不注册同时消除可发现的 401 攻击面。
 	}
 
 	var userHandlerRegistered bool
@@ -568,15 +564,14 @@ func main() {
 		// case "github":
 		// 	handleOAuth2ID(router, gcfg.Auth.Type, gcfg.Auth.ID, gcfg.Auth.Secret) // FIXME(ssx): set secure default to false
 	case "oauth2-proxy":
-		// 先把代理注入的身份头写入 session 再做下游鉴权，否则 .ghs.yml 的
-		// 按用户规则永远不匹配（canDelete/canUpload/canEdit 只看 session）
+		// 先把代理注入的身份头写入 session 再做下游鉴权，否则 .ghs.yml 按用户规则永不匹配
 		hdlr = auth.Oauth2ProxyMiddleware(hdlr)
 		auth.HandleOauth2(router)
 		userHandlerRegistered = true
 	}
 
-	// 没有认证模块注册 /-/user 时的默认实现：从 session 读取 LoginUser 返回，
-	// 使前端 loadUser() 拿到非 null 用户，避免把已认证状态覆盖成 null 并退回登录页。
+	// 未注册认证模块时 /-/user 的默认实现：返回 session 中的用户，
+	// 避免前端把已认证状态覆盖成 null 并退回登录页。
 	if !userHandlerRegistered {
 		router.HandleFunc("/-/user", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -599,14 +594,18 @@ func main() {
 	router.HandleFunc("/-/sysinfo", func(w http.ResponseWriter, r *http.Request) {
 		data, _ := json.Marshal(map[string]any{
 			"version": VERSION,
-			// 前端据此提前禁用更新入口，避免向未注册的更新 API 发请求
-			// （未注册时 POST 会落到文件上传 handler，返回难懂的 400）。
+			// 前端据此禁用更新入口：未注册时 POST 会落到文件上传 handler 返回难懂的 400
 			"update_enabled": updSvc != nil,
 		})
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
 		w.Write(data)
 	})
+	// SECURITY(H1): 精确 prefix 路径用包装完认证的最终 hdlr 注册（此时 hdlr 已含
+	// LoginAuthMiddleware / BasicAuth 等），杜绝无闸门的裸 handler 被抢先匹配。
+	if gcfg.Prefix != "" {
+		mainRouter.Handle(gcfg.Prefix, hdlr)
+	}
 	router.PathPrefix("/").Handler(hdlr)
 
 	if gcfg.Addr == "" {
@@ -617,8 +616,7 @@ func main() {
 	}
 	_, port, _ := net.SplitHostPort(gcfg.Addr)
 
-	// oauth2-proxy 模式依赖可被任意客户端伪造的 X-Auth-Request-* 头；除非
-	// 用 --allow-public-oauth2 显式确认风险，否则拒绝在非 loopback 上启动。
+	// oauth2-proxy 依赖可伪造的 X-Auth-Request-* 头，除非 --allow-public-oauth2 显式确认风险，否则拒绝非 loopback 启动。
 	if gcfg.Auth.Type == "oauth2-proxy" && !gcfg.AllowPublicOauth2 && !auth.IsLoopbackAddr(gcfg.Addr) {
 		slog.Error("refusing to start: oauth2-proxy on non-loopback is insecure",
 			slog.String("addr", gcfg.Addr),
@@ -633,25 +631,33 @@ func main() {
 	)
 
 	srv := &http.Server{
-		// SecurityHeaders 包住整个 router（而不只是文件 handler），
-		// 使登录页、管理 API、WebDAV、/metrics 与内嵌 SPA 都带上安全头
+		// SecurityHeaders 包住整个 router，使登录页、管理 API、WebDAV、/metrics 与内嵌 SPA 都带安全头
 		Handler: util.SecurityHeaders(server.ContentSecurityPolicy)(mainRouter),
 		Addr:    gcfg.Addr,
-		// ReadHeaderTimeout 缓解 Slowloris：客户端须在此窗口内发完请求头。
-		// 不设 Read/WriteTimeout 是因为它们会限制大文件上传下载的耗时
-		// （body 的 I/O 已由 handler 层限制兜底）；IdleTimeout 回收空闲 keep-alive。
+		// ReadHeaderTimeout 缓解 Slowloris；不设 Read/WriteTimeout 以免限制大文件上传下载耗时，
+		// IdleTimeout 回收空闲 keep-alive。
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
 
-	// --session-ttl 控制登录态有效期；gorilla/sessions 中 MaxAge=0 表示
-	// 浏览器会话 cookie（关闭即失效），--session-ttl=0 语义相同。未设置
-	// GHS_SESSION_KEY 时每次重启都会生成新的签名密钥，使既有 cookie 全部失效。
+	// --session-ttl 控制登录态有效期，0 表示浏览器会话 cookie；未设置 GHS_SESSION_KEY
+	// 时每次重启生成新签名密钥，既有 cookie 全部失效。
 	if sessionKey := os.Getenv("GHS_SESSION_KEY"); sessionKey != "" {
+		// SECURITY: --session-ttl 0（浏览器会话 cookie）经 Store.MaxAge(0) 关闭了
+		// securecookie 的服务端时间戳校验（securecookie.go:339 s.maxAge==0 跳过），
+		// 此时若复用持久 GHS_SESSION_KEY，被窃取的 cookie 将永不过期、登出也无法
+		// 吊销（登出只删浏览器侧 cookie）——重放窗口从有限 TTL 变为永久。这种矛盾的
+		// 组合没有合法用途（既不要持久化登录态，又想要跨重启的密钥），直接拒绝启动，
+		// 要求去掉两配置之一。
+		if gcfg.SessionTTL <= 0 {
+			slog.Error("GHS_SESSION_KEY with --session-ttl 0 makes session cookies never expire " +
+				"(server-side timestamp check is disabled for browser-session cookies); " +
+				"set a positive --session-ttl or unset GHS_SESSION_KEY")
+			os.Exit(1)
+		}
 		auth.Store.Codecs = securecookie.CodecsFromPairs([]byte(sessionKey))
 		slog.Info("using GHS_SESSION_KEY from environment for session signing")
-		// securecookie 对任意长度 key 都接受，但 HMAC-SHA256 的安全性依赖密钥熵：
-		// 短 key 可被离线爆破，伪造登录 cookie。小于 32 字节给出明确警告。
+		// securecookie 接受任意长度 key，但短 key 可被离线爆破伪造登录 cookie
 		if len(sessionKey) < 32 {
 			slog.Warn("GHS_SESSION_KEY is shorter than 32 bytes; session cookies are brute-forceable. "+
 				"Use at least 32 random bytes, e.g. head -c 32 /dev/urandom | base64",
@@ -661,16 +667,17 @@ func main() {
 		slog.Warn("GHS_SESSION_KEY not set; sessions will be invalidated on restart")
 	}
 	if gcfg.SessionTTL > 0 {
-		auth.Store.Options.MaxAge = int(gcfg.SessionTTL.Seconds())
+		// SECURITY(L1): 必须经 Store.MaxAge 同步 securecookie codec 的服务端时间戳校验；
+		// 只改 Options.MaxAge 时 codec 仍是构造时的默认 30 天，复制的 cookie 值可在
+		// 服务端重放，登出也只删浏览器侧 cookie。
+		auth.Store.MaxAge(int(gcfg.SessionTTL.Seconds()))
 	} else {
-		auth.Store.Options.MaxAge = 0
+		auth.Store.MaxAge(0)
 	}
 	slog.Info("session cookie ttl configured", slog.String("ttl", gcfg.SessionTTL.String()))
 
-	// 走 TLS 时把 session cookie 标记为 Secure，防止浏览器在明文 HTTP 上发送它。
-	// SECURITY: 反代终止 TLS（--xheaders）时本进程看到的是明文 HTTP，浏览器侧
-	// 仍是 https——同样必须标记 Secure，否则 cookie 会在降级连接上外泄。
-	// 若部署为「反代 HTTPS + 本机 HTTP」却用明文浏览，运维需自行清除该标记。
+	// 直连 TLS 或反代终止 TLS（--xheaders）时都把 session cookie 标记为 Secure：
+	// 反代场景本进程看到的是明文 HTTP，浏览器侧仍是 https，不标记会在降级连接上外泄。
 	if gcfg.Key != "" && gcfg.Cert != "" {
 		auth.Store.Options.Secure = true
 		slog.Info("session cookies marked Secure (direct TLS)")
@@ -686,12 +693,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 用 proxyproto 包装 listener 以支持 HAProxy PROXY protocol，
-	// 使 FRP 开启 ProxyProtocol 时能传入真实客户端 IP。
-	//
-	// SECURITY: 只接受来自 loopback 或私网地址的 PROXY protocol 头（FRP/HAProxy
-	// 所在位置）。若无条件接受，直连暴露时攻击者可伪造该头伪造源 IP；
-	// 公网连接一律按普通方式处理，不解析 PROXY protocol。
+	// proxyproto 包装 listener 支持 PROXY protocol，使 FRP 开启时能传入真实客户端 IP；
+	// SECURITY: 只接受 loopback/私网来源的 PROXY 头，公网连接按普通连接处理，防伪造源 IP。
 	proxyLn := &proxyproto.Listener{
 		Listener: ln,
 		Policy: func(upstream net.Addr) (proxyproto.Policy, error) {
@@ -705,8 +708,7 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// 在后台 goroutine 中 Serve，主 goroutine 只等待「Serve 致命错误」或
-	// 「终止信号」二者其一；http.Server.Shutdown 会关闭其 listener，无需另调 Close。
+	// 后台 goroutine 中 Serve，主 goroutine 等 Serve 致命错误或终止信号；Shutdown 会关闭 listener，无需另调 Close。
 	serveErr := make(chan error, 1)
 	if gcfg.Key != "" && gcfg.Cert != "" {
 		tlsConfig := &tls.Config{
@@ -718,8 +720,7 @@ func main() {
 		go func() { serveErr <- srv.Serve(proxyLn) }()
 	}
 
-	// 优雅退出：先排空在途请求再释放数据库。cleanup 按 LIFO 执行且只在 HTTP
-	// 服务停止后进行，保证事务中的请求全程持有可用的 DB 句柄。
+	// 优雅退出：HTTP 服务停止后才执行 cleanup（LIFO），保证在途请求全程持有可用 DB 句柄。
 	shutdownMgr := util.NewShutdownManager(srv, util.Logger(), 30*time.Second)
 	shutdownMgr.RegisterCleanup(func() error {
 		slog.Info("closing database")
@@ -739,8 +740,7 @@ func main() {
 
 	select {
 	case err := <-serveErr:
-		// Serve 返回即服务已停止；除正常 Shutdown 外的错误都视为致命，
-		// 但仍先跑 cleanup，确保退出前释放 DB 句柄与 listener。
+		// 除正常 Shutdown 外的 Serve 错误都视为致命，仍先跑 cleanup 释放资源再退出
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server stopped unexpectedly", util.ErrorAttr(err))
 			if shutErr := shutdownMgr.Shutdown(); shutErr != nil {
@@ -749,8 +749,7 @@ func main() {
 			os.Exit(1)
 		}
 	case <-restartCh:
-		// 更新服务的"立即重启"：与信号退出同一套优雅停机流程，
-		// 退出后由 systemd(Restart=always) 等守护进程以新版本拉起。
+		// 更新的"立即重启"：与信号退出同一套优雅停机，由 systemd 等守护进程以新版本拉起
 		slog.Info("restart requested (update applied); shutting down")
 		if err := shutdownMgr.Shutdown(); err != nil {
 			slog.Error("graceful shutdown did not complete cleanly", util.ErrorAttr(err))

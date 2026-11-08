@@ -1,34 +1,33 @@
 <template>
   <el-dialog
     v-model="visible"
-    title="Download from URL"
+    :title="t('urlDownload.title')"
     width="500px"
     :close-on-click-modal="!downloading"
     :close-on-press-escape="!downloading"
     @closed="handleClosed"
   >
     <p class="url-modal-hint">
-      Fetch a remote file to the current directory. The server blocks
-      private/loopback URLs (SSRF protection).
+      {{ t('urlDownload.hint') }}
     </p>
 
     <el-form
       label-position="top"
       @submit.prevent="handleSubmit"
     >
-      <el-form-item label="URL" required>
+      <el-form-item :label="t('urlDownload.urlLabel')" required>
         <el-input
           v-model="url"
-          placeholder="https://example.com/file.zip"
+          :placeholder="t('urlDownload.urlPlaceholder')"
           :disabled="downloading"
           clearable
         />
       </el-form-item>
 
-      <el-form-item label="Save as" required>
+      <el-form-item :label="t('urlDownload.saveAs')" required>
         <el-input
           v-model="filename"
-          placeholder="file.zip"
+          :placeholder="t('urlDownload.saveAsPlaceholder')"
           :disabled="downloading"
           clearable
         />
@@ -38,7 +37,7 @@
     <template #footer>
       <div class="dialog-footer">
         <el-button @click="handleCancel" :disabled="downloading">
-          Cancel
+          {{ t('common.cancel') }}
         </el-button>
         <el-button
           type="primary"
@@ -46,7 +45,7 @@
           :disabled="!canSubmit"
           @click="handleSubmit"
         >
-          Fetch
+          {{ t('urlDownload.fetch') }}
         </el-button>
       </div>
     </template>
@@ -56,7 +55,10 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
+import { useI18n } from 'vue-i18n'
 import { useFileApi } from '@/composables/useFileApi'
+
+const { t } = useI18n()
 
 interface Props {
   visible: boolean
@@ -99,15 +101,22 @@ async function handleSubmit() {
     )
     if (result.success) {
       ElMessage.success(
-        `Fetched ${result.size ?? '?'} bytes → ${result.destination ?? filename.value}`
+        t('urlDownload.fetched', {
+          size: result.size ?? '?',
+          name: result.destination ?? filename.value
+        })
       )
       emit('fetched')
       visible.value = false
     } else {
-      ElMessage.error('Fetch failed')
+      ElMessage.error(t('urlDownload.fetchFailed'))
     }
   } catch (err: any) {
-    ElMessage.error(`Fetch failed: ${err?.message ?? 'unknown error'}`)
+    ElMessage.error(
+      t('urlDownload.fetchFailedDetail', {
+        msg: err?.message ?? t('urlDownload.unknownError')
+      })
+    )
   } finally {
     downloading.value = false
   }

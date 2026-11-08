@@ -2,15 +2,15 @@
   <div class="webdav-list">
     <!-- 已用容量由服务端缓存，需要手动刷新。 -->
     <div class="list-toolbar" v-if="store.webdavAccounts.length > 0">
-      <span class="toolbar-hint">已用容量随上传自动更新</span>
+      <span class="toolbar-hint">{{ t('webdav.usedSpaceUpdates') }}</span>
       <el-button text size="small" :loading="refreshing" @click="handleRefresh">
         <el-icon><Refresh /></el-icon>
-        <span>刷新</span>
+        <span>{{ t('common.refresh') }}</span>
       </el-button>
     </div>
     <div v-if="store.webdavAccounts.length === 0" class="empty-state">
       <el-icon :size="32" class="empty-icon"><FolderOpened /></el-icon>
-      <p class="empty-text">No WebDAV accounts yet. Click "New Account" in the top right to get started.</p>
+      <p class="empty-text">{{ t('webdav.noAccounts') }}</p>
     </div>
 
     <!-- 宽屏用表格，窄屏改用卡片列表；点击行展开详情面板。 -->
@@ -29,21 +29,21 @@
         <template #default="{ row }">
           <div class="account-detail" @click.stop>
             <div class="detail-row">
-              <span class="detail-label">链接地址</span>
+              <span class="detail-label">{{ t('webdav.link') }}</span>
               <code class="detail-value">{{ accountUrl }}</code>
               <el-button text size="small" @click="copyText(accountUrl)">
                 <el-icon><CopyDocument /></el-icon>
               </el-button>
             </div>
             <div class="detail-row">
-              <span class="detail-label">用户名</span>
+              <span class="detail-label">{{ t('webdav.username') }}</span>
               <code class="detail-value">{{ row.username }}</code>
               <el-button text size="small" @click="copyText(row.username)">
                 <el-icon><CopyDocument /></el-icon>
               </el-button>
             </div>
             <div class="detail-row">
-              <span class="detail-label">密码</span>
+              <span class="detail-label">{{ t('webdav.password') }}</span>
               <template v-if="store.getWebdavPassword(row.id)">
                 <code class="detail-value">{{ revealed.has(row.id) ? store.getWebdavPassword(row.id) : '••••••••' }}</code>
                 <el-button text size="small" @click="toggleReveal(row.id)">
@@ -53,33 +53,33 @@
                   <el-icon><CopyDocument /></el-icon>
                 </el-button>
               </template>
-              <span v-else class="detail-note">密码未缓存，请使用「重置密码」生成新密码后查看。</span>
+              <span v-else class="detail-note">{{ t('webdav.passwordNotCached') }}</span>
             </div>
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="Remark" prop="remark" min-width="120" />
-      <el-table-column label="Username" prop="username" min-width="100" />
-      <el-table-column label="Root Path" prop="root_path" min-width="100">
+      <el-table-column :label="t('webdav.remark')" prop="remark" min-width="120" />
+      <el-table-column :label="t('webdav.username')" prop="username" min-width="100" />
+      <el-table-column :label="t('webdav.rootPath')" prop="root_path" min-width="100">
         <template #default="{ row }">
           <code class="path-code">{{ row.root_path }}</code>
         </template>
       </el-table-column>
-      <el-table-column label="Permission" width="100">
+      <el-table-column :label="t('webdav.permission')" width="100">
         <template #default="{ row }">
           <el-tag size="small" :type="row.readonly ? 'warning' : 'success'">
-            {{ row.readonly ? 'Read-only' : 'Read/Write' }}
+            {{ row.readonly ? t('webdav.readOnly') : t('webdav.readWrite') }}
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="System Protection" width="120">
+      <el-table-column :label="t('webdav.systemProtection')" width="120">
         <template #default="{ row }">
           <el-tag size="small" :type="row.protect_system_files ? 'info' : 'danger'">
-            {{ row.protect_system_files ? 'On' : 'Off' }}
+            {{ row.protect_system_files ? t('common.on') : t('common.off') }}
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="Quota" min-width="170">
+      <el-table-column :label="t('webdav.quota')" min-width="170">
         <template #default="{ row }">
           <div class="quota-cell">
             <el-progress
@@ -92,17 +92,17 @@
             <div class="quota-text">
               {{ formatBytes(row.used_bytes) }} /
               <span v-if="row.quota_bytes > 0">{{ formatBytes(row.quota_bytes) }}</span>
-              <span v-else class="muted">不限</span>
+              <span v-else class="muted">{{ t('common.unlimited') }}</span>
             </div>
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="Created" width="140">
+      <el-table-column :label="t('webdav.created')" width="140">
         <template #default="{ row }">
           {{ formatTime(row.created_at) }}
         </template>
       </el-table-column>
-      <el-table-column label="Actions" width="80" fixed="right">
+      <el-table-column :label="t('webdav.actions')" width="80" fixed="right">
         <template #default="{ row }">
           <el-dropdown trigger="click" @command="(cmd: string) => onCommand(cmd, row)">
             <el-button text class="action-trigger" @click.stop>
@@ -111,13 +111,13 @@
             <template #dropdown>
               <el-dropdown-menu>
                 <el-dropdown-item command="edit">
-                  <el-icon><Edit /></el-icon> 编辑
+                  <el-icon><Edit /></el-icon> {{ t('common.edit') }}
                 </el-dropdown-item>
                 <el-dropdown-item command="reset">
-                  <el-icon><Key /></el-icon> 重置密码
+                  <el-icon><Key /></el-icon> {{ t('webdav.resetPassword') }}
                 </el-dropdown-item>
                 <el-dropdown-item command="delete" divided class="danger-item">
-                  <el-icon><Delete /></el-icon> 删除
+                  <el-icon><Delete /></el-icon> {{ t('common.delete') }}
                 </el-dropdown-item>
               </el-dropdown-menu>
             </template>
@@ -132,7 +132,7 @@
           <span class="mobile-remark">{{ acc.remark }}</span>
           <div class="mobile-header-right">
             <el-tag size="small" :type="acc.readonly ? 'warning' : 'success'">
-              {{ acc.readonly ? 'Read-only' : 'Read/Write' }}
+              {{ acc.readonly ? t('webdav.readOnly') : t('webdav.readWrite') }}
             </el-tag>
             <el-dropdown trigger="click" @command="(cmd: string) => onCommand(cmd, acc)">
               <el-button text class="action-trigger" @click.stop>
@@ -141,52 +141,52 @@
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item command="edit">
-                    <el-icon><Edit /></el-icon> 编辑
+                    <el-icon><Edit /></el-icon> {{ t('common.edit') }}
                   </el-dropdown-item>
                   <el-dropdown-item command="reset">
-                    <el-icon><Key /></el-icon> 重置密码
+                    <el-icon><Key /></el-icon> {{ t('webdav.resetPassword') }}
                   </el-dropdown-item>
                   <el-dropdown-item command="delete" divided class="danger-item">
-                    <el-icon><Delete /></el-icon> 删除
+                    <el-icon><Delete /></el-icon> {{ t('common.delete') }}
                   </el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
           </div>
         </div>
-        <div class="mobile-row"><span>Root Path</span><code>{{ acc.root_path }}</code></div>
+        <div class="mobile-row"><span>{{ t('webdav.rootPath') }}</span><code>{{ acc.root_path }}</code></div>
         <div class="mobile-row">
-          <span>System Protection</span>
+          <span>{{ t('webdav.systemProtection') }}</span>
           <el-tag size="small" :type="acc.protect_system_files ? 'info' : 'danger'">
-            {{ acc.protect_system_files ? 'On' : 'Off' }}
+            {{ acc.protect_system_files ? t('common.on') : t('common.off') }}
           </el-tag>
         </div>
         <div class="mobile-row">
-          <span>Quota</span>
+          <span>{{ t('webdav.quota') }}</span>
           <span>
             {{ formatBytes(acc.used_bytes) }} /
             <span v-if="acc.quota_bytes > 0">{{ formatBytes(acc.quota_bytes) }}</span>
-            <span v-else class="muted">不限</span>
+            <span v-else class="muted">{{ t('common.unlimited') }}</span>
           </span>
         </div>
-        <div class="mobile-row"><span>Created</span><span>{{ formatTime(acc.created_at) }}</span></div>
+        <div class="mobile-row"><span>{{ t('webdav.created') }}</span><span>{{ formatTime(acc.created_at) }}</span></div>
         <div v-if="expandedMobile.has(acc.id)" class="account-detail account-detail--mobile">
           <div class="detail-row">
-            <span class="detail-label">链接地址</span>
+            <span class="detail-label">{{ t('webdav.link') }}</span>
             <code class="detail-value">{{ accountUrl }}</code>
             <el-button text size="small" @click="copyText(accountUrl)">
               <el-icon><CopyDocument /></el-icon>
             </el-button>
           </div>
           <div class="detail-row">
-            <span class="detail-label">用户名</span>
+            <span class="detail-label">{{ t('webdav.username') }}</span>
             <code class="detail-value">{{ acc.username }}</code>
             <el-button text size="small" @click="copyText(acc.username)">
               <el-icon><CopyDocument /></el-icon>
             </el-button>
           </div>
           <div class="detail-row">
-            <span class="detail-label">密码</span>
+            <span class="detail-label">{{ t('webdav.password') }}</span>
             <template v-if="store.getWebdavPassword(acc.id)">
               <code class="detail-value">{{ revealed.has(acc.id) ? store.getWebdavPassword(acc.id) : '••••••••' }}</code>
               <el-button text size="small" @click="toggleReveal(acc.id)">
@@ -196,7 +196,7 @@
                 <el-icon><CopyDocument /></el-icon>
               </el-button>
             </template>
-            <span v-else class="detail-note">密码未缓存，请使用「重置密码」生成新密码后查看。</span>
+            <span v-else class="detail-note">{{ t('webdav.passwordNotCached') }}</span>
           </div>
         </div>
       </div>
@@ -213,7 +213,7 @@
     <!-- 重置密码结果弹窗：密码仅此一次可见。 -->
     <el-dialog
       v-model="showPasswordDialog"
-      title="New Password"
+      :title="t('webdav.newPasswordTitle')"
       width="min(440px, 92vw)"
       :close-on-click-modal="false"
       append-to-body
@@ -225,19 +225,19 @@
         </el-button>
       </div>
       <p class="password-warning">
-        This password is shown only once. Copy it now — it cannot be viewed again after closing.
+        {{ t('webdav.passwordShowOnce') }}
       </p>
       <!-- 内嵌凭据的连接 URL，多数客户端可直接预填用户名密码。 -->
       <div v-if="resetConnectUrl" class="connect-url-row">
-        <span class="connect-url-label">Connect URL</span>
+        <span class="connect-url-label">{{ t('webdav.connectUrl') }}</span>
         <code class="connect-url-value">{{ resetConnectUrl }}</code>
         <el-button text size="small" @click="copyConnectUrl">
           <el-icon><CopyDocument /></el-icon>
-          Copy
+          {{ t('common.copy') }}
         </el-button>
       </div>
       <p class="connect-url-hint">
-        Paste into your client's "Connect to Server" / URL field. Username and password are embedded so the client pre-fills them.
+        {{ t('webdav.connectUrlHint') }}
       </p>
     </el-dialog>
   </div>
@@ -249,11 +249,13 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   CopyDocument, FolderOpened, MoreFilled, Edit, Delete, Key, View, Hide, Refresh,
 } from '@element-plus/icons-vue'
+import { useI18n } from 'vue-i18n'
 import { useAdminStore } from '@/stores/adminStore'
 import { copyText as copyToClipboard } from '@/utils/clipboard'
 import type { WebdavAccount } from '@/types'
 import WebdavAccountEdit from './WebdavAccountEdit.vue'
 
+const { t } = useI18n()
 const store = useAdminStore()
 
 const tableRef = ref()
@@ -338,9 +340,9 @@ function onCommand(cmd: string, acc: WebdavAccount) {
 
 async function copyText(text: string) {
   if (await copyToClipboard(text)) {
-    ElMessage.success('已复制到剪贴板')
+    ElMessage.success(t('webdav.copied'))
   } else {
-    ElMessage.error('复制失败，请手动选择复制')
+    ElMessage.error(t('webdav.copyFailed'))
   }
 }
 
@@ -401,9 +403,9 @@ const resetConnectUrl = computed(() => {
 async function handleResetPassword(acc: WebdavAccount) {
   try {
     await ElMessageBox.confirm(
-      `Reset the password for "${acc.remark}"? The old password will be invalidated immediately.`,
-      'Reset Password',
-      { type: 'warning', confirmButtonText: 'Reset', cancelButtonText: 'Cancel' },
+      t('webdav.resetConfirm', { remark: acc.remark }),
+      t('webdav.resetPassword'),
+      { type: 'warning', confirmButtonText: t('webdav.reset'), cancelButtonText: t('common.cancel') },
     )
   } catch {
     return
@@ -414,42 +416,42 @@ async function handleResetPassword(acc: WebdavAccount) {
     resetPasswordValue.value = res.data.password
     showPasswordDialog.value = true
   } else {
-    ElMessage.error(res.error || 'Reset failed')
+    ElMessage.error(res.error || t('webdav.resetFailed'))
   }
 }
 
 async function handleDelete(acc: WebdavAccount) {
   try {
     await ElMessageBox.confirm(
-      `Delete account "${acc.remark}"? This action cannot be undone.`,
-      'Delete Account',
-      { type: 'warning', confirmButtonText: 'Delete', cancelButtonText: 'Cancel' },
+      t('webdav.deleteConfirmDetail', { remark: acc.remark }),
+      t('webdav.deleteAccountTitle'),
+      { type: 'warning', confirmButtonText: t('common.delete'), cancelButtonText: t('common.cancel') },
     )
   } catch {
     return
   }
   const res = await store.deleteWebdavAccount(acc.id)
   if (res.ok) {
-    ElMessage.success('Account deleted')
+    ElMessage.success(t('webdav.accountDeleted'))
   } else {
-    ElMessage.error(res.error || 'Delete failed')
+    ElMessage.error(res.error || t('webdav.deleteFailed'))
   }
 }
 
 async function copyPassword() {
   if (await copyToClipboard(resetPasswordValue.value)) {
-    ElMessage.success('已复制到剪贴板')
+    ElMessage.success(t('webdav.copied'))
   } else {
-    ElMessage.error('复制失败，请手动选择复制')
+    ElMessage.error(t('webdav.copyFailed'))
   }
 }
 
 async function copyConnectUrl() {
   if (!resetConnectUrl.value) return
   if (await copyToClipboard(resetConnectUrl.value)) {
-    ElMessage.success('已复制到剪贴板')
+    ElMessage.success(t('webdav.copied'))
   } else {
-    ElMessage.error('复制失败，请手动选择复制')
+    ElMessage.error(t('webdav.copyFailed'))
   }
 }
 

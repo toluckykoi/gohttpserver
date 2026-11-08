@@ -13,7 +13,7 @@ import (
 	goplist "github.com/fork2fix/go-plist"
 )
 
-// maxPlistSize 限制从 IPA 读取的 Info.plist 大小，防止伪造超大解压体积强制大额分配。
+// maxPlistSize 限制从 IPA 读取的 Info.plist 大小，防伪造体积触发大额分配。
 const maxPlistSize = 16 * 1024 * 1024 // 16 MiB
 
 // ParseIpaIcon 返回 IPA 中 Payload/*/icon.png 的字节内容。
@@ -69,7 +69,6 @@ func ParseIPA(path string) (plinfo *PlistBundle, err error) {
 		return
 	}
 	defer plreader.Close()
-	// 按声明体积预分配前先封顶，防止伪造的超大解压体积触发一次性大额分配。
 	declared := plfile.FileInfo().Size()
 	if declared > maxPlistSize {
 		err = fmt.Errorf("plist entry too large: %d bytes (max %d)", declared, maxPlistSize)

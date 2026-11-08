@@ -18,9 +18,8 @@ func SanitizeLogInput(s string) string {
 	}, s)
 }
 
-// GetLocalIP 返回可用于分享的私网地址，找不到则返回 ""。
-// 仅 10/8 与 192.168/16 合格；CGNAT、link-local、VPN 与公网地址对管理面板的
-// “分享此 URL”用途而言不可达。
+// GetLocalIP 返回可用于分享的私网地址（仅 10/8 与 192.168/16），找不到则返回 ""。
+// CGNAT、link-local、VPN 等网段对分享用途不可达。
 func GetLocalIP() string {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
@@ -48,7 +47,7 @@ func IsLANAddress(ip net.IP) bool {
 	return false
 }
 
-// privateNets 内网网段列表，在 init 阶段解析一次（访问日志路径原先每请求都重建）。
+// privateNets 内网网段列表，init 阶段解析一次。
 var privateNets = func() []*net.IPNet {
 	cidrs := []string{
 		"10.0.0.0/8",
@@ -117,17 +116,12 @@ func IsDir(path string) bool {
 	return err == nil && info.Mode().IsDir()
 }
 
-// 代理头仅在运维显式开启 --xheaders 时才可信，否则任何客户端都能伪造
-// X-Forwarded-For，为每个假 IP 开一个新的限流桶并污染审计日志。
-// （main.go 在解析到 --xheaders 时调用 SetTrustProxyHeaders(true)）
-
 var (
 	trustProxyHeadersMu sync.RWMutex
 	trustProxyHeaders   bool
 )
 
-// SetTrustProxyHeaders 开关 X-Forwarded-For / X-Real-IP 的信任，main.go 解析
-// --xheaders 后在启动阶段调用一次。
+// SetTrustProxyHeaders 开关 X-Forwarded-For / X-Real-IP 的信任，由 main.go 在解析 --xheaders 后调用。
 func SetTrustProxyHeaders(v bool) {
 	trustProxyHeadersMu.Lock()
 	defer trustProxyHeadersMu.Unlock()
@@ -141,14 +135,8 @@ func isTrustProxyHeaders() bool {
 	return trustProxyHeaders
 }
 
-// GetClientIP 提取客户端 IP：仅在 --xheaders 开启时才采信 X-Forwarded-For /
-// X-Real-IP，否则只用 RemoteAddr，避免伪造代理头进行 IP 欺骗。
-//
-// SECURITY: XFF 取最右（最后一个）元素而非最左。append 型反代（nginx
-// $proxy_add_x_forwarded_for）把客户端自带的 XFF 原样保留、真实 IP 追加在
-// 末尾——取最左值时每个伪造 IP 都能开出全新的限流桶并污染审计日志（第 8 轮
-// 审计实证）。取最右值：单层可信代理下即为真实客户端 IP；多层代理下退化为
-// 最内层可信代理的地址，所有客户端共享一个桶——牺牲区分度换取不可伪造。
+// GetClientIP 提取客户端 IP：仅在 --xheaders 开启时采信 X-Forwarded-For / X-Real-IP，否则只用 RemoteAddr。
+// SECURITY: XFF 取最右元素——append 型反代把真实 IP 追加在末尾，取最左可被客户端伪造 IP 绕过限流。
 func GetClientIP(r *http.Request) string {
 	if isTrustProxyHeaders() {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {

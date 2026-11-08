@@ -7,6 +7,13 @@ import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 import { resolve } from 'path'
 
 export default defineConfig({
+  // vue-i18n JIT 编译标记：默认编译器在浏览器用 new Function 编译消息，
+  // 会被 Go 服务端 CSP（script-src 无 'unsafe-eval'）拦截导致白屏。
+  // 置 true 后完全跳过运行时编译器（配合 src/i18n 的自定义 messageCompiler）。
+  define: {
+    __INTLIFY_JIT_COMPILATION__: true,
+    __INTLIFY_DROP_MESSAGE_COMPILER__: true,
+  },
   plugins: [
     vue(),
     UnoCSS(),
@@ -21,6 +28,9 @@ export default defineConfig({
       dirs: ['src'],
       extensions: ['vue', 'ts', 'tsx', 'jsx', 'js'],
       deep: true,
+      // src/i18n 等非组件模块会被当全局组件注册（components.d.ts 出现 <I18n> 等），
+      // 显式排除避免误用与生成噪音。
+      globsExclude: ['src/i18n/**'],
     }),
     // Element Plus 命令式 API（ElMessage 等）的自动引入。
     AutoImport({
@@ -82,6 +92,13 @@ export default defineConfig({
       output: {
         manualChunks: (id) => {
           if (!id.includes('node_modules')) return undefined
+
+          // locale 消息包很小但体积翻倍于代码，且只加载当前语言一份；
+          // 单独分包（动态 import 引入）避免混进 element-plus 主 chunk
+          // 让首包为不用的语言买单。
+          if (id.includes('/element-plus/dist/locale/')) {
+            return 'element-locale'
+          }
 
           if (id.includes('/element-plus/')) {
             return 'element-plus'

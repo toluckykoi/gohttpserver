@@ -49,7 +49,7 @@ func (sm *ShutdownManager) WaitForShutdown() error {
 	return sm.Shutdown()
 }
 
-// Shutdown 排空 HTTP 服务后按注册逆序（LIFO）执行清理；即使排空失败清理也会执行。
+// Shutdown 排空 HTTP 服务后执行清理；即使排空失败清理也会执行。
 func (sm *ShutdownManager) Shutdown() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), sm.shutdownTimeout)
 	defer cancel()

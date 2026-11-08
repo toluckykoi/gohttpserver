@@ -141,7 +141,6 @@ export function useFileApi() {
     let terminalResult: { success: boolean; description?: string } | null = null
 
     const processBuffer = () => {
-      // xhr.responseText 随响应体流式增长，只处理新增后缀。
       const full = xhr.responseText
       const newChunk = full.slice(tail.length)
       if (!newChunk) return
@@ -340,9 +339,8 @@ export function useFileApi() {
     window.location.href = `${encodePath}${sep}op=archive`
   }
 
-  /** 把文件/目录的任意组合打包成一个 zip 下载：POST 多选打包接口，把响应 blob
-   *  塞进隐藏 anchor 触发浏览器保存。服务端保留每个条目的顶层 basename，解包后
-   *  的布局与用户所选一致。网络错误与非 2xx 均以 reject 暴露，供调用方弹错误提示。 */
+  /** POST 多选打包接口，把响应 blob 触发浏览器保存；服务端保留每个条目的
+   *  顶层 basename。网络错误与非 2xx 均 reject，供调用方弹错误提示。 */
   async function downloadMulti(paths: string[]): Promise<void> {
     if (paths.length === 0) return
     const response = await fetch('/-/zip', {
@@ -375,10 +373,9 @@ export function useFileApi() {
     return `/-/ipa/link/${encodePath}`
   }
 
-  /** PUT 覆盖已有文件内容，供浏览器内编辑器保存使用。服务端对 PUT body 有
-   *  几 MiB 上限（见 hEdit），调用方应先校验以免吃 413 往返。body 以 text/plain
-   *  原样发送，避免服务端的保 body 认证检查（URL query 传 token，见 hEdit /
-   *  canUploadSession）被表单解析干扰。 */
+  /** PUT 覆盖文件内容（编辑器保存用）。服务端对 body 有几 MiB 上限（见 hEdit），
+   *  调用方应先校验以免吃 413；body 以 text/plain 原样发送，避免服务端保 body
+   *  认证检查（URL query 传 token）被表单解析干扰。 */
   async function updateFile(
     path: string,
     filename: string,
@@ -396,9 +393,8 @@ export function useFileApi() {
     return await response.json()
   }
 
-  /** 触发服务端离线下载：向 /-/fetch POST 远端 URL 与目标文件名，服务端把远端
-   *  响应体流式写入磁盘。请求会阻塞到远端抓取完成，进度/转圈由调用方负责；服务端
-   *  已做 SSRF 防护（拒绝 loopback/私网 IP），UI 只需原样展示 502/4xx 错误。 */
+  /** 触发服务端离线下载：POST 远端 URL 与目标文件名，服务端流式写入磁盘，请求
+   *  阻塞到抓取完成；SSRF 防护在服务端（拒绝 loopback/私网 IP），UI 原样展示 502/4xx。 */
   async function fetchFromUrl(
     path: string,
     url: string,

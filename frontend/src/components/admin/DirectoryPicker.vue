@@ -2,14 +2,14 @@
   <el-dialog
     :model-value="visible"
     @update:model-value="$emit('update:visible', $event)"
-    title="选择访问目录"
+    :title="t('webdav.directoryPlaceholder')"
     width="min(560px, 92vw)"
     :close-on-click-modal="false"
     append-to-body
   >
     <div class="picker-body">
       <div class="current-path">
-        <span class="path-label">已选：</span>
+        <span class="path-label">{{ t('webdav.selected') }}</span>
         <code class="path-value">{{ selectedPath || '/' }}</code>
       </div>
 
@@ -35,8 +35,8 @@
     </div>
 
     <template #footer>
-      <el-button @click="$emit('update:visible', false)">取消</el-button>
-      <el-button type="primary" @click="confirm">确定</el-button>
+      <el-button @click="$emit('update:visible', false)">{{ t('common.cancel') }}</el-button>
+      <el-button type="primary" @click="confirm">{{ t('common.confirm') }}</el-button>
     </template>
   </el-dialog>
 </template>
@@ -44,7 +44,10 @@
 <script setup lang="ts">
 import { ref, watch, nextTick } from 'vue'
 import { Folder } from '@element-plus/icons-vue'
+import { useI18n } from 'vue-i18n'
 import type { FileItem } from '@/types'
+
+const { t } = useI18n()
 
 interface Props {
   visible: boolean
@@ -85,7 +88,7 @@ watch(
       // 每次打开都重新挂载树，重置节点展开/选中状态。
       treeKey.value++
       treeData.value = [{
-        label: '根目录',
+        label: t('webdav.root'),
         path: '/',
       }]
       nextTick(() => {

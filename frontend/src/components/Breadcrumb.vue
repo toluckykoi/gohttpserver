@@ -1,14 +1,14 @@
 <template>
-  <nav class="breadcrumb" aria-label="Breadcrumb">
+  <nav class="breadcrumb" :aria-label="t('common.home')">
     <div class="breadcrumb-inner">
       <button
         class="breadcrumb-item breadcrumb-home"
         type="button"
         @click="navigateTo('/')"
-        aria-label="Go to root"
+        :aria-label="t('common.home')"
       >
         <el-icon :size="14"><HomeFilled /></el-icon>
-        <span>Home</span>
+        <span>{{ t('common.home') }}</span>
       </button>
 
       <template v-for="(item, index) in breadcrumb" :key="item.path">
@@ -33,10 +33,12 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useFileStore } from '@/stores/fileStore'
 import { HomeFilled } from '@element-plus/icons-vue'
 import { parseBreadcrumb } from '@/utils/path'
 
+const { t } = useI18n()
 const fileStore = useFileStore()
 
 const breadcrumb = computed(() => parseBreadcrumb(fileStore.currentPath))

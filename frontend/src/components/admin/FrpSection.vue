@@ -3,7 +3,7 @@
     <section class="frp-card">
       <div class="card-header">
         <div>
-          <h2 class="section-title">FRP NAT Traversal</h2>
+          <h2 class="section-title">{{ t('frp.service') }}</h2>
           <p class="section-hint">
             When enabled, local services can be exposed to the public internet via an FRP server.
           </p>
@@ -16,16 +16,16 @@
       </div>
 
       <div class="status-row" v-if="store.frpStatus?.enabled">
-        <span class="status-label">Status:</span>
+        <span class="status-label">{{ t('frp.status') }}</span>
         <el-tag :type="store.frpStatus?.running ? 'success' : 'danger'" size="small">
-          {{ store.frpStatus?.running ? 'Running' : 'Stopped' }}
+          {{ store.frpStatus?.running ? t('frp.running') : t('frp.stopped') }}
         </el-tag>
       </div>
     </section>
 
     <section class="frp-card" v-if="store.frpStatus?.enabled">
       <div class="card-header">
-        <h2 class="section-title">FRP Configuration</h2>
+        <h2 class="section-title">{{ t('frp.configuration') }}</h2>
       </div>
 
       <el-form
@@ -35,15 +35,15 @@
         @submit.prevent="handleSaveConfig"
       >
         <div class="form-group">
-          <h3 class="group-title">Server Settings</h3>
-          <el-form-item label="Server Address" required>
+          <h3 class="group-title">{{ t('frp.serverSettings') }}</h3>
+          <el-form-item :label="t('frp.serverAddress')" required>
             <el-input
               v-model="form.serverAddr"
-              placeholder="e.g., frp.example.com"
+              :placeholder="t('frp.serverAddressExample')"
               clearable
             />
           </el-form-item>
-          <el-form-item label="Server Port" required>
+          <el-form-item :label="t('frp.serverPort')" required>
             <el-input-number
               v-model="form.serverPort"
               :min="1"
@@ -51,7 +51,7 @@
               controls-position="right"
             />
           </el-form-item>
-          <el-form-item label="Auth Token">
+          <el-form-item :label="t('frp.authToken')">
             <el-input
               v-model="form.authToken"
               :type="passwordVisible ? 'text' : 'password'"
@@ -69,51 +69,51 @@
         </div>
 
         <div class="form-group">
-          <h3 class="group-title">Proxy Settings</h3>
-          <el-form-item label="Proxy Name">
+          <h3 class="group-title">{{ t('frp.proxySettings') }}</h3>
+          <el-form-item :label="t('frp.proxyName')">
             <el-input
               v-model="form.proxyName"
               placeholder="gohttpserver"
               clearable
             />
             <div class="form-item-hint" v-if="store.frpStatus?.config?.registeredProxyName">
-              Actual name registered on the FRP server: <code>{{ store.frpStatus.config.registeredProxyName }}</code> (a 3-char random suffix is appended per process to keep proxy names unique across instances)
+              {{ t('frp.registeredProxyHint', { name: store.frpStatus.config.registeredProxyName }) }}
             </div>
           </el-form-item>
-          <el-form-item label="Proxy Type">
+          <el-form-item :label="t('frp.proxyType')">
             <el-select v-model="form.proxyType" style="width: 100%">
               <el-option label="TCP" value="tcp" />
               <el-option label="HTTP" value="http" />
               <el-option label="HTTPS" value="https" />
             </el-select>
           </el-form-item>
-          <el-form-item label="Proxy Protocol">
+          <el-form-item :label="t('frp.proxyProtocol')">
             <el-select v-model="form.proxyProtocolVersion" style="width: 100%">
               <el-option label="Disabled" value="" />
               <el-option label="v1" value="v1" />
               <el-option label="v2" value="v2" />
             </el-select>
             <div class="form-item-hint">
-              Enable Proxy Protocol to pass real client IP through FRP. Requires FRP server to support Proxy Protocol.
+              {{ t('frp.proxyProtocolHint') }}
             </div>
           </el-form-item>
         </div>
 
         <div class="form-group">
-          <h3 class="group-title">Local Service (Auto-detected, editable)</h3>
-          <el-form-item label="Local IP">
+          <h3 class="group-title">{{ t('frp.localServiceTitle') }}</h3>
+          <el-form-item :label="t('frp.localIP')">
             <el-input
               v-model="form.localIP"
               placeholder="127.0.0.1"
             >
               <template #append>
-                <el-tooltip content="Auto-detected from program startup configuration; editable if you need a different address" placement="top">
+                <el-tooltip :content="t('frp.serverAddressHint')" placement="top">
                   <el-icon><InfoFilled /></el-icon>
                 </el-tooltip>
               </template>
             </el-input>
           </el-form-item>
-          <el-form-item label="Local Port">
+          <el-form-item :label="t('frp.localPort')">
             <el-input-number
               v-model="form.localPort"
               :min="1"
@@ -124,8 +124,8 @@
         </div>
 
         <div class="form-group">
-          <h3 class="group-title">Remote Port</h3>
-          <el-form-item label="Remote Port" required>
+          <h3 class="group-title">{{ t('frp.remotePort') }}</h3>
+          <el-form-item :label="t('frp.remotePort')" required>
             <el-input-number
               v-model="form.remotePort"
               :min="1"
@@ -137,7 +137,7 @@
 
         <div class="form-actions">
           <el-button type="primary" :loading="saving" @click="handleSaveConfig">
-            Save Configuration
+            {{ t('frp.save') }}
           </el-button>
         </div>
       </el-form>
@@ -145,15 +145,15 @@
 
     <section class="frp-card" v-if="store.frpStatus?.enabled && store.frpStatus?.running">
       <div class="card-header">
-        <h2 class="section-title">Connection Info</h2>
+        <h2 class="section-title">{{ t('frp.connectionInfo') }}</h2>
       </div>
       <div class="connection-info">
         <div class="info-row">
-          <span class="info-label">Public Access Address:</span>
+          <span class="info-label">{{ t('frp.publicAddress') }}</span>
           <code class="info-value">{{ form.serverAddr }}:{{ form.remotePort }}</code>
           <el-button text size="small" @click="copyAddress">
             <el-icon><CopyDocument /></el-icon>
-            Copy
+            {{ t('common.copy') }}
           </el-button>
         </div>
       </div>
@@ -165,9 +165,11 @@
 import { ref, reactive, onMounted, watch, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { CopyDocument, InfoFilled, View, Hide, Loading } from '@element-plus/icons-vue'
+import { useI18n } from 'vue-i18n'
 import { useAdminStore } from '@/stores/adminStore'
 import { copyText } from '@/utils/clipboard'
 
+const { t } = useI18n()
 const store = useAdminStore()
 const togglingEnabled = ref(false)
 const saving = ref(false)
@@ -189,8 +191,8 @@ const form = reactive({
 // 服务端的 auth token 只写不回显：把掩码值回填会以 "********" 覆盖真实 token。留空表示保持原值。
 const authTokenPlaceholder = computed(() =>
   store.frpStatus?.config?.authTokenSet
-    ? 'Token configured — leave blank to keep, or enter a new one'
-    : 'FRP server authentication token',
+    ? t('frp.tokenKeepPlaceholder')
+    : t('frp.tokenPlaceholder'),
 )
 
 watch(
@@ -216,10 +218,10 @@ async function handleToggleEnabled(target: boolean) {
   try {
     const res = await store.setFRPEnabled(target)
     if (res.ok) {
-      ElMessage.success(target ? 'FRP enabled' : 'FRP disabled')
+      ElMessage.success(target ? t('frp.enabled') : t('frp.disabled'))
       await store.loadFRPStatus()
     } else {
-      ElMessage.error(res.error || 'Toggle failed')
+      ElMessage.error(res.error || t('frp.toggleFailed'))
     }
   } finally {
     togglingEnabled.value = false
@@ -228,19 +230,19 @@ async function handleToggleEnabled(target: boolean) {
 
 async function handleSaveConfig() {
   if (!form.serverAddr) {
-    ElMessage.error('Please enter server address')
+    ElMessage.error(t('frp.serverAddressRequired'))
     return
   }
   if (!form.serverPort || form.serverPort < 1 || form.serverPort > 65535) {
-    ElMessage.error('Please enter a valid server port')
+    ElMessage.error(t('frp.serverPortInvalid'))
     return
   }
   if (!form.localPort || form.localPort < 1 || form.localPort > 65535) {
-    ElMessage.error('Please enter a valid local port')
+    ElMessage.error(t('frp.localPortInvalid'))
     return
   }
   if (!form.remotePort || form.remotePort < 1 || form.remotePort > 65535) {
-    ElMessage.error('Please enter a valid remote port')
+    ElMessage.error(t('frp.remotePortInvalid'))
     return
   }
 
@@ -258,10 +260,10 @@ async function handleSaveConfig() {
       proxyProtocolVersion: form.proxyProtocolVersion,
     })
     if (res.ok) {
-      ElMessage.success('Configuration saved')
+      ElMessage.success(t('frp.saved'))
       await store.loadFRPStatus()
     } else {
-      ElMessage.error(res.error || 'Save failed')
+      ElMessage.error(res.error || t('frp.saveFailed'))
     }
   } finally {
     saving.value = false
@@ -277,11 +279,11 @@ async function handleToggleTokenVisible() {
       if (res.ok) {
         form.authToken = res.data.authToken || ''
         if (!form.authToken) {
-          ElMessage.info('当前未配置 token')
+          ElMessage.info(t('frp.noToken'))
           return
         }
       } else {
-        ElMessage.error(res.error || '获取 token 失败')
+        ElMessage.error(res.error || t('frp.tokenFetchFailed'))
         return
       }
     } finally {
@@ -294,9 +296,9 @@ async function handleToggleTokenVisible() {
 async function copyAddress() {
   const address = `${form.serverAddr}:${form.remotePort}`
   if (await copyText(address)) {
-    ElMessage.success('Copied to clipboard')
+    ElMessage.success(t('webdav.copied'))
   } else {
-    ElMessage.error('Copy failed, please select and copy manually')
+    ElMessage.error(t('frp.copyFailed'))
   }
 }
 

@@ -1,5 +1,5 @@
 <template>
-  <el-config-provider :locale="locale">
+  <el-config-provider :locale="epLocale">
     <!-- 认证完成前不渲染任何内容。 -->
     <template v-if="showLoginGate">
       <Login :next="pendingPath" />
@@ -15,18 +15,18 @@
               </span>
               <div class="header-titles">
                 <h1 class="header-title">GoHTTPServer</h1>
-                <span class="header-subtitle">File Manager</span>
+                <span class="header-subtitle">{{ t('header.subtitle') }}</span>
               </div>
             </div>
           </div>
 
           <div class="header-right">
             <!-- 本机无法扫描自己屏幕上的二维码。 -->
-            <el-tooltip content="View on phone (QR)" placement="bottom">
+            <el-tooltip :content="t('header.viewOnPhone')" placement="bottom">
               <el-button
                 class="header-chip header-chip--qr"
                 circle
-                aria-label="Show QR code"
+                :aria-label="t('header.showQrCode')"
                 @click="handleShowMainQrCode"
               >
                 <el-icon :size="17"><Camera /></el-icon>
@@ -36,7 +36,7 @@
             <div class="header-search">
               <el-input
                 v-model="searchValue"
-                placeholder="Search files…"
+                :placeholder="t('header.searchPlaceholder')"
                 clearable
                 @keyup.enter="handleSearch"
                 @clear="handleClearSearch"
@@ -59,8 +59,8 @@
                 <el-button
                   class="header-chip theme-toggle"
                   circle
-                  :title="`Theme: ${currentTheme}`"
-                  aria-label="Switch theme"
+                  :title="t('header.themeSet', { theme: currentTheme })"
+                  :aria-label="t('header.switchTheme')"
                 >
                   <span class="theme-swatch" :data-theme="currentTheme" aria-hidden="true"></span>
                 </el-button>
@@ -102,7 +102,7 @@
                       {{ (fileStore.user.name || fileStore.user.email || '?').charAt(0).toUpperCase() }}
                     </span>
                     <span class="header-user-name">
-                      {{ fileStore.user.name || fileStore.user.email || 'Guest' }}
+                      {{ fileStore.user.name || fileStore.user.email || t('header.guest') }}
                     </span>
                   </button>
                 </template>
@@ -114,7 +114,7 @@
                     @click="openAdminPanel"
                   >
                     <el-icon :size="14"><Setting /></el-icon>
-                    Admin Panel
+                    {{ t('header.adminPanel') }}
                   </button>
                   <button
                     type="button"
@@ -122,7 +122,7 @@
                     @click="handleLogout"
                   >
                     <el-icon :size="14"><SwitchButton /></el-icon>
-                    Sign out
+                    {{ t('header.signOut') }}
                   </button>
                 </div>
               </el-popover>
@@ -150,7 +150,7 @@
               v-if="version && version !== 'unknown'"
               class="footer-version footer-version--link"
               type="button"
-              title="检查更新"
+              :title="t('header.checkForUpdates')"
               @click="updateStore.openDialog()"
             >{{ version }}</button>
             <button
@@ -208,7 +208,7 @@
           />
         </template>
         <template #fallback>
-          <div class="modal-loading" aria-hidden="true">Loading…</div>
+          <div class="modal-loading" aria-hidden="true">{{ t('common.loading') }}</div>
         </template>
       </Suspense>
 
@@ -221,7 +221,7 @@
           />
         </template>
         <template #fallback>
-          <div class="modal-loading" aria-hidden="true">Loading…</div>
+          <div class="modal-loading" aria-hidden="true">{{ t('common.loading') }}</div>
         </template>
       </Suspense>
 
@@ -230,7 +230,7 @@
           <UpdateDialog />
         </template>
         <template #fallback>
-          <div class="modal-loading" aria-hidden="true">Loading…</div>
+          <div class="modal-loading" aria-hidden="true">{{ t('common.loading') }}</div>
         </template>
       </Suspense>
     </div>
@@ -238,14 +238,31 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, computed, ref, defineAsyncComponent } from 'vue'
+import { onMounted, onBeforeUnmount, computed, ref, shallowRef, watch, defineAsyncComponent } from 'vue'
 import { useFileStore } from './stores/fileStore'
 import { useUpdateStore } from './stores/updateStore'
 import { useTheme } from './composables/useTheme'
 import FileList from './components/FileList.vue'
 import Login from './views/Login.vue'
 import { currentListingPath } from './utils/path'
-import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
+import { useI18n } from 'vue-i18n'
+// Element Plus 组件内部文案（分页、日期等）随语言切换。
+// 两套 locale 包按需动态加载：只导入当前语言的一份，避免总是把两种语言
+// 都打进首包（zh-cn.mjs + en.mjs 合计约数十字节的代码和字符串）。
+const { locale: i18nLocale, t } = useI18n()
+const epLocale = shallowRef<Record<string, any>>({})
+let epLocalePromise: Promise<Record<string, any>> | null = null
+const loadEpLocale = (lang: 'zh' | 'en'): Promise<Record<string, any>> => {
+  const path = lang === 'zh'
+    ? () => import('element-plus/dist/locale/zh-cn.mjs')
+    : () => import('element-plus/dist/locale/en.mjs')
+  if (epLocalePromise) return epLocalePromise
+  epLocalePromise = path().then((m: any) => m.default ?? m)
+  return epLocalePromise
+}
+watch(i18nLocale, async (lang) => {
+  epLocale.value = await loadEpLocale(lang === 'zh' ? 'zh' : 'en')
+}, { immediate: true })
 const AdminPanel = defineAsyncComponent(() => import('./views/AdminPanel.vue'))
 const QRCodeModal = defineAsyncComponent(() => import('./components/QrCodeModal.vue'))
 const UpdateDialog = defineAsyncComponent(() => import('./components/UpdateDialog.vue'))
@@ -259,7 +276,6 @@ const fileStore = useFileStore()
 const updateStore = useUpdateStore()
 const { currentTheme, availableThemes, setTheme } = useTheme()
 
-const locale = zhCn
 const showQrCodeModal = ref(false)
 const currentQrFile = ref<FileItem | null>(null)
 const searchValue = ref('')
@@ -315,7 +331,7 @@ function handleClearSearch() {
 
 function handleThemeChange(theme: string) {
   setTheme(theme as any)
-  ElMessage.success(`Theme: ${theme}`)
+  ElMessage.success(t('header.themeSet', { theme }))
 }
 
 function openAdminPanel() {
@@ -326,7 +342,7 @@ function openAdminPanel() {
 async function handleLogout() {
   userPopoverRef.value?.hide()
   await fileStore.logout()
-  ElMessage.info('Signed out')
+  ElMessage.info(t('header.signedOut'))
   window.location.assign('/')
 }
 
@@ -337,11 +353,11 @@ function handleUsernameChanged(newName: string) {
 }
 
 function handleShortcut(e: KeyboardEvent) {
-  const t = e.target as HTMLElement | null
+  const target = e.target as HTMLElement | null
   const isInput =
-    t?.tagName === 'INPUT' ||
-    t?.tagName === 'TEXTAREA' ||
-    (t?.isContentEditable ?? false)
+    target?.tagName === 'INPUT' ||
+    target?.tagName === 'TEXTAREA' ||
+    (target?.isContentEditable ?? false)
   if (e.key === '/' && !isInput && !e.ctrlKey && !e.metaKey) {
     e.preventDefault()
     const el = document.querySelector<HTMLInputElement>('.header-search input')

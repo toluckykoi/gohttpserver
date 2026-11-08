@@ -1,8 +1,11 @@
 package auth
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/gob"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -60,8 +63,7 @@ type LoginState struct {
 	db     *sql.DB
 	dbPath string // 保留供测试重开同一数据库验证持久化
 
-	// defaultPwdKnown 缓存 isDefaultPassword 的判定结果。handleAuthStatus 每次
-	// 认证探测都调用它，旧实现每请求全价 bcrypt（~60ms）；凭据变化即失效。
+	// defaultPwdKnown 缓存 isDefaultPassword 的判定结果，凭据变化即失效。
 	defaultPwdKnown atomic.Int32
 
 	rateLimitMu       sync.Mutex
@@ -104,17 +106,25 @@ func LoadLoginCredentialsAt(db *sql.DB, path string) *LoginState {
 		"SELECT username, password_sha256, created_at, updated_at FROM login_credentials WHERE id = 1",
 	).Scan(&c.Username, &c.PasswordSHA, &c.CreatedAtUnix, &c.UpdatedAtUnix)
 	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			log.Printf("login: failed to read credentials (%v); using default credentials", err)
+		if errors.Is(err, sql.ErrNoRows) {
+			// 全新数据库：还没有凭据行，使用默认口令并提示修改。
+			st.creds = defaultLoginCredentials()
+			log.Printf("login: no stored credentials; using in-memory default credentials (admin/admin). " +
+				"Change the password via PUT /-/api/auth/password to persist a new one.")
+			return st
 		}
-		st.creds = defaultLoginCredentials()
-		log.Printf("login: no stored credentials; using in-memory default credentials (admin/admin). " +
-			"Change the password via PUT /-/api/auth/password to persist a new one.")
+		// SECURITY(P3): 凭据库读取异常（损坏/被锁）时 fail-closed——凭据不可验证即拒绝
+		// 登录，绝不回退到已知默认口令 admin/admin，否则任何能造成读取错误的攻击者
+		// 都等于拿到了管理员凭据。修复数据库后重启即可恢复。
+		st.creds = lockedLoginCredentials()
+		log.Printf("login: failed to read credentials (%v); login is LOCKED until the database is repaired", err)
 		return st
 	}
 	if c.Username == "" || c.PasswordSHA == "" {
-		log.Printf("login: stored credentials missing username or password; using default credentials")
-		c = *defaultLoginCredentials()
+		// 行存在但字段为空属于数据损坏，与读取异常同样 fail-closed。
+		st.creds = lockedLoginCredentials()
+		log.Printf("login: stored credentials missing username or password; login is LOCKED until the credentials are repaired")
+		return st
 	}
 	st.creds = &c
 	return st
@@ -139,6 +149,25 @@ func defaultLoginCredentials() *loginCredentials {
 	return &loginCredentials{
 		Username:      defaultUsername,
 		PasswordSHA:   hash,
+		CreatedAtUnix: now,
+		UpdatedAtUnix: now,
+	}
+}
+
+// lockedLoginCredentials 返回不可能通过验证的凭据：密码哈希为随机 64 位十六进制串
+// （走 legacy SHA-256 比较路径），任何口令都无法匹配。用于凭据库读取异常时
+// fail-closed（P3），避免回退到已知默认口令。
+func lockedLoginCredentials() *loginCredentials {
+	now := time.Now().Unix()
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		// 系统随机源失败时退化为时间派生值；仍不可匹配，仅失去随机性。
+		buf = []byte("locked:" + time.Now().String())
+	}
+	sum := sha256.Sum256(buf)
+	return &loginCredentials{
+		Username:      defaultUsername,
+		PasswordSHA:   hex.EncodeToString(sum[:]),
 		CreatedAtUnix: now,
 		UpdatedAtUnix: now,
 	}
@@ -181,8 +210,7 @@ func (s *LoginState) upgradePasswordHash(newHash string) {
 }
 
 // isDefaultPassword 判断当前凭据是否仍是 admin/admin。
-// 性能（第 10 轮性能审查）：判定结果按凭据缓存，命中零 bcrypt；未命中时锁内
-// 只快照用户名与哈希，bcrypt 在锁外执行，不阻塞并发登录与改密。
+// 判定结果按凭据缓存，命中零 bcrypt；未命中时锁内只快照，bcrypt 在锁外执行。
 func (s *LoginState) isDefaultPassword() bool {
 	switch s.defaultPwdKnown.Load() {
 	case defaultPwdTrue:
@@ -333,10 +361,8 @@ func (s *LoginState) recordFailedLogin(ip string) {
 
 	attempt, exists := s.loginAttempts[ip]
 	if !exists {
-		// 硬上限：映射满时淘汰 lastFail 最旧的条目腾位后正常记录。
-		// SECURITY: 旧实现直接 return——新 IP 的失败不被记录，而 checkRateLimit
-		// 对未知 IP 恒放行，登录限流对新 IP 完全失效（fail-open）。淘汰最旧
-		// 条目不可被攻击者定向利用（最旧条目本就最接近 2 小时清理线）。
+		// 硬上限：满时淘汰 lastFail 最旧的条目腾位后正常记录，否则新 IP 的失败
+		// 不被记录而限流对新 IP 失效（fail-open）。
 		if len(s.loginAttempts) >= s.maxAttemptEntries {
 			s.evictOldestAttemptLocked()
 			log.Printf("login: rate limit map full (%d entries), evicted oldest entry for new IP %s",
@@ -371,7 +397,6 @@ func (s *LoginState) recordSuccessfulLogin(ip string) {
 }
 
 // evictOldestAttemptLocked 删除 lastFail 最旧的条目；调用方必须持有 rateLimitMu。
-// 映射至多 maxAttemptEntries 条，全量扫描一次的成本可接受。
 func (s *LoginState) evictOldestAttemptLocked() {
 	var oldestIP string
 	var oldest time.Time
@@ -449,9 +474,8 @@ func isLoginWhitelisted(path string) bool {
 		return true
 	}
 	for _, p := range loginWhitelist {
-		// SECURITY: 精确名一律整串比较；目录型条目（以 "/" 结尾）才按前缀匹配。
-		// 旧实现无条件 HasPrefix，"/-/login" 会放行 "/-/loginX" 等任意后缀路径，
-		// 使其穿透登录闸门直达文件服务。
+		// SECURITY: 精确名整串比较，目录型条目（以 "/" 结尾）才按前缀匹配；
+		// 否则 "/-/login" 会放行 "/-/loginX" 等任意后缀路径穿透闸门。
 		if path == p {
 			return true
 		}
@@ -534,8 +558,7 @@ func handleLoginUI(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleLoginSubmit(state *LoginState, w http.ResponseWriter, r *http.Request) {
-	// SECURITY: 先限流请求体再解析表单——登录页无需大请求，未认证客户端
-	// 不应能借 multipart 解析把数据缓冲到磁盘。
+	// SECURITY: 先限流请求体再解析表单，未认证客户端不能借 multipart 解析把数据缓冲到磁盘。
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	// ParseMultipartForm 同时兼容 multipart 与 url-encoded 表单。
 	if err := r.ParseMultipartForm(32 << 20); err != nil && err != http.ErrNotMultipart {
@@ -649,8 +672,7 @@ func HandleChangePassword(state *LoginState, w http.ResponseWriter, r *http.Requ
 	_, _ = w.Write([]byte(`{"success":true}`))
 }
 
-// RegisterLoginRoutes 在去掉前缀后的子路由上注册 --login 相关端点。
-// /-/login 必须先于受保护的 / 兜底路由注册。
+// RegisterLoginRoutes 在去掉前缀后的子路由上注册 --login 相关端点；/-/login 必须先于受保护的 / 兜底路由注册。
 func RegisterLoginRoutes(router *mux.Router, state *LoginState, loginEnabled bool) {
 	router.HandleFunc("/-/login", handleLoginUI).Methods("GET")
 	router.HandleFunc("/-/login", func(w http.ResponseWriter, r *http.Request) {

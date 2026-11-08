@@ -1,7 +1,7 @@
 <template>
   <el-dialog
     v-model="visible"
-    title="New Folder"
+    :title="t('newFolder.title')"
     width="400px"
     :close-on-click-modal="!creating"
     :close-on-press-escape="!creating"
@@ -12,11 +12,11 @@
       label-position="top"
       @submit.prevent="handleCreate"
     >
-      <el-form-item label="Enter directory name" required>
+      <el-form-item :label="t('newFolder.nameLabel')" required>
         <el-input
           ref="inputRef"
           v-model="name"
-          placeholder="Folder name"
+          :placeholder="t('newFolder.namePlaceholder')"
           :disabled="creating"
           clearable
         />
@@ -26,7 +26,7 @@
     <template #footer>
       <div class="dialog-footer">
         <el-button @click="handleCancel" :disabled="creating">
-          Cancel
+          {{ t('common.cancel') }}
         </el-button>
         <el-button
           type="primary"
@@ -34,7 +34,7 @@
           :disabled="!name"
           @click="handleCreate"
         >
-          Create
+          {{ t('newFolder.create') }}
         </el-button>
       </div>
     </template>
@@ -44,8 +44,11 @@
 <script setup lang="ts">
 import { ref, computed, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
+import { useI18n } from 'vue-i18n'
 import { useFileStore } from '@/stores/fileStore'
 import { checkPathNameLegal } from '@/utils/path'
+
+const { t } = useI18n()
 
 const props = defineProps<{
   visible: boolean
@@ -85,7 +88,7 @@ async function handleCreate() {
   if (!inputName) return
 
   if (!checkPathNameLegal(inputName)) {
-    ElMessage.warning('Directory name must not contain \\ / : * < > |')
+    ElMessage.warning(t('newFolder.illegalName'))
     return
   }
 

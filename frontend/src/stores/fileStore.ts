@@ -4,6 +4,7 @@ import type { FileItem, AuthInfo, UserInfo } from '@/types'
 import { useFileApi } from '@/composables/useFileApi'
 import { useTheme } from '@/composables/useTheme'
 import { ElMessage } from 'element-plus'
+import i18n from '@/i18n'
 
 const SORT_STORAGE_KEY = 'gohttpserver_sort'
 
@@ -113,7 +114,7 @@ export const useFileStore = defineStore('file', () => {
       }
     } catch (error) {
       if (seq !== loadFilesSeq) return
-      ElMessage.error(`Failed to load files: ${error}`)
+      ElMessage.error(i18n.global.t('messages.loadFilesFailed', { msg: String(error) }))
       console.error(error)
     } finally {
       if (seq === loadFilesSeq && !options.silent) {
@@ -159,9 +160,8 @@ export const useFileStore = defineStore('file', () => {
     }
   }
 
-  /** POST /-/login 提交凭证；成功后只记录本地 user，不在这里预取文件列表——
-   *  Login.vue 随后会 window.location.replace(target) 硬刷新 SPA，由 App.vue
-   *  的 onMounted 发起第一次（也是唯一一次）loadFiles；在此预取会与刷新竞态且白费请求。 */
+  /** POST /-/login 提交凭证；成功后只记录本地 user，不预取文件列表——Login.vue
+   *  随后会硬刷新 SPA，首次 loadFiles 由 App.vue onMounted 发起，预取会与刷新竞态。 */
   async function loginWithCredentials(username: string, password: string) {
     const next = currentPath.value || '/'
     const res = await fileApi.submitLogin(username, password, next)
@@ -193,10 +193,10 @@ export const useFileStore = defineStore('file', () => {
   async function uploadFile(file: File, options?: { filename?: string; unzip?: boolean }) {
     try {
       await fileApi.uploadFile(currentPath.value, file, options)
-      ElMessage.success('File uploaded successfully')
+      ElMessage.success(i18n.global.t('messages.uploadSuccess'))
       await loadFiles()
     } catch (error) {
-      ElMessage.error(`Failed to upload file: ${error}`)
+      ElMessage.error(i18n.global.t('messages.uploadFailed', { msg: String(error) }))
       throw error
     }
   }
@@ -204,10 +204,10 @@ export const useFileStore = defineStore('file', () => {
   async function createDirectory(name: string) {
     try {
       await fileApi.createDirectory(currentPath.value, name)
-      ElMessage.success('Directory created successfully')
+      ElMessage.success(i18n.global.t('messages.dirCreated'))
       await loadFiles()
     } catch (error) {
-      ElMessage.error(`Failed to create directory: ${error}`)
+      ElMessage.error(i18n.global.t('messages.dirCreateFailed', { msg: String(error) }))
       throw error
     }
   }
@@ -228,7 +228,7 @@ export const useFileStore = defineStore('file', () => {
 
     try {
       await fileApi.deleteFile(currentPath.value, filename)
-      ElMessage.success('File deleted successfully')
+      ElMessage.success(i18n.global.t('messages.fileDeleted'))
       // 静默后台同步：吸收并发变更（如其他客户端上传），且不在用户正在看的
       // 列表上再触发一次 loading 转圈。失败可忽略——乐观状态已与服务端确认一致。
       loadFiles(undefined, undefined, { silent: true }).catch(err =>
@@ -238,7 +238,7 @@ export const useFileStore = defineStore('file', () => {
       // 服务端拒绝删除，拉回真实列表还原 UI；静默的理由同成功路径——不在当前
       // 视图上闪出转圈。
       loadFiles(undefined, undefined, { silent: true }).catch(() => {})
-      ElMessage.error(`Failed to delete file: ${error}`)
+      ElMessage.error(i18n.global.t('messages.deleteFailed', { msg: String(error) }))
       throw error
     }
   }

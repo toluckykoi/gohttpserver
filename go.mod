@@ -1,6 +1,6 @@
 module github.com/codeskyblue/gohttpserver
 
-go 1.26
+go 1.26.0
 
 require (
 	github.com/alecthomas/kingpin v2.2.6+incompatible
@@ -20,6 +20,8 @@ require (
 	golang.org/x/text v0.40.0
 	modernc.org/sqlite v1.54.0
 )
+
+require golang.org/x/mod v0.42.0
 
 require (
 	github.com/Azure/go-ntlmssp v0.1.0 // indirect

@@ -28,13 +28,11 @@ type API struct {
 	// LocalAddr 是程序监听地址（IP:port）。
 	LocalAddr string
 	// FRP 是 FRP 客户端管理器；可为 nil。
-	FRP *frp.FRPClient
-	// Version 是构建版本字符串。
+	FRP     *frp.FRPClient
 	Version string
 }
 
-// RegisterRoutes 在 router 上注册全部 /-/api/admin/* 端点。
-// router 必须是去掉前缀后的子路由，--prefix 才能透明生效。
+// RegisterRoutes 在 router 上注册全部 /-/api/admin/* 端点；router 须为去掉前缀后的子路由，--prefix 才能透明生效。
 func RegisterRoutes(router *mux.Router, api *API) {
 	router.HandleFunc("/-/api/admin/profile", api.handleProfile).Methods("GET")
 	router.HandleFunc("/-/api/admin/profile/username", api.handleChangeUsername).Methods("PUT")
@@ -447,11 +445,9 @@ func (api *API) handleFRPUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
 }
 
-// handleFRPRevealToken 向已登录会话返回 FRP auth token 明文。
-// 有意为之：--login 目前是单管理员模型，任何已登录会话就是管理员本人，
-// 而管理员必须能读回自己保存过的 token 才能修改其它 FRP 配置（否则改一次
-// serverAddr 就得连同 token 一起重输）。若未来引入多用户/角色模型，
-// 此端点必须改为「仅首次设置时返回」或加二次确认。
+// handleFRPRevealToken 向已登录会话返回 FRP auth token 明文。--login 为单管理员模型，
+// 管理员需读回已保存的 token 才能修改其它 FRP 配置；若引入多用户/角色模型，
+// 此端点必须改为仅首次设置时返回或加二次确认。
 func (api *API) handleFRPRevealToken(w http.ResponseWriter, r *http.Request) {
 	if auth.UserFromLoginSession(r) == nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)

@@ -15,7 +15,7 @@
         autoplay
         :src="videoUrl"
       >
-        Your browser does not support the video tag.
+        {{ t('video.notSupported') }}
       </video>
     </div>
   </el-dialog>
@@ -23,8 +23,11 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { FileItem } from '@/types'
 import { getEncodePath } from '@/utils/path'
+
+const { t } = useI18n()
 
 interface Props {
   visible: boolean
@@ -45,7 +48,7 @@ const visible = computed({
 })
 
 const title = computed(() => {
-  if (!props.file) return 'Video Player'
+  if (!props.file) return t('video.title')
   return props.file.name
 })
 

@@ -46,16 +46,13 @@ type WebdavAccountState struct {
 	db     *sql.DB
 	dbPath string // 供测试重开同一 DB 验证持久化
 
-	// 凭据缓存：Basic Auth 客户端每个请求都携带用户名密码，全价 bcrypt
-	//（实测 ~60ms/次）曾使每个 WebDAV 请求都付出一次哈希成本。缓存
-	// (username, password) 的哈希 → 账号 ID，TTL 内命中即零 bcrypt。
-	// 任何账号变更（增删改/改密/哈希升级）经 saveLocked 统一清空。
+	// 凭据缓存：(username, password) 的哈希 → 账号 ID，TTL 内命中免去每请求一次的 bcrypt。
+	// 任何账号变更经 saveLocked 统一清空。
 	credMu    sync.Mutex
 	credCache map[string]webdavCredEntry
 }
 
-// credCacheTTL 是凭据缓存的有效期。所有账号变更路径都会立即清空缓存，
-// TTL 只是外部改动（无进程内失效点）的兜底。
+// credCacheTTL 是凭据缓存的有效期；变更路径都会立即清空缓存，TTL 只是外部改动的兜底。
 const credCacheTTL = 5 * time.Minute
 
 type webdavCredEntry struct {
@@ -63,16 +60,14 @@ type webdavCredEntry struct {
 	expiresAt time.Time
 }
 
-// credCacheKey 派生缓存键：对 (username, password) 整体做 SHA-256，避免明文
-// 密码驻留内存，也让命中比较不暴露任何可逐字节猜测的原料。
+// credCacheKey 派生缓存键：对 (username, password) 整体做 SHA-256，避免明文密码驻留内存。
 func credCacheKey(username, password string) string {
 	sum := sha256.Sum256([]byte(username + "\x00" + password))
 	return hex.EncodeToString(sum[:])
 }
 
-// lookupCredCache 返回缓存命中的账号 ID；过期条目顺带剔除。调用方持有 s.mu
-// （读锁即可），账号快照由调用方按 ID 从当前列表读取，因此 RootPath/ReadOnly
-// 等属性始终是最新值。
+// lookupCredCache 返回缓存命中的账号 ID，过期条目顺带剔除；调用方持有 s.mu（读锁即可）。
+// 账号快照由调用方按 ID 从当前列表读取，属性始终是最新值。
 func (s *WebdavAccountState) lookupCredCache(username, password string) (string, bool) {
 	s.credMu.Lock()
 	defer s.credMu.Unlock()
@@ -91,8 +86,7 @@ func (s *WebdavAccountState) lookupCredCache(username, password string) (string,
 	return entry.accountID, true
 }
 
-// storeCredCache 记录一次验证成功的凭据。只在验证成功后写入，错误密码无法
-// 污染缓存；条目数不超过账号数 × 未失效的旧密码轮次，天然有界。
+// storeCredCache 记录一次验证成功的凭据；只在成功后写入，错误密码无法污染缓存。
 func (s *WebdavAccountState) storeCredCache(username, password, accountID string) {
 	s.credMu.Lock()
 	defer s.credMu.Unlock()
@@ -105,8 +99,7 @@ func (s *WebdavAccountState) storeCredCache(username, password, accountID string
 	}
 }
 
-// invalidateCredCache 清空凭据缓存。WebdavAccountState 的所有持久化变更都
-// 经过 saveLocked，在此统一失效即可覆盖全部变更点（含密码哈希升级）。
+// invalidateCredCache 清空凭据缓存；所有持久化变更都经过 saveLocked，在此统一失效即可覆盖全部变更点。
 func (s *WebdavAccountState) invalidateCredCache() {
 	s.credMu.Lock()
 	s.credCache = nil
@@ -121,15 +114,14 @@ var systemFileNames = map[string]bool{
 	"gohttpserver.db":      true,
 	"gohttpserver.db-wal":  true,
 	"gohttpserver.db-shm":  true,
-	"frp-encryption.key":   true, // 第 8 轮审计补：此前漏列，WebDAV 账号可覆盖 FRP 密钥
+	"frp-encryption.key":   true,
 	".ghs.yml":             true,
 	"favicon.ico":          true,
 	"favicon.png":          true,
 }
 
-// serverStateFileNames 是无论 ProtectSystemFiles 开关如何都禁止经 WebDAV
-// 读写的服务器私有文件：账号 chroot 默认就是服务根，能读出凭据库/密钥即等同
-// 泄露（第 8 轮审计实证：写保护只拦写，GET 从未受限）。
+// serverStateFileNames 无论 ProtectSystemFiles 开关如何都禁止经 WebDAV 读写：
+// 账号 chroot 默认就是服务根，能读出凭据库/密钥即等同泄露。
 var serverStateFileNames = []string{
 	"gohttpserver.db",
 	"gohttpserver.db-wal",
@@ -140,8 +132,7 @@ var serverStateFileNames = []string{
 	"storage-usage.json",
 }
 
-// RegisterServerStateName 把额外文件基名（如自定义 --db 的文件名）并入
-// serverStateFileNames；须在启动阶段调用，与 server/zipx 包的注册入口配套。
+// RegisterServerStateName 把额外文件基名（如自定义 --db 的文件名）并入 serverStateFileNames，须在启动阶段调用。
 func RegisterServerStateName(name string) {
 	name = strings.ToLower(strings.TrimSpace(name))
 	if name == "" || strings.ContainsAny(name, `/\`) {
@@ -155,9 +146,10 @@ func RegisterServerStateName(name string) {
 	serverStateFileNames = append(serverStateFileNames, name)
 }
 
-// isServerStateNameWebdav 判断 base 是否为服务器私有文件的等价名（先做 Windows
-// 名字归一化，再大小写不敏感比较——与 util.WindowsNormaliseName 的说明一致，
-// 尾点与 ADS 变体都必须拦）。
+// isServerStateNameWebdav 判断 base 是否为服务器私有文件的等价名
+// （Windows 名字归一化 + 大小写不敏感，尾点与 ADS 变体都拦）。
+// SECURITY(H2)：必须同时识别 8.3 短名（GOHTTP~1.DB 等）——系统卷默认生成短名，
+// 凭据库/密钥可经短名绕过精确名单被读出或删除；判定用 util 共享实现，与 server/zipx 对齐。
 func isServerStateNameWebdav(base string) bool {
 	base = util.WindowsNormaliseName(base)
 	for _, n := range serverStateFileNames {
@@ -165,7 +157,7 @@ func isServerStateNameWebdav(base string) bool {
 			return true
 		}
 	}
-	return false
+	return util.MatchesSensitiveShortName(base)
 }
 
 // LoadWebdavAccounts 从 SQLite 读取 WebDAV 账号状态。
@@ -246,11 +238,7 @@ func generateWebdavID() (string, error) {
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
 	}
-	// Use simple hex encoding without importing encoding/hex
 	const hexChars = "0123456789abcdef"
-	// "wd_"（3 字节）+ 3 字节各产生 2 个十六进制字符（6 字节）= 9 字节。
-	// 旧实现缓冲区只有 7 字节，写入 result[7]/result[8] 必然越界 panic，
-	// 导致 CreateAccount 永远失败（第 8 轮审计实证）。
 	result := make([]byte, 9) // "wd_" + 6 chars
 	result[0] = 'w'
 	result[1] = 'd'
@@ -300,6 +288,10 @@ type CreateAccountRequest struct {
 func (s *WebdavAccountState) CreateAccount(req CreateAccountRequest, loginUsername string) (WebdavAccount, string, error) {
 	if req.Remark == "" {
 		return WebdavAccount{}, "", errors.New("remark is required")
+	}
+	// 与 UpdateAccount 对齐拒绝负数配额：负值会使所有 quota>0 判断为假，静默等效"不限量"。
+	if req.QuotaBytes < 0 {
+		return WebdavAccount{}, "", errors.New("quota_bytes must not be negative")
 	}
 	root, err := normaliseWebdavRoot(req.RootPath)
 	if err != nil {
@@ -481,16 +473,9 @@ func (s *WebdavAccountState) SyncUsernamesTo(oldName, newName string) (int, erro
 	return len(renames), nil
 }
 
-// VerifyWebdav 按用户名查账号并校验密码；同名账号可能多个、需全部尝试，且不提前返回以免泄露用户名是否存在。
-//
-// 性能（第 8 轮性能审查）：Basic Auth 每请求携带凭据，全价 bcrypt 实测 ~60ms/次
-// 曾让每个 WebDAV 请求都付出一次哈希成本。TTL 内验证成功的凭据直接从缓存命中，
-// 零 bcrypt；缓存键为 (username, password) 的 SHA-256。
-//
-// 性能（第 10 轮性能审查）：bcrypt 移到 s.mu 之外执行——旧实现缓存未命中时整个
-// 验证过程持有 RLock，并发未命中会烧满 CPU，且管理员账号操作要等所有验证结束。
-// 锁内只拷贝同名账号的值副本（避免与原地改密竞争），验证命中后按 ID 取当前
-// 账号对象返回，RootPath/ReadOnly 等属性不受锁外验证期间变更的影响。
+// VerifyWebdav 按用户名查账号并校验密码；同名账号可能多个、需全部尝试，不提前返回以免泄露用户名是否存在。
+// TTL 内验证成功的凭据直接缓存命中（零 bcrypt）；bcrypt 在 s.mu 之外执行，锁内只拷贝同名账号的值副本，
+// 命中后按 ID 重取当前账号，属性不受锁外验证期间变更的影响。
 func (s *WebdavAccountState) VerifyWebdav(username, password string) (WebdavAccount, bool) {
 	s.mu.RLock()
 	cachedID, hasCached := s.lookupCredCache(username, password)
@@ -649,15 +634,17 @@ func (s *WebdavAccountState) saveLocked() error {
 }
 
 // isProtectedFilename 判断文件名在开启 ProtectSystemFiles 时是否禁止写入/删除。
-// 大小写不敏感：Windows 上 "GOHTTPSERVER.DB" 与 "gohttpserver.db" 是同一个文件。
-// 比较前先做 Windows 名字归一化——"gohttpserver.db." 与 "gohttpserver.db::$DATA"
-// 落盘/打开时都指向同一文件，精确 EqualFold 曾被绕过（第 8 轮审计实证）。
+// 比较前先做 Windows 名字归一化，尾点与 ADS 变体落盘时与原文件同体，一并拦截；
+// 8.3 短名（GOHTTP~1.DB 等，H2）与敏感扩展的短名同体，同样禁止写入/删除。
 func isProtectedFilename(name string) bool {
 	name = util.WindowsNormaliseName(name)
 	for sysName := range systemFileNames {
 		if strings.EqualFold(name, sysName) {
 			return true
 		}
+	}
+	if util.MatchesSensitiveShortName(name) {
+		return true
 	}
 	// 点文件同样受保护。
 	return strings.HasPrefix(name, ".")

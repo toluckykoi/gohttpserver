@@ -16,7 +16,6 @@ set "LogFile=%InstallDir%\gohttpserver.log"
 set "DefaultPort=8000"
 set "ListenPort=0"
 set "Repo=toluckykoi/gohttpserver"
-set "Channel=stable"
 set "Mirror=github"
 set "EnableUpload=false"
 set "EnableDelete=false"
@@ -146,23 +145,6 @@ echo    Mirror: !MirrorDisplay!
 echo ==============================================================
 exit /b 0
 
-:SelectChannel
-echo.
-echo ==============================================================
-echo   Select Release Channel
-echo ==============================================================
-echo   1) Stable (recommended)
-echo   2) Beta (latest features)
-echo.
-set /p channelChoice=Enter option:
-if "!channelChoice!"=="2" (
-    set "Channel=beta"
-) else (
-    set "Channel=stable"
-)
-call :WriteInfo "Channel: !Channel!"
-exit /b 0
-
 :ConfirmYesNo
 set /p "confirm=%~1 (Y/n): "
 if /i "!confirm!"=="n" exit /b 1
@@ -206,17 +188,9 @@ call :GetArch
 set "Tag="
 set "DownloadUrl="
 if "%Mirror%"=="gitee" (
-    if "!Channel!"=="beta" (
-        set "ApiUrl=https://gitee.com/api/v5/repos/%Repo%/releases?page=1&per_page=30"
-    ) else (
-        set "ApiUrl=https://gitee.com/api/v5/repos/%Repo%/releases/latest"
-    )
+    set "ApiUrl=https://gitee.com/api/v5/repos/%Repo%/releases/latest"
 ) else (
-    if "!Channel!"=="beta" (
-        set "ApiUrl=https://api.github.com/repos/%Repo%/releases?per_page=30"
-    ) else (
-        set "ApiUrl=https://api.github.com/repos/%Repo%/releases/latest"
-    )
+    set "ApiUrl=https://api.github.com/repos/%Repo%/releases/latest"
 )
 set "TmpFile=%TEMP%\gohttpserver_api_%RANDOM%.tmp"
 curl -s -H "User-Agent: gohttpserver-installer" -o "!TmpFile!" "!ApiUrl!" 2>nul
@@ -225,12 +199,7 @@ if errorlevel 1 (
     exit /b 1
 )
 REM Use PowerShell to parse JSON reliably
-set "PsCmd=(Get-Content '%TmpFile%' -Raw | ConvertFrom-Json)"
-if "!Channel!"=="beta" (
-    set "PsCmd=!PsCmd! | ForEach-Object { $_.tag_name } | Where-Object { $_ -match '-beta' } | Select-Object -First 1"
-) else (
-    set "PsCmd=!PsCmd!.tag_name"
-)
+set "PsCmd=(Get-Content '%TmpFile%' -Raw | ConvertFrom-Json).tag_name"
 for /f "tokens=*" %%a in ('powershell -NoProfile -Command "!PsCmd!"') do (
     if not defined Tag set "Tag=%%a"
 )
@@ -240,7 +209,7 @@ if not defined Tag (
     exit /b 1
 )
 REM Convert tag to the version part of the artifact name
-REM (v1.2.0 -> 1.2.0, v1.3.0-beta.1 -> 1.3.0-beta.1)
+REM (v1.2.0 -> 1.2.0)
 REM Artifact name: gohttpserver-<version>-<os>-<arch>.exe
 set "TagVersion=!Tag!"
 if /i "!Tag:~0,1!"=="v" set "TagVersion=!Tag:~1!"
@@ -370,7 +339,6 @@ if not errorlevel 1 (
     call :ShowMessageBox "Info" "GoHTTPServer already installed"
     goto MainMenu
 )
-call :SelectChannel
 :PortInput
 set /p "inputPort=Enter port (1-65535) [default: %DefaultPort%]: "
 if not defined inputPort set "inputPort=%DefaultPort%"
@@ -458,7 +426,6 @@ if errorlevel 1 (
     call :ShowMessageBox "Error" "GoHTTPServer not installed"
     goto MainMenu
 )
-call :SelectChannel
 call :TestTaskExists
 set "HasTask=!errorlevel!"
 call :StopGohttp
@@ -474,13 +441,40 @@ if errorlevel 1 (
     goto MainMenu
 )
 call :WriteStep "Downloading latest version..."
-curl -L -o "%BinaryPath%" "!DownloadUrl!"
+REM Download to a temp file and verify before replacing: without --fail, curl
+REM writes a 404 error page into the target and still exits 0, which would
+REM brick the installed binary.
+set "TmpBin=%TEMP%\gohttpserver_upgrade_%RANDOM%.tmp"
+curl -L --fail -o "!TmpBin!" "!DownloadUrl!"
 if errorlevel 1 (
+    del "!TmpBin!" >nul 2>&1
     move "!BackupPath!" "%BinaryPath%" >nul
     if "!HasTask!"=="0" schtasks /Run /TN "%ServiceName%" >nul 2>&1
     call :ShowMessageBox "Error" "Download failed"
     goto MainMenu
 )
+
+REM Verify downloaded file is valid PE executable (same checks as install)
+set "FileSize="
+for %%A in ("!TmpBin!") do set "FileSize=%%~zA"
+if !FileSize! LSS 1000000 (
+    del "!TmpBin!" >nul 2>&1
+    move "!BackupPath!" "%BinaryPath%" >nul
+    if "!HasTask!"=="0" schtasks /Run /TN "%ServiceName%" >nul 2>&1
+    call :ShowMessageBox "Error" "Invalid download - file too small. Backup restored."
+    goto MainMenu
+)
+
+REM Check PE header (MZ signature)
+set /p MZHeader=<"!TmpBin!"
+if not "!MZHeader:~0,2!"=="MZ" (
+    del "!TmpBin!" >nul 2>&1
+    move "!BackupPath!" "%BinaryPath%" >nul
+    if "!HasTask!"=="0" schtasks /Run /TN "%ServiceName%" >nul 2>&1
+    call :ShowMessageBox "Error" "Invalid executable file downloaded. Backup restored."
+    goto MainMenu
+)
+move "!TmpBin!" "%BinaryPath%" >nul
 if "!HasTask!"=="0" (
     schtasks /Run /TN "%ServiceName%" >nul 2>&1
     timeout /t 2 >nul

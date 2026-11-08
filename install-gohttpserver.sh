@@ -3,7 +3,7 @@
 # @Author      ：幸运锦鲤
 # @Time        : 2026-07-20 23:55:44
 # @version     : bash
-# @Update time : 2026-10-24
+# @Update time : 2026-11-08
 # @Description : gohttpserver 一键安装脚本
 
 
@@ -30,6 +30,16 @@ log_step() {
     echo -e "${YELLOW}$1${NC}"
 }
 
+log_warn() {
+    echo -e "${YELLOW}$1${NC}"
+}
+
+# is_elf_binary <path>: 校验文件以 ELF 魔数（\x7fELF）开头。
+# 不依赖 file 命令（精简系统常未预装），od 属 coreutils/busybox 均可用。
+is_elf_binary() {
+    [ "$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]
+}
+
 
 # Global variables
 INSTALL_DIR="/opt/gohttpserver"
@@ -40,8 +50,6 @@ DB_FILE="$INSTALL_DIR/gohttpserver.db"
 DEFAULT_PORT="8000"
 LISTEN_PORT=""
 REPO="toluckykoi/gohttpserver"
-# 发布通道: stable（稳定版）或 beta（Beta 版）
-CHANNEL="stable"
 # 镜像源: github 或 gitee（根据网络环境自动检测）
 MIRROR="github"
 # TUI 工具: whiptail / dialog / 空（回退纯文本）
@@ -188,27 +196,6 @@ show_banner() {
     echo
 }
 
-# 选择发布通道，结果写入全局变量 CHANNEL
-select_channel() {
-    local choice
-    choice=$(ui_menu "选择发布通道" "请选择要使用的发布通道：" \
-        "stable" "稳定版 (推荐)" \
-        "beta" "Beta 版 (最新功能)")
-
-    case "$choice" in
-        beta|2)
-            CHANNEL="beta"
-            ;;
-        stable|1|"")
-            CHANNEL="stable"
-            ;;
-        *)
-            CHANNEL="stable"
-            ;;
-    esac
-    log_info "已选择通道: $CHANNEL"
-}
-
 # ==========================================================
 # 基础检查
 # ==========================================================
@@ -313,14 +300,13 @@ install_dependencies() {
 }
 
 # 将 git tag 转换为产物文件名中的版本号（与 build.sh 的产物命名规则一致）:
-#   v1.2.0        -> 1.2.0
-#   v1.3.0-beta.1 -> 1.3.0-beta.1
+#   v1.2.0 -> 1.2.0
 # 规则：去掉首尾空白和 v 前缀，非法字符统一替换为 -
 version_from_tag() {
     echo "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^[vV]//' -e 's#[^0-9A-Za-z._-]#-#g'
 }
 
-# Get download URL based on channel and mirror
+# Get download URL based on mirror
 get_download_url() {
     local arch=$1 # x64 / arm64
     local api_base dl_base
@@ -334,20 +320,11 @@ get_download_url() {
     fi
 
     local tag
-    if [ "$CHANNEL" = "beta" ]; then
-        log_info "从 ${MIRROR} 获取最新 Beta 版本..." >&2
-        tag=$(curl -s "$api_base" | grep '"tag_name"' | grep -E -- '-beta' | head -1 | sed -e 's/.*"tag_name": *"//' -e 's/".*//')
-    else
-        log_info "从 ${MIRROR} 获取最新稳定版本..." >&2
-        tag=$(curl -s "${api_base}/latest" | grep '"tag_name"' | head -1 | sed -e 's/.*"tag_name": *"//' -e 's/".*//')
-    fi
+    log_info "从 ${MIRROR} 获取最新稳定版本..." >&2
+    tag=$(curl -s "${api_base}/latest" | grep '"tag_name"' | head -1 | sed -e 's/.*"tag_name": *"//' -e 's/".*//')
 
     if [ -z "$tag" ]; then
-        if [ "$CHANNEL" = "beta" ]; then
-            log_error "未找到 Beta 版本" >&2
-        else
-            log_error "未找到稳定版本" >&2
-        fi
+        log_error "未找到稳定版本" >&2
         return 1
     fi
 
@@ -407,9 +384,6 @@ install_binary() {
         return
     fi
 
-    # 选择发布通道
-    select_channel
-
     # 监听端口输入，校验范围 1-65535
     while true; do
         local input_port
@@ -441,7 +415,8 @@ install_binary() {
     log_step "创建安装目录: $INSTALL_DIR"
     mkdir -p "$INSTALL_DIR"
 
-    local download_url=$(get_download_url "$arch")
+    local download_url
+    download_url=$(get_download_url "$arch")
     if [ $? -ne 0 ]; then
         ui_msgbox "错误" "获取下载链接失败，请检查网络连接或稍后重试。"
         return 1
@@ -450,13 +425,17 @@ install_binary() {
     log_step "下载 GoHTTPServer 二进制文件..."
     log_info "URL: $download_url"
 
-    if ! curl -L -o "$BINARY_PATH" "$download_url"; then
+    # --fail：HTTP 4xx/5xx（404 Release 未发布、代理付费墙、畸形响应等）一律按
+    # 失败处理并返回非零退出码，防止错误页/垃圾内容被当作二进制直接落盘
+    # （无 --fail 时 curl 遇 404 也返回 0，下面 is_elf_binary 只能拦住魔数不符的）。
+    if ! curl -L --fail -o "$BINARY_PATH" "$download_url"; then
+        rm -f "$BINARY_PATH"
         ui_msgbox "错误" "下载失败，请检查网络连接。"
         return 1
     fi
 
     # 验证下载的文件是否为有效的 ELF 二进制
-    if ! file "$BINARY_PATH" | grep -q "ELF"; then
+    if ! is_elf_binary "$BINARY_PATH"; then
         log_error "下载的文件不是有效的 ELF 二进制文件"
         log_info "文件内容预览:"
         head -n 5 "$BINARY_PATH"
@@ -628,41 +607,59 @@ upgrade_gohttpserver() {
         return 1
     fi
 
-    # 选择发布通道
-    select_channel
-
     log_step "停止 GoHTTPServer 服务..."
     systemctl stop ${SERVICE_NAME}.service
 
-    log_step "备份当前二进制文件..."
-    cp "$BINARY_PATH" "${BINARY_PATH}.backup.$(date +%Y%m%d_%H%M%S)"
+    # 备份只保留一份：先清掉历史备份，再创建新备份，确保恢复时只有唯一目标。
+    # （多次升级后历史 .backup.<ts> 会越积越多，且通配恢复会因多源而失败。）
+    rm -f "${BINARY_PATH}.backup".*
+    local backup_path="${BINARY_PATH}.backup.$(date +%Y%m%d_%H%M%S)"
+    cp "$BINARY_PATH" "$backup_path"
 
     local arch=$(detect_arch)
-    local download_url=$(get_download_url "$arch")
+    local download_url
+    download_url=$(get_download_url "$arch")
     if [ $? -ne 0 ]; then
         log_error "获取下载链接失败，正在从备份恢复"
-        mv "${BINARY_PATH}.backup."* "$BINARY_PATH"
+        mv "$backup_path" "$BINARY_PATH"
         systemctl start ${SERVICE_NAME}.service
         ui_msgbox "错误" "获取下载链接失败，已从备份恢复。"
         return 1
     fi
 
+    # 下载到临时文件并校验后再替换：curl 不加 --fail 时 404 页面会被
+    # 直接写进目标路径且退出码为 0，服务将因二进制损坏无法启动。
     log_step "下载最新版本..."
-    if ! curl -L -o "$BINARY_PATH" "$download_url"; then
+    local tmp_bin="$BINARY_PATH.download.tmp"
+    if ! curl -L --fail --silent --show-error -o "$tmp_bin" "$download_url"; then
+        rm -f "$tmp_bin"
         log_error "下载失败，正在从备份恢复"
-        mv "${BINARY_PATH}.backup."* "$BINARY_PATH"
+        mv "$backup_path" "$BINARY_PATH"
         systemctl start ${SERVICE_NAME}.service
         ui_msgbox "错误" "下载失败，已从备份恢复。"
         return 1
     fi
 
+    if ! is_elf_binary "$tmp_bin"; then
+        rm -f "$tmp_bin"
+        log_error "下载的文件不是有效的 ELF 二进制文件，正在从备份恢复"
+        mv "$backup_path" "$BINARY_PATH"
+        systemctl start ${SERVICE_NAME}.service
+        ui_msgbox "错误" "下载失败：获取到的不是有效的二进制文件，已从备份恢复。"
+        return 1
+    fi
+
+    mv "$tmp_bin" "$BINARY_PATH"
     chmod +x "$BINARY_PATH"
 
     log_step "重启 GoHTTPServer 服务..."
     systemctl start ${SERVICE_NAME}.service
 
     if systemctl is-active --quiet ${SERVICE_NAME}.service; then
-        ui_msgbox "升级完成" "GoHTTPServer 升级成功 (通道: $CHANNEL)。"
+        # 升级成功且服务正常：清理本次升级的备份，避免长期累积。
+        # （失败分支不清理，保留现场供回滚排查。）
+        rm -f "$backup_path"
+        ui_msgbox "升级完成" "GoHTTPServer 升级成功。"
     else
         ui_msgbox "错误" "服务在升级后未能启动，请检查日志。"
     fi

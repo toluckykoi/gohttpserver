@@ -55,8 +55,7 @@ func NewFRPClient(db *sql.DB) *FRPClient {
 	}
 }
 
-// randomProxySuffix 返回 3 位随机字母数字串；frps 要求代理名全局唯一，
-// 该后缀可避免共用同一 frps 的多个实例互相冲突。
+// randomProxySuffix 返回 3 位随机后缀，避免共用同一 frps 的多实例代理名冲突。
 func randomProxySuffix() string {
 	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
 	var b [3]byte
@@ -70,7 +69,7 @@ func randomProxySuffix() string {
 }
 
 // registeredProxyName 返回发给 FRP 服务器的代理名（配置名 + 进程随机后缀）；
-// 配置的 ProxyName 原样保留用于展示，只有注册值带后缀，避免重复保存时后缀叠加。
+// 配置的 ProxyName 原样保留用于展示，避免后缀叠加。
 func (c *FRPClient) registeredProxyName() string {
 	if c.cfg == nil {
 		return ""

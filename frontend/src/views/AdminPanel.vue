@@ -6,9 +6,9 @@
           <span class="admin-logo" aria-hidden="true">
             <img src="/favicon.png" alt="logo" width="20" height="20" style="border-radius:4px">
           </span>
-          <h1 class="admin-title">Admin Panel</h1>
+          <h1 class="admin-title">{{ t('admin.panel') }}</h1>
         </div>
-        <el-button text class="admin-close" aria-label="Close" @click="handleClose">
+        <el-button text class="admin-close" :aria-label="t('common.close')" @click="handleClose">
           <el-icon :size="20"><Close /></el-icon>
         </el-button>
       </header>
@@ -23,7 +23,7 @@
             <template #label>
               <span class="admin-tab-label">
                 <el-icon><UserFilled /></el-icon>
-                <span class="admin-tab-text">Profile</span>
+                <span class="admin-tab-text">{{ t('admin.profile') }}</span>
               </span>
             </template>
             <ProfileSection v-if="activeTab === 'profile'" @username-changed="onUsernameChanged" />
@@ -33,7 +33,7 @@
             <template #label>
               <span class="admin-tab-label">
                 <el-icon><Setting /></el-icon>
-                <span class="admin-tab-text">Settings</span>
+                <span class="admin-tab-text">{{ t('admin.settings') }}</span>
               </span>
             </template>
             <SettingsSection v-if="activeTab === 'settings'" />
@@ -43,7 +43,7 @@
             <template #label>
               <span class="admin-tab-label">
                 <el-icon><Connection /></el-icon>
-                <span class="admin-tab-text">FRP</span>
+                <span class="admin-tab-text">{{ t('admin.frp') }}</span>
               </span>
             </template>
             <FrpSection v-if="activeTab === 'frp'" />
@@ -53,7 +53,7 @@
             <template #label>
               <span class="admin-tab-label">
                 <el-icon><InfoFilled /></el-icon>
-                <span class="admin-tab-text">About</span>
+                <span class="admin-tab-text">{{ t('admin.about') }}</span>
               </span>
             </template>
             <AboutSection v-if="activeTab === 'about'" />
@@ -66,11 +66,14 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { Close, UserFilled, Setting, Connection, InfoFilled } from '@element-plus/icons-vue'
 import ProfileSection from '@/components/admin/ProfileSection.vue'
 import SettingsSection from '@/components/admin/SettingsSection.vue'
 import FrpSection from '@/components/admin/FrpSection.vue'
 import AboutSection from '@/components/admin/AboutSection.vue'
+
+const { t } = useI18n()
 
 const emit = defineEmits<{
   (e: 'close'): void

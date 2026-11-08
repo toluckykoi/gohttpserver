@@ -1,553 +1,242 @@
 # gohttpserver
 
-- **Goal**: Build the most user-friendly HTTP file server.
-- **Features**: Human-friendly UI, file upload support, automatic QR code generation for Apple and Android installers.
+The most user-friendly HTTP file server: human-friendly UI, file upload, and QR code generation for iOS/Android installers.
 
 ## Features
 
-- [x] QR code generation
-- [x] Breadcrumb path navigation
-- [x] All assets bundled into a single binary
-- [x] Different icons for different file types
-- [x] Show / hide hidden files
-- [x] Upload support (via Token or session authentication)
-- [x] README.md preview
-- [x] HTTP basic authentication
-- [x] Partial refresh when navigating directories
-- [x] Auto-merge path when a directory contains only one subdirectory
-- [x] Directory archive download
-- [x] Apple IPA auto-generates plist file, scannable by iPhone (requires HTTPS)
-- [x] Plist proxy
-- [x] CORS support
-- [x] Offline download
-- [x] Code file preview
-- [x] File editing support
-- [x] Global file search
-- [x] Hide download and QR code buttons on small screens
-- [x] Theme switching
-- [x] Works behind Nginx
-- [x] `.ghs.yml` configuration support (similar to `.htaccess`)
-- [x] MD5 and SHA computation
-- [x] Folder upload
-- [x] Sort by size or modification time
-- [x] Version info on home page
-- [x] `/-/info/some.(apk|ipa)` API for detailed info
-- [x] `/-/apk/info/some.apk` API for Android package info
-- [x] Auto version tagging
-- [x] Configuration file support
-- [x] Quick copy download link
-- [x] Display folder size
-- [x] Create folder
-- [x] Hold Alt to skip delete confirmation
-- [x] Unzip zip files during upload (with extraction progress)
-- [x] Built-in username/password login gate (`--login`, independent of `--auth-type`)
-- [x] In-app self-update against an [update_core](https://github.com/toluckykoi/update_core) server: check, download with resume, SHA-256 verification, binary replacement and graceful restart
-- [x] Admin panel (profile + settings) with username/password management
-- [x] Built-in WebDAV server (`/dav/`) with per-account root confinement, readonly mode, system-file protection, quota limits, and RFC 4331 disk capacity display
-- [x] WebDAV account management: click to view basic info (link/username/password), edit online, reset password, delete; compatible with Windows / macOS / Linux clients
-- [x] Login rate limiting (5 failures per 15 minutes per IP)
+- QR code generation · Breadcrumb navigation · Type-specific file icons · Show/hide hidden files
+- File upload (Token/session auth) · Folder upload · Auto-extract zip on upload · Directory archive download
+- Online edit · Code preview · Global search · Quick copy download link · MD5/SHA checksum
+- README.md preview · Partial refresh on directory change · Single-subdirectory path merge · Theme switching · Small-screen adaption
+- HTTP Basic / OpenID / OAuth2-proxy auth · Built-in login (`--login`) · Login rate limiting
+- Apple IPA plist generation · Plist proxy · CORS · Nginx deployment · `--prefix` support
+- `.ghs.yml` access control (like `.htaccess`) · `--conf` YAML configuration
+- Admin panel (Profile / Settings) · frp tunnel
+- Self-update (update_core): check / resume download / checksum / replace binary / graceful restart
+- Built-in WebDAV (`/dav/`): per-account root limiting, read-only, quota, system file protection, account management
 
 ## Installation
 
-### One-line install (recommended, Linux)
-
-Run the official installer — it downloads the binary, sets up a systemd
-service, and walks you through port and flag configuration:
+### One-click install
 
 ```bash
-# Linux install command:
+# Linux
 curl -fsSL https://gitee.com/toluckykoi/gohttpserver/raw/main/install-gohttpserver.sh -o install-gohttpserver.sh && sudo bash install-gohttpserver.sh
 
-# Windows install command (PowerShell)
+# Windows (PowerShell / CMD)
 iwr -useb https://gitee.com/toluckykoi/gohttpserver/raw/main/install-gohttpserver.ps1 -o install-gohttpserver.ps1; .\install-gohttpserver.ps1
-
-# Windows install command (CMD)
 curl -fsSL https://gitee.com/toluckykoi/gohttpserver/raw/main/install-gohttpserver.bat -o install-gohttpserver.bat && install-gohttpserver.bat
 ```
 
-The script offers TUI interaction (whiptail), an uninstall prompt, and
-flag configuration. Once finished, start the service with
-`systemctl start gohttpserver`.
+The script supports TUI interaction, uninstall prompts, and parameter configuration; start with `systemctl start gohttpserver` on Linux.
 
-### Manual binary download
+### Manual download
 
-Download a pre-built binary from [GitHub Releases](https://github.com/toluckykoi/gohttpserver/releases) or [Gitee Releases](https://gitee.com/toluckykoi/gohttpserver/releases).
+Download the binary for your platform from [GitHub Releases](https://github.com/toluckykoi/gohttpserver/releases) or [Gitee Releases](https://gitee.com/toluckykoi/gohttpserver/releases).
 
-## Usage
-
-Listen on port 8000 on all interfaces with upload enabled:
+## Quick Start
 
 ```bash
-gohttpserver -r ./ --port 8000 --upload
+gohttpserver -r ./ --port 8000 --upload           # upload
+gohttpserver -r ./ --port 8000 --edit             # edit
+gohttpserver -r ./ --port 8000 --upload --delete --edit   # all features
+gohttpserver -r ./ --port 8000 --login            # login (recommended; admin panel / WebDAV / self-update depend on it)
 ```
 
-Enable file editing:
+Run `gohttpserver --help` for all options.
 
-```bash
-gohttpserver -r ./ --port 8000 --edit
-```
+### Command Line Options
 
-Enable upload, delete, and edit all at once:
-
-```bash
-gohttpserver -r ./ --port 8000 --upload --delete --edit
-```
-
-Enable login:
-
-```bash
-gohttpserver -r ./ --port 8000 --login
-```
-
-Run `gohttpserver --help` to see more options. You can also use the one-line install script to start the service without command-line arguments.
-
-### Command-line options
-
-Flags are listed in the order `main.go` declares them. Flags marked
-"repeatable" may be given more than once. `--conf` (YAML) provides the same
-settings; command-line flags take priority over the config file.
+Command line flags take precedence over `--conf` YAML config; repeatable flags can be passed multiple times.
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--conf` | | Config file path, YAML format |
-| `-r`, `--root` | `./` | Root directory to serve |
+| `-r`, `--root` | `./` | Serving root directory |
 | `--prefix` | | URL prefix, e.g. `/foo` |
 | `--port` | `8000` | Listen port |
 | `-a`, `--addr` | | Listen address, e.g. `127.0.0.1:8000` (overrides `--port`) |
-| `--cert` | | TLS `cert.pem` path |
-| `--key` | | TLS `key.pem` path |
-| `--auth-type` | | Auth type: `http`, `openid` or `oauth2-proxy` |
-| `--auth-http` | | HTTP basic auth as `user:pass` (repeatable) |
-| `--auth-openid` | `https://login.netease.com/openid` | OpenID auth identity URL |
-| `--theme` | `black` | Web theme, one of `black`, `green` |
-| `--upload` | off | Enable upload support |
-| `--delete` | off | Enable delete support |
-| `--edit` | off | Enable file edit support |
-| `--xheaders` | off | Trust `X-Forwarded-*` headers, used behind Nginx |
-| `--debug` | off | Enable debug mode |
-| `-p`, `--plistproxy` | `https://plistproxy.herokuapp.com/plist` | Plist proxy when the server is not HTTPS |
+| `--cert` / `--key` | | TLS cert / key paths |
+| `--auth-type` | | `http`, `openid` or `oauth2-proxy` |
+| `--auth-http` | | HTTP Basic auth `user:pass` (repeatable) |
+| `--auth-openid` | `https://login.netease.com/openid` | OpenID auth URL |
+| `--theme` | `black` | `black` / `green` |
+| `--upload` / `--delete` / `--edit` | off | Enable upload / delete / edit |
+| `--xheaders` | off | Trust `X-Forwarded-*` (when behind Nginx) |
+| `--debug` | off | Debug mode |
+| `-p`, `--plistproxy` | `...herokuapp.com/plist` | Plist proxy when not HTTPS |
 | `--title` | `Go HTTP File Server` | Server title |
-| `--google-tracker-id` | | Google Analytics tracker ID; empty disables it |
-| `--deep-path-max-depth` | `5` | Max depth for auto-merging single-subdirectory paths; `-1` never combines dirs |
-| `--no-index` | off | Disable indexing |
-| `--cors-origins` | | Allowed CORS origins (repeatable; empty = no CORS, `*` = allow all, insecure) |
-| `--allow-public-oauth2` | off | Allow oauth2-proxy mode on a non-loopback bind (insecure; only behind a proxy that strips `X-Auth-Request-*`) |
-| `--login` | off | Enable the username/password login gate (independent of `--auth-type`); also enables upload/delete/edit. Default credentials: `admin`/`admin` |
-| `--db` | `./gohttpserver.db` | SQLite database file path; only used when `--login` is enabled |
-| `--session-ttl` | `12h` | How long a logged-in session stays valid; `0` = browser-session cookies |
-
-`-h` / `--help` prints this list, and `--version` prints build information.
+| `--google-tracker-id` | | Google Analytics ID |
+| `--deep-path-max-depth` | `5` | Max depth for merging single-subdirectory paths, `-1` to disable |
+| `--no-index` | off | Disable directory indexing |
+| `--cors-origins` | | Allowed CORS origins (repeatable; `*` allows all, insecure) |
+| `--allow-public-oauth2` | off | Enable oauth2-proxy on non-loopback address (insecure) |
+| `--login` | off | Username/password login, auto-enables upload/delete/edit, default `admin`/`admin` |
+| `--db` | `./gohttpserver.db` | SQLite path (requires `--login`) |
+| `--session-ttl` | `12h` | Session TTL; `0` = browser-session cookie |
+| `--log-level` | `info` | `debug`/`info`/`warn`/`error` |
+| `--log-format` | `json` | `json`/`text` |
 
 ## Monitoring
 
-Two operational endpoints are served on the root path, registered before the
-`--prefix` routing so health checks and scrapers keep a stable address:
+- `GET /healthz` (or `/-/healthz`): JSON liveness probe `{"status":"ok","version":"v1.2.3"}`
+- `GET /metrics` (or `/-/metrics`): Prometheus text format
 
-- `GET /healthz` (also `/-/healthz`) — JSON liveness probe:
+Both endpoints are unaffected by `--prefix` and always live at `/healthz` and `/metrics`.
 
-  ```bash
-  curl -s http://localhost:8000/healthz
-  {"status":"ok","version":"v1.2.3"}
-  ```
+## Login & Authentication
 
-- `GET /metrics` (also `/-/metrics`) — Prometheus text exposition format
-  (`text/plain; version=0.0.4`); `HEAD` is allowed too:
+### Built-in login (`--login`)
 
-  ```bash
-  curl -s http://localhost:8000/metrics
-  # HELP gohttpserver_requests_total Total number of HTTP requests served.
-  # TYPE gohttpserver_requests_total counter
-  gohttpserver_requests_total 42
-  # ... response_bytes_total, response_status_total{class="2xx|3xx|4xx|5xx"},
-  #     requests_in_flight, uptime_seconds ...
-  gohttpserver_build_info{version="v1.2.3"} 1
-  ```
+- Default account `admin`/`admin`; change it after first login via **Admin Panel → Profile**
+- Sessions are signed cookies; set the `GHS_SESSION_KEY` env var to fix the signing key, otherwise all sessions are invalidated on restart
+- Login rate limit: max 5 failures per IP per 15 minutes
 
-`--prefix` does not affect these paths: they stay at `/healthz` and `/metrics`.
-
-## Self-Update (update_core integration)
-
-When `--login` is enabled, gohttpserver can check an update_core
-distribution server for newer releases, download and verify the package
-(size + SHA-256), replace its own binary, and restart. The update UI lives
-in the footer: click the version number to open the update dialog; a colored
-badge appears when a new version is available.
+### External auth (`--auth-type`)
 
 ```bash
-gohttpserver --login
+# HTTP Basic
+gohttpserver --auth-type http --auth-http username1:password1 --auth-http username2:password2
+# OpenID
+gohttpserver --auth-type openid --auth-openid https://login.example-hostname.com/openid/
+# OAuth2 proxy (set up your own reverse proxy; backend reads the headers below)
+gohttpserver --auth-type oauth2-proxy
 ```
 
-Behavior and requirements:
-
-- The update server settings (base URL, app slug, channel, per-OS package
-  types, check interval) are compiled into the binary — see
-  `updateServerConfig` in [main.go](main.go). No config file or CLI flag is
-  needed; set `BaseURL` to empty in the source and rebuild to disable the
-  feature entirely.
-- Requires `--login`: the update API is protected by the login session, so
-  anonymous visitors can never trigger a binary replacement.
-- The `package_type` reported to the update server must match what is
-  registered there **exactly** (the server never falls back to another
-  package). The built-in map is `exe` on Windows and `bin` on Linux/macOS.
-- Private software tokens: set the `GHS_UPDATE_TOKEN` environment variable.
-  The token is never written to logs or URLs, and downloads never follow
-  redirects.
-- The update server accepts both `http://` and `https://`. Plain HTTP cannot
-  protect against man-in-the-middle tampering (the SHA-256 itself travels the
-  same unencrypted channel), so prefer HTTPS when possible; a warning is
-  logged at startup for HTTP sources.
-- Install re-verifies size and SHA-256, keeps the old binary as
-  `<binary>.bak`, and rolls back automatically if the replacement fails.
-  The new version takes effect on the next start.
-- The "Restart now" button performs a graceful shutdown — under systemd
-  (`Restart=always`) or a similar supervisor the service comes back with the
-  new version automatically; otherwise start it manually.
-- Interrupted downloads resume via HTTP `Range` with an `If-Range` guard
-  bound to the published SHA-256.
-
-Update API (all require a logged-in session; 401 otherwise):
-
-| Method | Path | Purpose |
-|--------|------|---------|
-| GET | `/-/api/update/status` | Current update state |
-| POST | `/-/api/update/check` | Force an update check |
-| POST | `/-/api/update/download` | Start the background download |
-| POST | `/-/api/update/apply` | Replace the binary on disk |
-| POST | `/-/api/update/restart` | Graceful shutdown (supervisor restarts) |
-
-## Docker (under development)
-
-## Authentication
-
-- Enable HTTP basic authentication:
-
-  ```bash
-  gohttpserver --auth-type http --auth-http username1:password1 --auth-http username2:password2
-  ```
-
-- Enable OpenID authentication:
-
-  ```bash
-  gohttpserver --auth-type openid --auth-openid https://login.example-hostname.com/openid/
-  ```
-
-- Enable OAuth2 proxy:
-
-  ```bash
-  gohttpserver --auth-type oauth2-proxy
-  ```
-
-  You can configure an HTTP reverse proxy to handle authentication. When using oauth2-proxy, the backend reads the user ID from the `X-Auth-Request-Email` header and the display name from `X-Auth-Request-Fullname`. Please configure the OAuth2 reverse proxy yourself. For more details see [oauth2-proxy](https://github.com/oauth2-proxy/oauth2-proxy).
-
-  The required headers are:
-
-  | Header | Value |
-  |--------|-------|
-  | X-Auth-Request-Email | User ID |
-  | X-Auth-Request-Fullname | Display name (URL-encoded) |
-  | X-Auth-Request-User | User nickname (usually the email prefix) |
+| Header | Value |
+|--------|-------|
+| `X-Auth-Request-Email` | User ID |
+| `X-Auth-Request-Fullname` | Display name (URL encoded) |
+| `X-Auth-Request-User` | Nickname (usually email prefix) |
 
 ## Admin Panel
 
-When `--login` is enabled, click the user avatar (top-right) → "Admin Panel"
-to open the full-screen admin panel. The panel has three tabs:
+With `--login`, click the avatar at the top right → **Admin Panel**:
 
-- **个人中心 (Profile)**: Shows the current user's username, auth
-  provider, and version. Supports changing the username (requires the
-  current password as re-authentication) and changing the password.
-- **参数设置 (Settings)**: Toggles the WebDAV server on/off, URL display,
-  and WebDAV account management.
-- **内网穿透 (FRP)**: Configure frp client settings for NAT traversal.
+- **Profile**: username, auth type, version; change username (password required) / password
+- **Settings**: WebDAV master switch, URL display, account management
+- **Tunnel**: frp client settings
 
-## WebDAV Server
+## Self-Update (update_core)
 
-The built-in WebDAV server is mounted at `/dav/` and is only available
-when `--login` is enabled. It uses HTTP Basic Auth with its own account
-list (independent of the login session — WebDAV clients like Cyberduck,
-rclone, and Windows Explorer don't share browser cookies).
+With `--login`, click the version number in the footer to open the "Software Update" dialog; a colored badge appears next to the version when a new release is available.
 
-Enable the WebDAV server via the admin panel (参数设置 → master switch),
-then create accounts:
+- Update server info is compiled into the binary ([main.go](main.go), `updateServerConfig`); set `BaseURL` to empty to disable
+- Reported `package_type` must **exactly match** the server-side config (Windows=`exe`, Linux/macOS=`bin`)
+- Private software: set `GHS_UPDATE_TOKEN`; the token never goes into logs/URL, and downloads do not follow redirects
+- Update APIs require login; SHA-256 is re-verified before install, old binary kept as `.bak`, auto-rollback on failure
+- HTTP and HTTPS sources supported; HTTPS recommended (plain HTTP is vulnerable to MITM and warns at startup)
+- Range resume supported (If-Range bound to SHA-256)
 
-- **Remark** (required): a label so you can later identify which
-  credential to revoke.
-- **Root path** (default `/`): click "Browse" to select a directory from
-  the file tree. The account is confined to `<--root>/<root_path>`.
-  Path traversal (`../`) is rejected.
-- **Advanced options** (collapsible):
-  - **Read-only mode**: when enabled, the account can only read files.
-    All write operations (PUT/DELETE/MKCOL/MOVE/COPY/PROPPATCH) return 403.
-  - **Protect system files** (default on): refuses writes to
-    `gohttpserver.db`, `.ghs.yml`, `favicon.ico`, `favicon.png`, and
-    any dotfile.
-  - **Quota**: limit the total bytes this account can write. Default
-    unit is GB. Leave empty or 0 for unlimited.
+Update APIs (login required): `GET /-/api/update/status`, `POST /-/api/update/{check,download,apply,restart}`
 
-**Username** is automatically bound to the current login user (cannot be
-changed). **Password** is a random 10-character string generated by
-`crypto/rand`, shown once at creation.
+## WebDAV (enabled with `--login`)
 
-### Account management
+Mounted at `/dav/` with an independent Basic Auth account system (WebDAV clients do not share browser cookies). Enable it via Admin Panel → Settings → master switch, then create an account:
 
-In the account list:
+- **Remark** (required); **Relative root** (default `/`, path traversal blocked); **Advanced options**: read-only mode, system file protection (default on), quota (GB)
+- Username is bound to the current logged-in user; password is a random 10-char string
+- Account list: expand to view link/username/password (👁 toggle), ⋮ menu for edit, reset password, delete
 
-- **Click any entry** to expand "Basic info", showing **link address,
-  username, password** (password is masked by default, click the 👁 icon
-  to show/hide, with a copy button).
-- The **three-dot menu** (⋮) on each row provides three actions:
-  - **Edit**: modify remark, root path, read-only, system file protection, quota
-  - **Reset password**: generate a new 10-character random password; the
-    old password is immediately invalidated
-  - **Delete**: revoke the account (idempotent)
+### Mapping a network drive on Windows
 
-### Connecting from Windows Explorer (map network drive)
+1. The OPTIONS preflight is handled built-in, no config needed
+2. Windows does not send Basic Auth over plain HTTP by default. If you get "401 Unauthorized", change the registry key `HKLM\SYSTEM\CurrentControlSet\Services\WebClient\Parameters\BasicAuthLevel` from 1 to 2 and restart WebClient:
 
-Windows' built-in WebDAV mini-redirector has two quirks you need to
-handle:
+```powershell
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" -Name BasicAuthLevel -Value 2
+Restart-Service WebClient
+```
 
-1. **It fires an anonymous `OPTIONS` preflight** before prompting for
-   credentials. gohttpserver answers this preflight with `DAV: 1, 2`
-   + `MS-Author-Via: DAV` so Windows recognises the endpoint as a
-   WebDAV share — no action needed on your side.
-2. **By default it refuses to send Basic Auth over plain HTTP**
-   (only HTTPS qualifies out of the box). If you map a drive over
-   `http://` and get "401 Unauthorized" immediately, raise
-   `BasicAuthLevel` in the registry:
+Then map `http://IP:8000/dav/` (or `\\IP@8000\DavWWWRoot\dav\`). Use HTTPS in production to skip the registry change.
 
-   ```text
-   HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\WebClient\Parameters\BasicAuthLevel
-   ```
+### Connecting from Linux
 
-   Set it from `1` (HTTPS only) to `2` (HTTP and HTTPS), then restart
-   the WebClient service:
-
-   ```powershell
-   Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters" -Name BasicAuthLevel -Value 2
-   Restart-Service WebClient
-   ```
-
-   Then map `\\192.168.120.141@8000\DavWWWRoot\dav\` (or
-   `http://192.168.120.141:8000/dav/`) as a network drive and enter
-   the WebDAV account credentials when prompted. For production,
-   prefer HTTPS — then the registry change is unnecessary.
-
-### Connecting from Linux file managers
-
-GNOME Files (Nautilus/gvfs) and other Linux file managers can connect
-via `dav://host:port/dav/` (or `davs://` for HTTPS). Enter the WebDAV
-account username and password when prompted.
-
-> Note: Some Linux clients probe the `/dav` path without a trailing
-> slash during discovery. gohttpserver handles this path for compatibility
-> and has added it to the login whitelist, so connections work with or
-> without the trailing slash — no more "HTTP Error: Unauthorized".
+Connect to `dav://host:port/dav/` (or `davs://` for HTTPS) in your file manager. The trailing-slash-less `/dav` path is also handled for compatibility.
 
 ## Advanced Usage
 
-Add access rules per sub-directory via `.ghs.yml`. Example:
+### `.ghs.yml` access control
+
+Place a `.ghs.yml` in a subdirectory to control permissions for that directory:
 
 ```yaml
 ---
-upload: false
+upload: false    # directory-level defaults
 delete: false
 edit: false
-users:
+users:                          # per-user overrides
 - email: "codeskyblue@codeskyblue.com"
   delete: true
   upload: true
   edit: true
   token: 4567gf8asydhf293r23r
-```
-
-In this setup, with OpenID authentication enabled, the user "codeskyblue@codeskyblue.com" can delete / upload / edit inside any directory that contains a `.ghs.yml` file.
-
-`token` is used for upload and edit. See [Upload via curl](#upload-via-curl).
-
-For example, in the following directory structure, the user can delete / upload in `foo` but not in `bar`:
-
-```
-root -
-  |-- foo
-  |    |-- .ghs.yml
-  |    `-- world.txt
-  `-- bar
-       `-- hello.txt
-```
-
-Use `--conf` to specify the config file name (YAML format; CLI flags take priority over the file).
-
-To mark which files are hidden / visible, add the following to `.ghs.yml`:
-
-```yaml
-accessTables:
+accessTables:                   # file-level visibility
 - regex: block.file
   allow: false
 - regex: visual.file
   allow: true
 ```
 
-### IPA Plist Proxy
-
-Used for HTTPS-enabled servers. The default is <https://plistproxy.herokuapp.com/plist>.
+### IPA Plist proxy
 
 ```bash
 gohttpserver --plistproxy=https://someproxyhost.com/
 ```
 
-Test that the proxy works:
+Auto-disabled when running behind Nginx with HTTPS configured.
+
+### Upload / edit with curl
 
 ```bash
-http POST https://someproxyhost.com/plist < app.plist
-{
-	"key": "18f99211"
-}
-http GET https://someproxyhost.com/plist/18f99211
-# displays the contents of app.plist
-```
-
-When gohttpserver is behind Nginx with HTTPS configured, the plistproxy is automatically disabled.
-
-### Upload via curl
-
-For example, upload a file named `foo.txt` to the `somedir` directory:
-
-```bash
+# Upload (add -F token=xxx when token auth is used)
 curl -F file=@foo.txt localhost:8000/somedir
-{"destination":"somedir/foo.txt","success":true}
-# Upload with a token
-curl -F file=@foo.txt -F token=12312jlkjafs localhost:8000/somedir
-{"destination":"somedir/foo.txt","success":true}
-
-# Upload with a different filename
+# Rename
 curl -F file=@foo.txt -F filename=hi.txt localhost:8000/somedir
-{"destination":"somedir/hi.txt","success":true}
-```
-
-Upload a zip file and extract it (the zip is removed after successful extraction):
-
-```bash
+# Upload and extract zip (original zip is deleted afterwards)
 curl -F file=@pkg.zip -F unzip=true localhost:8000/somedir
-{"success": true}
-```
-
-Note: filenames may not contain the characters `\/:*<>|`.
-
-Upload an entire folder (preserves directory structure). Each file is sent with a `path` form field carrying its relative path; the server creates intermediate directories automatically:
-
-```bash
-# Upload a single file with a relative path, the server will create the MyFolder/ directory
-curl -F file=@a.txt     -F path=MyFolder/a.txt     localhost:8000/somedir
+# Folder upload (structure preserved, path is relative)
 curl -F file=@sub/b.txt -F path=MyFolder/sub/b.txt localhost:8000/somedir
-# After upload: somedir/MyFolder/a.txt and somedir/MyFolder/sub/b.txt
+# Edit (PUT, requires --edit)
+curl -X PUT -H "X-Token: 12312jlkjafs" -d "new content" localhost:8000/somedir/foo.txt
 ```
 
-### Edit files via curl
+Note: filenames cannot contain `\/:*<>|`; `path` cannot contain `..` or absolute paths.
 
-Edit a file's content (PUT request, requires `--edit` flag):
+### Nginx deployment
 
-```bash
-curl -X PUT -H "X-Token: 12312jlkjafs" -d "new file content" localhost:8000/somedir/foo.txt
-{"destination":"somedir/foo.txt","success":true,"size":15}
-```
+Run gohttpserver with `--xheaders`; headers below (note `client_max_body_size 0;` to disable upload size limit):
 
-Note: the `path` field may not contain `..` or absolute paths (directory traversal is rejected), and each path segment may not contain `\: * < > | "`. The frontend can generate these `path` values automatically via the folder-picker button (supported in Chrome / Edge / Firefox; Safari does not support it).
-
-### Deploy behind Nginx
-
-Recommended config, assuming gohttpserver listens on `127.0.0.1:8200`:
-
-```
+```nginx
 server {
   listen 80;
   server_name your-domain-name.com;
-
   location / {
-    proxy_pass http://127.0.0.1:8200; # change to your address
+    proxy_pass http://127.0.0.1:8200; # change this
     proxy_redirect off;
     proxy_set_header  Host    $host;
     proxy_set_header  X-Real-IP $remote_addr;
     proxy_set_header  X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header  X-Forwarded-Proto $scheme;
-
-    client_max_body_size 0; # disable upload size limit
+    client_max_body_size 0;
   }
 }
 ```
 
-When running behind Nginx, start gohttpserver with the `--xheaders` flag.
-
-Reference: <http://nginx.org/en/docs/http/ngx_http_core_module.html#client_max_body_size>
-
-gohttpserver also supports the `--prefix` flag, useful when the root path `/` is occupied by another service. Related issue: <https://github.com/codeskyblue/gohttpserver/issues/105>
-
-Example:
-
-```bash
-# gohttpserver configuration
-gohttpserver --prefix /foo --addr :8200 --xheaders
-```
-
-**Nginx configuration**:
-
-```
-server {
-  listen 80;
-  server_name your-domain-name.com;
-
-  location /foo {
-    proxy_pass http://127.0.0.1:8200; # change to your address
-    proxy_redirect off;
-    proxy_set_header  Host    $host;
-    proxy_set_header  X-Real-IP $remote_addr;
-    proxy_set_header  X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header  X-Forwarded-Proto $scheme;
-
-    client_max_body_size 0; # disable upload size limit
-  }
-}
-```
-
-## FAQ
-
-- [How to generate a self-signed certificate with openssl](http://stackoverflow.com/questions/10175812/how-to-create-a-self-signed-certificate-with-openssl)
-
-### Search query format
-
-Search follows Google-like universal format. Keywords are space-separated, and a `-` prefix excludes the keyword from the results.
-
-1. `hello world` means both `hello` and `world` must be present.
-2. `hello -world` means `hello` must be present and `world` must NOT be present.
+If the root path is taken by another service, run with `--prefix /foo --addr :8200 --xheaders` and use `location /foo` in Nginx likewise (see [issue#105](https://github.com/codeskyblue/gohttpserver/issues/105)).
 
 ## Developer Guide
 
-> **Note**: `frontend/dist` is **not** committed — it is ignored by the
-> `dist/` rule in `.gitignore` — but `assets.go` requires it through the
-> `//go:embed frontend/dist` directive. On a fresh clone `go build ./...`
-> therefore fails with `pattern frontend/dist: no matching files found`.
-> Run `./build.sh` (or `npm ci && npm run build` inside `frontend/`) before
-> building the Go code.
+> **Note**: `frontend/dist` is not committed (ignored by `.gitignore`), but `assets.go` embeds it via `//go:embed`.
+> A fresh clone will fail `go build` with `pattern frontend/dist: no matching files found` — run `./build.sh` first (or `npm ci && npm run build` inside `frontend/`).
 
-1. Build the project (recommended to use build scripts):
+```bash
+./build.sh   # builds; artifacts: gohttpserver-<version>-<os>-<arch>[.exe]
+./dist/gohttpserver-1.4.0-windows-x64.exe -r ./testdata --addr 0.0.0.0:8000 --login
+```
 
-   ```bash
-   ./build.sh
-   ```
+## Support & License
 
-2. Run the program:
+Forked from [codeskyblue/gohttpserver](https://github.com/codeskyblue/gohttpserver) (original project is no longer maintained). Thanks to the original author.
 
-   ```bash
-   # Artifacts are named gohttpserver-<version>-<os>-<arch>[.exe]
-   # Command format
-   ./dist/gohttpserver-1.3.0-windows-x64.exe -r <shared_folder> --addr <IP>:<port> --<flags>
-
-   # Example: run on Windows
-   ./dist/gohttpserver-1.3.0-windows-x64.exe -r ./testdata --addr 0.0.0.0:8000 --login
-   ```
-
-## Support
-
-This project is forked from **[codeskyblue/gohttpserver](https://github.com/codeskyblue/gohttpserver)** (the original project is no longer maintained). Thanks to codeskyblue/gohttpserver for the open source support.
-
-## License
-
-This project is licensed under the [Apache-2.0](LICENSE) license.
+Licensed under [Apache-2.0](LICENSE).

@@ -1,7 +1,7 @@
 ﻿# @Author      ：幸运锦鲤
 # @Time        : 2026-08-02 18:00:00
 # @version     : powershell
-# @Update time : 2026-10-24
+# @Update time : 2026-11-08
 # @Description : gohttpserver 一键安装脚本（Windows 版，对应 install-gohttpserver.sh）
 
 <#
@@ -74,8 +74,6 @@ $DefaultPort  = 8000
 $ListenPort   = 0
 $Repo         = 'toluckykoi/gohttpserver'
 
-# 发布通道: stable（稳定版）或 beta（Beta 版）
-$Channel = 'stable'
 # 镜像源: github 或 gitee（根据网络环境自动检测）
 $Mirror  = 'github'
 
@@ -191,19 +189,6 @@ function Show-Banner {
     Write-Host ''
 }
 
-# 选择发布通道
-function Select-Channel {
-    $choice = Read-Menu '选择发布通道' '请选择要使用的发布通道：' @(
-        '稳定版 (推荐)',
-        'Beta 版 (最新功能)'
-    )
-    switch ($choice) {
-        '2' { $script:Channel = 'beta' }
-        default { $script:Channel = 'stable' }
-    }
-    Write-Info "已选择通道: $($script:Channel)"
-}
-
 # ==========================================================
 # 基础检查
 # ==========================================================
@@ -289,8 +274,7 @@ function Test-ProcessRunning {
 }
 
 # 将 git tag 转换为产物文件名中的版本号（与 build.sh 的产物命名规则一致）:
-#   v1.2.0        -> 1.2.0
-#   v1.3.0-beta.1 -> 1.3.0-beta.1
+#   v1.2.0 -> 1.2.0
 # 规则：去掉首尾空白和 v 前缀，非法字符统一替换为 -
 function Get-VersionFromTag {
     param([string] $Tag)
@@ -301,8 +285,7 @@ function Get-VersionFromTag {
 function Get-DownloadUrl {
     param([string] $Arch)
 
-    $headers    = @{ 'User-Agent' = 'gohttpserver-installer' }
-    $betaPattern = '-beta'
+    $headers = @{ 'User-Agent' = 'gohttpserver-installer' }
 
     if ($script:Mirror -eq 'gitee') {
         $apiBase = "https://gitee.com/api/v5/repos/$Repo/releases"
@@ -312,18 +295,10 @@ function Get-DownloadUrl {
         $dlBase  = "https://github.com/$Repo/releases/download"
     }
 
-    $tag = $null
-    if ($script:Channel -eq 'beta') {
-        Write-Info "从 $($script:Mirror) 获取最新 Beta 版本..."
-        $rels = Invoke-RestMethod "$apiBase?page=1&per_page=30" -Headers $headers
-        $tag = ($rels | Where-Object { $_.tag_name -match $betaPattern } | Select-Object -First 1).tag_name
-        if (-not $tag) { throw '未找到 Beta 版本' }
-    } else {
-        Write-Info "从 $($script:Mirror) 获取最新稳定版本..."
-        $rel = Invoke-RestMethod "$apiBase/latest" -Headers $headers
-        $tag = $rel.tag_name
-        if (-not $tag) { throw '未找到稳定版本' }
-    }
+    Write-Info "从 $($script:Mirror) 获取最新稳定版本..."
+    $rel = Invoke-RestMethod "$apiBase/latest" -Headers $headers
+    $tag = $rel.tag_name
+    if (-not $tag) { throw '未找到稳定版本' }
 
     Write-Info "版本: $tag"
     $ver = Get-VersionFromTag $tag
@@ -484,9 +459,6 @@ function Install-Binary {
         return
     }
 
-    # 选择发布通道
-    Select-Channel
-
     # 监听端口输入，校验范围 1-65535
     while ($true) {
         $inputPort = Read-Input '请输入 GoHTTPServer 的监听端口 (1-65535)' "$DefaultPort"
@@ -593,9 +565,6 @@ function Upgrade-GoHTTPServer {
         return
     }
 
-    # 选择发布通道
-    Select-Channel
-
     $hasTask = Test-TaskExists
 
     Write-Step '停止 GoHTTPServer...'
@@ -618,28 +587,54 @@ function Upgrade-GoHTTPServer {
     }
 
     Write-Step '下载最新版本...'
+    $tmpBin = "$BinaryPath.download.tmp"
     try {
-        Invoke-WebRequest -Uri $downloadUrl -OutFile $BinaryPath -UseBasicParsing -ErrorAction Stop
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $tmpBin -UseBasicParsing -ErrorAction Stop
     } catch {
+        Remove-Item $tmpBin -Force -ErrorAction SilentlyContinue
         Write-Err '下载失败，正在从备份恢复'
         Move-Item $backupPath $BinaryPath -Force
         if ($hasTask) { Invoke-Native { & schtasks /Run /TN $ServiceName *> $null } }
         Show-MessageBox '错误' "下载失败，已从备份恢复。`n$_"
         return
     }
-    Unblock-File -Path $BinaryPath -ErrorAction SilentlyContinue
+    Unblock-File -Path $tmpBin -ErrorAction SilentlyContinue
+
+    # 校验下载内容为有效 PE 二进制（MZ 头）后再替换：IWR 对 404/付费墙等
+    # 畸形响应不一定会抛错（下载到的是 HTML 错误页），直接覆盖会损坏可用的旧二进制。
+    $tmpValid = $false
+    try {
+        $fs = [System.IO.File]::OpenRead($tmpBin)
+        if ($fs.Length -ge 2) {
+            $b0 = $fs.ReadByte(); $b1 = $fs.ReadByte()
+            $tmpValid = ($b0 -eq 0x4D -and $b1 -eq 0x5A)  # 'M' 'Z'
+        }
+        $fs.Close()
+    } catch { }
+    if (-not $tmpValid) {
+        Remove-Item $tmpBin -Force -ErrorAction SilentlyContinue
+        Write-Err '下载内容不是有效的 PE 二进制，正在从备份恢复'
+        Move-Item $backupPath $BinaryPath -Force
+        if ($hasTask) { Invoke-Native { & schtasks /Run /TN $ServiceName *> $null } }
+        Show-MessageBox '错误' "下载失败：获取到的不是有效的二进制文件，已从备份恢复。"
+        return
+    }
+    Move-Item $tmpBin $BinaryPath -Force
 
     if ($hasTask) {
         Write-Step '重启 GoHTTPServer...'
         Invoke-Native { & schtasks /Run /TN $ServiceName *> $null }
         Start-Sleep -Seconds 2
         if (Test-ProcessRunning) {
-            Show-MessageBox '升级完成' "GoHTTPServer 升级成功 (通道: $Channel)。"
+            # 服务确认启动成功后清理本次升级备份，避免长期堆积。
+            Remove-Item $backupPath -Force -ErrorAction SilentlyContinue
+            Show-MessageBox '升级完成' 'GoHTTPServer 升级成功。'
         } else {
-            Show-MessageBox '错误' '服务在升级后未能启动，请检查日志。'
+            # 启动失败：保留备份文件，提示用户可手动恢复。
+            Show-MessageBox '错误' "服务在升级后未能启动，请检查日志。`n`n旧版本备份保留在： $backupPath"
         }
     } else {
-        Show-MessageBox '升级完成' "GoHTTPServer 二进制已升级 (通道: $Channel)。`n`n未检测到计划任务，请手动重新启动：`n  $LauncherPath"
+        Show-MessageBox '升级完成' "GoHTTPServer 二进制已升级。`n`n未检测到计划任务，请手动重新启动：`n  $LauncherPath"
     }
 }
 

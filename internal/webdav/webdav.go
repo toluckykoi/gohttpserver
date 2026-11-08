@@ -34,16 +34,12 @@ func NewWebdavServer(root string, accounts *WebdavAccountState, usage *UsageStat
 		lockSys:       gdav.NewMemLS(),
 		verifyLimiter: newAuthRateLimiter(5, 15*time.Minute),
 	}
-	// 后台清理过期的限流条目，防止 attempts 无界增长。
 	s.verifyLimiter.startCleanupLoop()
 	return s
 }
 
-// authRateLimiter 是轻量的按 IP 失败计数器：maxFail 次失败后锁定 lockDuration。
-// 结构与 --login 的限流一致；只统计失败，成功即清零。
-// SECURITY: maxEntries 是 attempts 映射的硬上限——未达锁定阈值（maxFail）的 IP
-// 条目曾永不被清理（清理循环只删「已锁定且锁定已过期」的），公网扫描器/IPv6
-// 海量源地址下曾使该映射无界增长形成内存 DoS。装满时拒绝新 IP 而非继续增长。
+// authRateLimiter 是轻量的按 IP 失败计数器：maxFail 次失败后锁定 lockDuration，只统计失败、成功即清零。
+// maxEntries 是 attempts 的硬上限，防止公网扫描器/IPv6 海量源地址把映射撑成内存 DoS；装满时淘汰最旧条目。
 type authRateLimiter struct {
 	mu               sync.Mutex
 	attempts         map[string]*authAttempt
@@ -93,10 +89,8 @@ func (l *authRateLimiter) fail(ip string) {
 	defer l.mu.Unlock()
 	a, ok := l.attempts[ip]
 	if !ok {
-		// 硬上限：映射满时淘汰 lastFail 最旧的条目腾位后正常记录。
-		// SECURITY: 旧实现直接 return——新 IP 的失败不被记录，而 allow() 对
-		// 未知 IP 恒放行，限流对新 IP 完全失效（fail-open）。淘汰最旧条目
-		// 不可被攻击者定向利用（最旧的条目本就最接近过期）。
+		// 映射满时淘汰 lastFail 最旧的条目腾位后正常记录，限流对新 IP 仍生效；
+		// 淘汰最旧条目不可被攻击者定向利用（最旧的条目本就最接近过期）。
 		if len(l.attempts) >= l.maxEntries {
 			l.evictOldestLocked()
 			l.warnFullOnceLocked()
@@ -144,10 +138,8 @@ func (l *authRateLimiter) reset(ip string) {
 	delete(l.attempts, ip)
 }
 
-// startCleanupLoop 定期清理过期条目，防止 attempts 无界增长。
-// SECURITY: 不只删「已锁定且锁定已过期」——失败 1..maxFail-1 次（未达锁定阈值）
-// 的条目曾永不被清理，配合公网扫描即可无界增长。这里对 lastFail 超过 2 小时的
-// 条目兜底删除（与 login 包的 startCleanupLoop 同策略）。
+// startCleanupLoop 定期清理过期条目，防止 attempts 无界增长；
+// 除已过期的锁定外，对 lastFail 超过 2 小时的未锁定条目兜底删除。
 func (l *authRateLimiter) startCleanupLoop() {
 	go func() {
 		ticker := time.NewTicker(15 * time.Minute)
@@ -189,7 +181,6 @@ func (s *WebdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "WebDAV authentication required", http.StatusUnauthorized)
 		return
 	}
-	// 暴力破解防护：与 --login 一致的按 IP 失败计数与锁定（5 次 / 15 分钟）。
 	if !s.verifyLimiter.allow(util.GetClientIP(r)) {
 		log.Printf("webdav: rate limited for IP %s", util.SanitizeLogInput(util.GetClientIP(r)))
 		writeBasicChallenge(w)
@@ -227,9 +218,8 @@ func (s *WebdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 	defer clearQuotaContext(r)
 
-	// PUT 请求体传输失败（客户端中断、网络断开）发生在读取侧，OpenFile 拿不到
-	// 该信息；包装请求体把失败标记注入 context，供 quotaFile.Close 决定是否
-	// 提交临时文件——中断的 PUT 不再把已有文件截断。
+	// PUT 请求体传输失败发生在读取侧，OpenFile 拿不到该信息；把失败标记注入
+	// context 供 quotaFile.Close 丢弃临时文件，中断的 PUT 不截断已有文件。
 	if r.Method == "PUT" {
 		bts := &bodyTransferState{}
 		r.Body = &errorTrackingBody{rc: r.Body, onErr: bts.markFailed}
@@ -252,8 +242,7 @@ func (s *WebdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), status)
 			return
 		}
-		// 把预检时 stat 到的旧大小带入请求 context，quotaFileSystem.OpenFile
-		// 对同一目标不再重复 stat（第 10 轮性能审查）。
+		// 把预检 stat 到的旧大小带入请求 context，OpenFile 对同一目标不再重复 stat。
 		if targetAbs != "" {
 			r = r.WithContext(context.WithValue(r.Context(), putOldSizeKey{},
 				putOldSizeInfo{absPath: targetAbs, size: oldSize}))
@@ -271,8 +260,7 @@ func (s *WebdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		readOnly:           acc.ReadOnly,
 		protectSystemFiles: acc.ProtectSystemFiles,
 	}
-	// 同文件 COPY（Windows 大小写变体）与全部 MOVE 在进入 gdav 前接管，
-	// 避免其「先删除目标再改名/重建」语义销毁唯一副本或掏空目录。
+	// 同文件 COPY 与全部 MOVE 在进入 gdav 前接管，避免其先删目标的语义销毁唯一副本或掏空目录。
 	if r.Method == "COPY" {
 		if qfs.handleSameFileCopy(w, r) {
 			return
@@ -291,8 +279,7 @@ func (s *WebdavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // preflightPut 用 Content-Length 做快速配额预检，写入后的记账由 FileSystem 包装层完成。
-// 返回值 (oldSize, targetAbs) 是预检时 stat 到的目标绝对路径与覆盖前大小，供
-// OpenFile 复用；目标不存在或为目录（非法 PUT 目标）时不复用，返回 ""。
+// 返回预检时 stat 到的目标绝对路径与覆盖前大小供 OpenFile 复用；目标不存在或为目录时返回 ""。
 func (s *WebdavServer) preflightPut(r *http.Request, acc WebdavAccount, accountRoot string) (int64, string, error) {
 	if s.usage == nil || r.ContentLength < 0 {
 		return 0, "", nil

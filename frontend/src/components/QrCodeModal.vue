@@ -16,9 +16,9 @@
           <el-icon :size="22"><Iphone /></el-icon>
         </div>
         <div class="qrcode-header-text">
-          <div class="qrcode-title">Scan with your phone</div>
+          <div class="qrcode-title">{{ t('qrcode.scanWithPhone') }}</div>
           <div class="qrcode-subtitle">
-            {{ isFileMode ? 'Open this file on your mobile device' : 'Continue browsing on your phone' }}
+            {{ isFileMode ? t('qrcode.openFileOnMobile') : t('qrcode.continueOnPhone') }}
           </div>
         </div>
       </div>
@@ -55,13 +55,13 @@
           :class="{ 'copy-btn--done': copied }"
           @click="handleCopy"
         >
-          {{ copied ? 'Copied' : 'Copy' }}
+          {{ copied ? t('qrcode.copied') : t('qrcode.copyUrl') }}
         </el-button>
       </div>
 
       <div class="qrcode-tip">
         <el-icon :size="13"><InfoFilled /></el-icon>
-        <span>Point your camera at the QR code to open the link</span>
+        <span>{{ t('qrcode.cameraTip') }}</span>
       </div>
     </div>
   </el-dialog>
@@ -69,6 +69,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { FileItem } from '@/types'
 import { getEncodePath } from '@/utils/path'
 import QRCode from 'qrcode'
@@ -93,6 +94,8 @@ const emit = defineEmits<{
   'update:visible': [value: boolean]
 }>()
 
+const { t } = useI18n()
+
 const qrcodeRef = ref<HTMLElement>()
 const copied = ref(false)
 
@@ -113,7 +116,7 @@ const url = computed(() => {
 
 const title = computed(() => {
   if (props.file) return props.file.name
-  return 'View in Phone'
+  return t('qrcode.viewInPhone')
 })
 
 async function renderQrcode() {
@@ -142,12 +145,12 @@ async function handleCopy() {
   const ok = await copyText(url.value)
   if (ok) {
     copied.value = true
-    ElMessage.success('Link copied to clipboard')
+    ElMessage.success(t('qrcode.copiedToClipboard'))
     setTimeout(() => {
       copied.value = false
     }, 1800)
   } else {
-    ElMessage.error('Failed to copy link — please copy manually')
+    ElMessage.error(t('qrcode.copyFailed'))
   }
 }
 

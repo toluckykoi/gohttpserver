@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -220,8 +221,8 @@ func TestDownloadWithResume(t *testing.T) {
 	hash := hex.EncodeToString(sum[:])
 	srv := newUpdateServer(t, payload, &checkResponse{
 		Available: true,
-		Reason:          "new_version",
-		Release:         &releaseInfo{Version: "1.4.0", Notes: "修复崩溃", PublishedAt: strPtr("2026-03-01T00:00:00Z")},
+		Reason:    "new_version",
+		Release:   &releaseInfo{Version: "1.4.0", Notes: "修复崩溃", PublishedAt: strPtr("2026-03-01T00:00:00Z")},
 		Artifact: &artifactInfo{
 			Filename: "gohttpserver-1.4.0",
 			Size:     int64(len(payload)),
@@ -302,8 +303,8 @@ func TestApplyFailsWhenPartMissing(t *testing.T) {
 	hash := hex.EncodeToString(sum[:])
 	srv := newUpdateServer(t, payload, &checkResponse{
 		Available: true,
-		Reason:          "new_version",
-		Release:         &releaseInfo{Version: "1.4.0"},
+		Reason:    "new_version",
+		Release:   &releaseInfo{Version: "1.4.0"},
 		Artifact: &artifactInfo{
 			Filename: "gohttpserver-1.4.0",
 			Size:     int64(len(payload)),
@@ -350,6 +351,193 @@ func TestApplyFailsWhenPartMissing(t *testing.T) {
 	}
 	if _, err := os.Lstat(exe + ".bak"); !os.IsNotExist(err) {
 		t.Fatalf("失败的安装不应留下备份文件: %v", err)
+	}
+}
+
+// TestLoopbackDownloadURL 验证服务端返回回环下载地址（无端口）时：
+// 校验放行 + 归一化为公共 BaseURL host（沿用 base 端口），且下载走公开地址成功。
+func TestLoopbackDownloadURL(t *testing.T) {
+	payload := newTestPayload(t)
+	sum := sha256.Sum256(payload)
+	hash := hex.EncodeToString(sum[:])
+
+	// stub：check 返回 download_url 写死为 127.0.0.1 的回环地址（无端口，
+	// 归一化后应改用 base host + base 端口 → 即 stub 自身）。
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/apps/gohttpserver/check", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(&checkResponse{
+			Available: true,
+			Reason:    "new_version",
+			Release:   &releaseInfo{Version: "1.4.0"},
+			Artifact: &artifactInfo{
+				Filename: "gohttpserver-1.4.0",
+				Size:     int64(len(payload)),
+				SHA256:   hash,
+				URL:      "http://127.0.0.1/api/v1/artifacts/art1/download",
+			},
+		})
+	})
+	// 下载端点从 stub 的实际地址提供。
+	var srv *httptest.Server
+	mux.HandleFunc("/api/v1/artifacts/art1/download", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"`+hash+`"`)
+		_, _ = w.Write(payload)
+	})
+	srv = httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	svc, err := NewService(Options{
+		BaseURL: srv.URL, App: "gohttpserver", Token: "test-token",
+		CurrentVersion: "1.3.0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(t.TempDir(), "gohttpserver-test.exe")
+	if err := os.WriteFile(exe, []byte("old-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	svc.exeOverride = exe
+
+	svc.Check()
+	waitState(t, svc, StateAvailable, 2*time.Second)
+	if st := svc.Status(); st.State != StateAvailable {
+		t.Fatalf("回环下载地址应放行并通过校验: %+v", st)
+	}
+
+	if err := svc.StartDownload(); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, svc, StateReady, 5*time.Second)
+	if st := svc.Status(); st.State != StateReady {
+		t.Fatalf("回环地址归一化后应能下载成功: state=%s err=%s", st.State, st.Error)
+	}
+}
+
+// TestNormalizeDownloadURL 直接测归一化：回环地址的主机换为 base 主机，
+// 端口优先保留下载地址自带的（端口映射场景），路径与查询原样保留。
+func TestNormalizeDownloadURL(t *testing.T) {
+	base, err := validateBaseURL("https://updates.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			"非回环地址原样返回",
+			"https://updates.example.com/api/v1/pkg/download?token=x",
+			"https://updates.example.com/api/v1/pkg/download?token=x",
+		},
+		{
+			"带端口的回环地址：保留端口、主机换 base",
+			"http://127.0.0.1:9999/api/v1/artifacts/1/download",
+			"https://updates.example.com:9999/api/v1/artifacts/1/download",
+		},
+		{
+			"带端口+查询的回环地址",
+			"http://localhost:9000/pkg?token=t#frag",
+			"https://updates.example.com:9000/pkg?token=t",
+		},
+		{
+			"无端口的回环地址：用 base 端口（base 无端口则不写）",
+			"http://127.0.0.1/api/pkg",
+			"https://updates.example.com/api/pkg",
+		},
+		{
+			"base 带端口时无端口回环地址沿用 base 端口",
+			"http://localhost/api/pkg",
+			"https://updates.example.com:8443/api/pkg",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var b *url.URL
+			if strings.Contains(tc.name, "base 带端口") {
+				b = &url.URL{Scheme: "https", Host: "updates.example.com:8443"}
+			} else {
+				b = base
+			}
+			if got := normalizeDownloadURL(b, tc.raw); got != tc.want {
+				t.Errorf("normalizeDownloadURL(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestValidateArtifact 覆盖下载元数据校验的负向路径：跨源、协议不一致、
+// 带用户信息、非法 SHA-256、非法 size；以及同源/回环的放行路径。
+func TestValidateArtifact(t *testing.T) {
+	validSHA := strings.Repeat("ab", 32)
+	base, err := validateBaseURL("https://updates.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name    string
+		url     string
+		sha     string
+		size    int64
+		wantErr bool
+	}{
+		{"same origin accepted", "https://updates.example.com/pkg", validSHA, 100, false},
+		{"loopback accepted", "https://127.0.0.1:9/pkg", validSHA, 100, false},
+		{"cross origin rejected", "https://evil.example.com/pkg", validSHA, 100, true},
+		{"host with spoofed suffix rejected", "https://updates.example.com.evil.com/pkg", validSHA, 100, true},
+		{"scheme mismatch rejected", "http://updates.example.com/pkg", validSHA, 100, true},
+		{"user info rejected", "https://u:p@updates.example.com/pkg", validSHA, 100, true},
+		{"unparsable url rejected", "://bad", validSHA, 100, true},
+		{"non hex sha rejected", "https://updates.example.com/pkg", strings.Repeat("zz", 32), 100, true},
+		{"short sha rejected", "https://updates.example.com/pkg", strings.Repeat("ab", 16), 100, true},
+		{"empty sha rejected", "https://updates.example.com/pkg", "", 100, true},
+		{"zero size rejected", "https://updates.example.com/pkg", validSHA, 0, true},
+		{"negative size rejected", "https://updates.example.com/pkg", validSHA, -1, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &artifactInfo{Filename: "pkg", Size: tc.size, SHA256: tc.sha, URL: tc.url}
+			err := validateArtifact(base, a)
+			if tc.wantErr && err == nil {
+				t.Errorf("应被拒绝: %+v", a)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("应被放行: %v (artifact=%+v)", err, a)
+			}
+		})
+	}
+}
+
+// TestVerifyFileRejectsTamperedData 验证 size + SHA-256 双重校验能发现篡改。
+func TestVerifyFileRejectsTamperedData(t *testing.T) {
+	payload := []byte("0123456789abcdef")
+	path := filepath.Join(t.TempDir(), "pkg")
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(payload)
+	goodSHA := hex.EncodeToString(sum[:])
+
+	if err := verifyFile(path, int64(len(payload)), goodSHA); err != nil {
+		t.Errorf("未篡改文件应通过校验: %v", err)
+	}
+	if err := verifyFile(path, int64(len(payload)), strings.Repeat("00", 32)); err == nil {
+		t.Error("SHA-256 不匹配应报错")
+	}
+	if err := verifyFile(path, int64(len(payload))+1, goodSHA); err == nil {
+		t.Error("size 不匹配应报错")
+	}
+	if err := verifyFile(filepath.Join(t.TempDir(), "missing"), 1, goodSHA); err == nil {
+		t.Error("文件不存在应报错")
+	}
+
+	// 篡改内容后 size 不变，仅哈希变化 → 必须被检出。
+	if err := os.WriteFile(path, []byte("0123456789abcdeF"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyFile(path, int64(len(payload)), goodSHA); err == nil {
+		t.Error("内容篡改应被 SHA-256 检出")
 	}
 }
 

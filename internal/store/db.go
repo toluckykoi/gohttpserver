@@ -7,8 +7,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// SQLite 持久化 gohttpserver 的服务端状态（登录凭据、webdav 账号、存储用量、frp 配置），单文件放在工作目录中，因此绝不会经 HTTP 对外提供。
-// 选用 modernc.org/sqlite 纯 Go 驱动（无需 CGO），以保住项目 CGO_ENABLED=0 的交叉编译能力。
+// store 以单文件 SQLite 持久化服务端状态（登录凭据、webdav 账号、用量、frp 配置），
+// 文件在工作目录中不经 HTTP 提供；选用纯 Go 驱动以保住 CGO_ENABLED=0 交叉编译。
 
 // schemaSQL 创建 --login 子系统用到的全部表；语句均为 IF NOT EXISTS，打开已有库时是空操作。
 const schemaSQL = `
@@ -59,14 +59,15 @@ CREATE TABLE IF NOT EXISTS frp_config (
 );
 `
 
-// migrationSQL 是给已有表加列的 ALTER TABLE 语句，在 schemaSQL 之后执行以支持从旧版本升级。
+// migrationSQL 给已有表加列，在 schemaSQL 之后执行。
 const migrationSQL = `
 -- Add proxy_protocol_version column if it doesn't exist (SQLite doesn't support IF NOT EXISTS for ADD COLUMN)
 -- We use a transaction with exception handling to make this idempotent
 ALTER TABLE frp_config ADD COLUMN proxy_protocol_version TEXT NOT NULL DEFAULT '';
 `
 
-// OpenDB 打开（必要时创建）SQLite 库并确保 schema 就绪。WAL 提升读并发；连接池上限设为 1，因为写入量很小而纯 Go 驱动按连接串行化写入，封顶可避免并发保存时出现 SQLITE_BUSY。
+// OpenDB 打开（必要时创建）SQLite 库并确保 schema 就绪；WAL 提升读并发，连接池上限 1：
+// 纯 Go 驱动按连接串行化写入，封顶避免并发保存时出现 SQLITE_BUSY。
 func OpenDB(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -77,8 +78,7 @@ func OpenDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("enable WAL: %w", err)
 	}
-	// WAL 模式下 NORMAL 是标准组合：写只落 WAL 不逐次 fsync（第 8 轮性能审查，
-	// WebDAV 记账每 PUT 一次写），掉电至多丢失最后几笔提交且不会损坏库。
+	// WAL 下 NORMAL 是标准组合：写只落 WAL 不逐次 fsync，掉电至多丢最后几笔提交且不损坏库。
 	if _, err := db.Exec("PRAGMA synchronous=NORMAL;"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("set synchronous mode: %w", err)
@@ -91,7 +91,7 @@ func OpenDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
-	// 迁移；报错即说明已应用过，故忽略。
+	// 迁移语句报错说明已应用过，忽略。
 	db.Exec(migrationSQL)
 	return db, nil
 }

@@ -5,13 +5,13 @@
         <Breadcrumb class="toolbar-breadcrumb" />
         <div class="toolbar-controls">
           <div class="toolbar-group toolbar-group--nav">
-            <el-tooltip content="Back" placement="bottom">
+            <el-tooltip :content="t('common.back')" placement="bottom">
               <el-button class="toolbar-btn" type="default" @click="goBack">
                 <el-icon><ArrowLeft /></el-icon>
-                <span class="toolbar-label">Back</span>
+                <span class="toolbar-label">{{ t('common.back') }}</span>
               </el-button>
             </el-tooltip>
-            <el-tooltip content="Refresh (F5)" placement="bottom">
+            <el-tooltip :content="t('common.refreshHint')" placement="bottom">
               <el-button
                 class="toolbar-btn toolbar-refresh"
                 type="default"
@@ -19,21 +19,21 @@
                 @click="handleRefresh"
               >
                 <el-icon><Refresh /></el-icon>
-                <span class="toolbar-label">Refresh</span>
+                <span class="toolbar-label">{{ t('common.refresh') }}</span>
               </el-button>
             </el-tooltip>
             <el-tooltip
-              :content="showHidden ? 'Hide hidden files' : 'Show hidden files'"
+              :content="showHidden ? t('fileList.hideHidden') : t('fileList.showHidden')"
               placement="bottom"
             >
               <el-button class="toolbar-btn" type="default" @click="toggleShowHidden">
                 <el-icon><View /></el-icon>
-                <span class="toolbar-label">{{ showHidden ? 'Hide' : 'Show' }} Hidden</span>
+                <span class="toolbar-label">{{ showHidden ? t('fileList.hide') : t('fileList.show') }} {{ t('fileList.hidden') }}</span>
               </el-button>
             </el-tooltip>
             <el-tooltip
               v-if="!loading && sortedFiles.length > 0"
-              :content="fileStore.selectionMode ? 'Exit selection mode' : 'Select files'"
+              :content="fileStore.selectionMode ? t('fileList.exitSelectionMode') : t('fileList.selectFiles')"
               placement="bottom"
             >
               <el-button
@@ -42,38 +42,38 @@
                 @click="handleToggleSelectionMode"
               >
                 <el-icon><Check /></el-icon>
-                <span class="toolbar-label">{{ fileStore.selectionMode ? 'Done' : 'Select' }}</span>
+                <span class="toolbar-label">{{ fileStore.selectionMode ? t('fileList.done') : t('fileList.select') }}</span>
               </el-button>
             </el-tooltip>
           </div>
 
           <div v-if="auth.upload || auth.delete" class="toolbar-group toolbar-group--actions">
-            <el-tooltip v-if="auth.upload" content="Upload files" placement="bottom">
+            <el-tooltip v-if="auth.upload" :content="t('fileList.uploadFiles')" placement="bottom">
               <el-button
                 class="toolbar-btn"
                 type="primary"
                 @click="showUploadModal = true"
               >
                 <el-icon><Upload /></el-icon>
-                <span class="toolbar-label">Upload</span>
+                <span class="toolbar-label">{{ t('common.upload') }}</span>
               </el-button>
             </el-tooltip>
-            <el-tooltip v-if="auth.upload" content="Download a remote file via URL" placement="bottom">
+            <el-tooltip v-if="auth.upload" :content="t('fileList.downloadRemoteUrl')" placement="bottom">
               <el-button
                 class="toolbar-btn"
                 @click="showUrlDownloadModal = true"
               >
                 <el-icon><Link /></el-icon>
-                <span class="toolbar-label">From URL</span>
+                <span class="toolbar-label">{{ t('fileList.uploadFromUrl') }}</span>
               </el-button>
             </el-tooltip>
-            <el-tooltip v-if="auth.delete" content="New folder" placement="bottom">
+            <el-tooltip v-if="auth.delete" :content="t('fileList.newFolder')" placement="bottom">
               <el-button
                 class="toolbar-btn"
                 @click="handleCreateDirectory"
               >
                 <el-icon><FolderAdd /></el-icon>
-                <span class="toolbar-label">New Folder</span>
+                <span class="toolbar-label">{{ t('fileList.newFolderLabel') }}</span>
               </el-button>
             </el-tooltip>
           </div>
@@ -81,11 +81,11 @@
       </div>
 
       <div v-if="!loading && sortedFiles.length > 0" class="panel-stats">
-        <span>{{ sortedFiles.length }} {{ sortedFiles.length === 1 ? 'item' : 'items' }}</span>
+        <span>{{ sortedFiles.length }} {{ sortedFiles.length === 1 ? t('fileList.items') : t('fileList.itemPlural') }}</span>
         <span class="panel-stats-sep" aria-hidden="true">·</span>
         <span>{{ formatBytes(totalSize) }}</span>
         <span class="panel-stats-sep" aria-hidden="true">·</span>
-        <span>Last modified {{ lastModified }}</span>
+        <span>{{ t('fileList.lastModified') }} {{ lastModified }}</span>
       </div>
 
     <div v-if="!loading && sortedFiles.length === 0" class="empty-state">
@@ -95,12 +95,12 @@
           <path d="M8 26h48" stroke-dasharray="3 4" opacity="0.5"/>
         </svg>
       </span>
-      <p class="empty-title">This folder is empty</p>
+      <p class="empty-title">{{ t('fileList.emptyFolder') }}</p>
       <p class="empty-hint" v-if="auth.upload">
-        Drop files here or click <strong>Upload</strong> to get started
+        {{ t('fileList.emptyHintUpload', { action: t('common.upload') }) }}
       </p>
       <p class="empty-hint" v-else>
-        Files uploaded to this directory will appear here
+        {{ t('fileList.emptyHintNoUpload') }}
       </p>
     </div>
 
@@ -111,7 +111,7 @@
             <el-icon :size="13"><Check /></el-icon>
           </span>
           <span class="selection-bar-count">
-            {{ selectedCount }} selected
+            {{ selectedCount }} {{ t('fileList.selected') }}
             <template v-if="selectedTotalSize > 0">
               <span class="selection-bar-sep">·</span>
               <span class="selection-bar-size data-mono">{{ formatBytes(selectedTotalSize) }}</span>
@@ -119,23 +119,23 @@
           </span>
         </div>
         <div class="selection-bar-right">
-          <el-tooltip content="Download selected as archive" placement="bottom">
+          <el-tooltip :content="t('fileList.downloadSelected')" placement="bottom">
             <el-button
               class="selection-bar-action"
               :icon="Download"
               @click="handleDownloadSelected"
             >
-              <span class="selection-bar-action-label">Download</span>
+              <span class="selection-bar-action-label">{{ t('common.download') }}</span>
             </el-button>
           </el-tooltip>
-          <el-tooltip v-if="auth.delete" content="Delete selected items" placement="bottom">
+          <el-tooltip v-if="auth.delete" :content="t('fileList.deleteSelected')" placement="bottom">
             <el-button
               class="selection-bar-action selection-bar-action--danger"
               :icon="Delete"
               :loading="deletingSelected"
               @click="handleDeleteSelected"
             >
-              <span class="selection-bar-action-label">Delete</span>
+              <span class="selection-bar-action-label">{{ t('common.delete') }}</span>
             </el-button>
           </el-tooltip>
           <span class="selection-bar-divider" aria-hidden="true" />
@@ -146,7 +146,7 @@
             type="primary"
             @click="handleSelectAll"
           >
-            Select All
+            {{ t('fileList.selectAll') }}
           </el-button>
           <el-button
             v-else
@@ -155,15 +155,15 @@
             type="primary"
             @click="handleDeselectAll"
           >
-            Deselect All
+            {{ t('fileList.deselectAll') }}
           </el-button>
-          <el-tooltip content="Clear selection" placement="bottom">
+          <el-tooltip :content="t('fileList.clearSelection')" placement="bottom">
             <el-button
               class="selection-bar-btn selection-bar-clear"
               text
               :icon="Close"
               circle
-              aria-label="Clear selection"
+              :aria-label="t('fileList.clearSelection')"
               @click="handleDeselectAll"
             />
           </el-tooltip>
@@ -185,7 +185,7 @@
       ref="elTableRef"
     >
       <el-table-column type="selection" width="40" />
-      <el-table-column label="Name" min-width="300" prop="name" sortable="custom">
+      <el-table-column :label="t('fileList.name')" min-width="300" prop="name" sortable="custom">
         <template #default="{ row }">
           <el-tooltip
             :content="rowClickLabel(row)"
@@ -203,13 +203,13 @@
         </template>
       </el-table-column>
 
-      <el-table-column label="Size" width="120" align="right" prop="size" sortable="custom">
+      <el-table-column :label="t('fileList.size')" width="120" align="right" prop="size" sortable="custom">
         <template #default="{ row }">
           <span class="data-mono">{{ formatBytes(row.size) }}</span>
         </template>
       </el-table-column>
 
-      <el-table-column label="Modified" width="200" prop="mtime" sortable="custom" class-name="col-modified">
+      <el-table-column :label="t('fileList.modified')" width="200" prop="mtime" sortable="custom" class-name="col-modified">
         <template #default="{ row }">
           <span class="data-mono mtime-col" @click.stop="toggleMtimeType">
             {{ formatMtime(row.mtime) }}
@@ -217,49 +217,49 @@
         </template>
       </el-table-column>
 
-      <el-table-column label="Actions" width="132" class-name="col-actions">
+      <el-table-column :label="t('fileList.actions')" width="132" class-name="col-actions">
         <template #default="{ row }">
           <div class="action-buttons action-desktop" @click.stop>
             <template v-if="row.type === 'dir'">
-              <el-tooltip content="Download as ZIP" placement="top">
+              <el-tooltip :content="t('fileList.downloadAsZip')" placement="top">
                 <el-button
                   class="row-action-btn"
                   :icon="Download"
-                  aria-label="Download as ZIP"
+                  :aria-label="t('fileList.downloadAsZip')"
                   @click="handleDownloadArchive(row)"
                 />
               </el-tooltip>
             </template>
             <template v-else>
-              <el-tooltip v-if="isImage(row)" content="Preview image" placement="top">
+              <el-tooltip v-if="isImage(row)" :content="t('fileList.previewImage')" placement="top">
                 <el-button
                   class="row-action-btn"
                   :icon="Picture"
-                  aria-label="Preview image"
+                  :aria-label="t('fileList.previewImage')"
                   @click="handleShowImagePreview(row)"
                 />
               </el-tooltip>
-              <el-tooltip v-else-if="isVideo(row)" content="Play video" placement="top">
+              <el-tooltip v-else-if="isVideo(row)" :content="t('fileList.playVideo')" placement="top">
                 <el-button
                   class="row-action-btn"
                   :icon="VideoPlay"
-                  aria-label="Play video"
+                  :aria-label="t('fileList.playVideo')"
                   @click="handleVideoPlay(row)"
                 />
               </el-tooltip>
-              <el-tooltip v-else-if="canPreview(row)" content="Preview" placement="top">
+              <el-tooltip v-else-if="canPreview(row)" :content="t('fileList.preview')" placement="top">
                 <el-button
                   class="row-action-btn"
                   :icon="Reading"
-                  aria-label="Preview"
+                  :aria-label="t('fileList.preview')"
                   @click="handleShowPreview(row)"
                 />
               </el-tooltip>
-              <el-tooltip content="Download" placement="top">
+              <el-tooltip :content="t('common.download')" placement="top">
                 <el-button
                   class="row-action-btn"
                   :icon="Download"
-                  aria-label="Download"
+                  :aria-label="t('common.download')"
                   @click="handleDownload(row)"
                 />
               </el-tooltip>
@@ -268,29 +268,29 @@
               <el-button
                 class="row-action-btn"
                 :icon="MoreFilled"
-                aria-label="More actions"
+                :aria-label="t('fileList.moreActions')"
               />
               <template #dropdown>
                 <el-dropdown-menu>
                   <template v-if="row.type === 'dir'">
-                    <el-dropdown-item command="zip" :icon="Download">Download as ZIP</el-dropdown-item>
-                    <el-dropdown-item command="qrcode" :icon="Camera">QR Code</el-dropdown-item>
-                    <el-dropdown-item command="info" :icon="InfoFilled">Info</el-dropdown-item>
+                    <el-dropdown-item command="zip" :icon="Download">{{ t('fileList.downloadAsZip') }}</el-dropdown-item>
+                    <el-dropdown-item command="qrcode" :icon="Camera">{{ t('fileList.qrCode') }}</el-dropdown-item>
+                    <el-dropdown-item command="info" :icon="InfoFilled">{{ t('common.info') }}</el-dropdown-item>
                     <el-dropdown-item v-if="auth.delete" command="delete" :icon="Delete" divided>
-                      Delete
+                      {{ t('common.delete') }}
                     </el-dropdown-item>
                   </template>
                   <template v-else>
-                    <el-dropdown-item command="download" :icon="Download">Download</el-dropdown-item>
-                    <el-dropdown-item command="copy" :icon="DocumentCopy">Copy Link</el-dropdown-item>
-                    <el-dropdown-item command="qrcode" :icon="Camera">QR Code</el-dropdown-item>
-                    <el-dropdown-item v-if="isImage(row)" command="image-preview" :icon="Picture">Preview image</el-dropdown-item>
-                    <el-dropdown-item v-if="canPreview(row)" command="preview" :icon="Reading">Preview</el-dropdown-item>
-                    <el-dropdown-item v-if="isVideo(row)" command="video" :icon="VideoPlay">Play Video</el-dropdown-item>
-                    <el-dropdown-item v-if="hasQrCode(row)" command="install" :icon="Box">Install</el-dropdown-item>
-                    <el-dropdown-item command="info" :icon="InfoFilled">Info</el-dropdown-item>
+                    <el-dropdown-item command="download" :icon="Download">{{ t('common.download') }}</el-dropdown-item>
+                    <el-dropdown-item command="copy" :icon="DocumentCopy">{{ t('fileList.copyLink') }}</el-dropdown-item>
+                    <el-dropdown-item command="qrcode" :icon="Camera">{{ t('fileList.qrCode') }}</el-dropdown-item>
+                    <el-dropdown-item v-if="isImage(row)" command="image-preview" :icon="Picture">{{ t('fileList.previewImage') }}</el-dropdown-item>
+                    <el-dropdown-item v-if="canPreview(row)" command="preview" :icon="Reading">{{ t('fileList.preview') }}</el-dropdown-item>
+                    <el-dropdown-item v-if="isVideo(row)" command="video" :icon="VideoPlay">{{ t('fileList.playVideo') }}</el-dropdown-item>
+                    <el-dropdown-item v-if="hasQrCode(row)" command="install" :icon="Box">{{ t('fileList.install') }}</el-dropdown-item>
+                    <el-dropdown-item command="info" :icon="InfoFilled">{{ t('common.info') }}</el-dropdown-item>
                     <el-dropdown-item v-if="auth.delete" command="delete" :icon="Delete" divided>
-                      Delete
+                      {{ t('common.delete') }}
                     </el-dropdown-item>
                   </template>
                 </el-dropdown-menu>
@@ -339,7 +339,7 @@
         <div v-if="!fileStore.selectionMode" class="mobile-file-actions" @click.stop>
           <!-- 高频操作直达：文件直接下载，文件夹 ZIP 下载 -->
           <el-tooltip
-            :content="row.type === 'dir' ? 'Download as ZIP' : 'Download'"
+            :content="row.type === 'dir' ? t('fileList.downloadAsZip') : t('common.download')"
             placement="top"
             :show-after="350"
           >
@@ -347,7 +347,7 @@
               class="mobile-quick-btn"
               :icon="Download"
               circle
-              :aria-label="row.type === 'dir' ? 'Download as ZIP' : 'Download'"
+              :aria-label="row.type === 'dir' ? t('fileList.downloadAsZip') : t('common.download')"
               @click="row.type === 'dir' ? handleDownloadArchive(row) : handleDownload(row)"
             />
           </el-tooltip>
@@ -355,27 +355,27 @@
             trigger="click"
             @command="(cmd: string) => handleMobileAction(cmd, row)"
           >
-            <el-button class="mobile-quick-btn" :icon="MoreFilled" circle aria-label="More actions" />
+            <el-button class="mobile-quick-btn" :icon="MoreFilled" circle :aria-label="t('fileList.moreActions')" />
             <template #dropdown>
               <el-dropdown-menu>
                 <template v-if="row.type === 'dir'">
-                  <el-dropdown-item command="zip">Download as ZIP</el-dropdown-item>
-                  <el-dropdown-item command="info">Info</el-dropdown-item>
-                  <el-dropdown-item command="qrcode">QR Code</el-dropdown-item>
+                  <el-dropdown-item command="zip">{{ t('fileList.downloadAsZip') }}</el-dropdown-item>
+                  <el-dropdown-item command="info">{{ t('common.info') }}</el-dropdown-item>
+                  <el-dropdown-item command="qrcode">{{ t('fileList.qrCode') }}</el-dropdown-item>
                   <el-dropdown-item v-if="auth.delete" command="delete" divided>
-                    Delete
+                    {{ t('common.delete') }}
                   </el-dropdown-item>
                 </template>
                 <template v-else>
-                  <el-dropdown-item command="download">Download</el-dropdown-item>
-                  <el-dropdown-item command="copy">Copy Link</el-dropdown-item>
-                  <el-dropdown-item command="qrcode">QR Code</el-dropdown-item>
-                  <el-dropdown-item v-if="canPreview(row)" command="preview">Preview</el-dropdown-item>
-                  <el-dropdown-item v-if="isVideo(row)" command="video">Play Video</el-dropdown-item>
-                  <el-dropdown-item v-if="hasQrCode(row)" command="install">Install</el-dropdown-item>
-                  <el-dropdown-item command="info">Info</el-dropdown-item>
+                  <el-dropdown-item command="download">{{ t('common.download') }}</el-dropdown-item>
+                  <el-dropdown-item command="copy">{{ t('fileList.copyLink') }}</el-dropdown-item>
+                  <el-dropdown-item command="qrcode">{{ t('fileList.qrCode') }}</el-dropdown-item>
+                  <el-dropdown-item v-if="canPreview(row)" command="preview">{{ t('fileList.preview') }}</el-dropdown-item>
+                  <el-dropdown-item v-if="isVideo(row)" command="video">{{ t('fileList.playVideo') }}</el-dropdown-item>
+                  <el-dropdown-item v-if="hasQrCode(row)" command="install">{{ t('fileList.install') }}</el-dropdown-item>
+                  <el-dropdown-item command="info">{{ t('common.info') }}</el-dropdown-item>
                   <el-dropdown-item v-if="auth.delete" command="delete" divided>
-                    Delete
+                    {{ t('common.delete') }}
                   </el-dropdown-item>
                 </template>
               </el-dropdown-menu>
@@ -493,6 +493,7 @@ import {
 
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { TableInstance } from 'element-plus'
+import { useI18n } from 'vue-i18n'
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
 
@@ -500,6 +501,7 @@ dayjs.extend(relativeTime)
 
 const fileStore = useFileStore()
 const fileApi = useFileApi()
+const { t } = useI18n()
 
 const showNewFolderDialog = ref(false)
 const showUploadModal = ref(false)
@@ -774,7 +776,7 @@ async function handleDownloadSelected() {
     }
     await fileApi.downloadMulti(selected.map((f) => f.path))
   } catch (error) {
-    ElMessage.error(`Failed to download: ${error}`)
+    ElMessage.error(t('messages.downloadFailed', { msg: error }))
   }
 }
 
@@ -828,9 +830,9 @@ async function handleCopyLink(file: FileItemType) {
   const url = window.location.origin + encodePath
   const ok = await copyText(url)
   if (ok) {
-    ElMessage.success('Link copied to clipboard')
+    ElMessage.success(t('messages.copiedToClipboard', { label: t('fileList.copyLink') }))
   } else {
-    ElMessage.error('Failed to copy link — please copy manually')
+    ElMessage.error(t('messages.copyFailed', { label: t('fileList.copyLink') }))
   }
 }
 
@@ -842,11 +844,11 @@ async function handleDeleteFile(file: FileItemType) {
   }
   try {
     await ElMessageBox.confirm(
-      `Delete ${file.name}?`,
-      'Confirm',
+      t('fileList.deleteConfirm', { name: file.name }),
+      t('common.confirm'),
       {
-        confirmButtonText: 'Delete',
-        cancelButtonText: 'Cancel',
+        confirmButtonText: t('common.delete'),
+        cancelButtonText: t('common.cancel'),
         type: 'warning'
       }
     )
@@ -876,11 +878,11 @@ async function handleDeleteSelected() {
 
   try {
     await ElMessageBox.confirm(
-      `Delete ${selected.length} selected item${selected.length > 1 ? 's' : ''}? This cannot be undone.`,
-      'Confirm batch delete',
+      t('fileList.deleteSelectedConfirm', { count: selected.length }),
+      t('fileList.batchDeleteTitle'),
       {
-        confirmButtonText: 'Delete',
-        cancelButtonText: 'Cancel',
+        confirmButtonText: t('common.delete'),
+        cancelButtonText: t('common.cancel'),
         type: 'warning',
         confirmButtonClass: 'el-button--danger'
       }
@@ -907,9 +909,9 @@ async function handleDeleteSelected() {
 
     const failed = results.length - okPaths.size
     if (failed === 0) {
-      ElMessage.success(`Deleted ${okPaths.size} item${okPaths.size > 1 ? 's' : ''}`)
+      ElMessage.success(t('messages.deletedCount', { count: okPaths.size }))
     } else {
-      ElMessage.warning(`Deleted ${okPaths.size} item${okPaths.size > 1 ? 's' : ''}, ${failed} failed`)
+      ElMessage.warning(t('messages.deletePartialFailed', { count: okPaths.size, failed }))
     }
     fileStore.loadFiles(undefined, undefined, { silent: true }).catch(err =>
       console.error('Background refresh after batch delete failed:', err)

@@ -1,35 +1,45 @@
 <template>
   <div class="profile-section">
     <section class="profile-card">
-      <h2 class="section-title">Basic Info</h2>
+      <h2 class="section-title">{{ t('profile.basicInfo') }}</h2>
       <dl class="info-grid" v-if="store.profile">
         <div class="info-item">
-          <dt>Username</dt>
+          <dt>{{ t('profile.username') }}</dt>
           <dd>{{ store.profile.username }}</dd>
         </div>
         <div class="info-item">
-          <dt>Auth Provider</dt>
+          <dt>{{ t('profile.authProvider') }}</dt>
           <dd>
             <el-tag size="small" type="info">{{ providerLabel(store.profile.provider) }}</el-tag>
           </dd>
         </div>
         <div class="info-item">
-          <dt>Server Version</dt>
-          <dd><code>{{ store.profile.version || 'unknown' }}</code></dd>
+          <dt>{{ t('profile.serverVersion') }}</dt>
+          <dd><code>{{ store.profile.version || t('common.unknown') }}</code></dd>
         </div>
       </dl>
       <el-skeleton v-else :rows="3" animated />
     </section>
 
+    <!-- 语言切换（个人配置 → 首选项）。 -->
+    <section class="profile-card">
+      <h2 class="section-title">{{ t('profile.language') }}</h2>
+      <p class="section-hint">{{ t('profile.languageHint') }}</p>
+      <el-radio-group :model-value="currentLocale" @change="handleLocaleChange">
+        <el-radio-button value="en">{{ t('profile.languageEnglish') }}</el-radio-button>
+        <el-radio-button value="zh">{{ t('profile.languageChinese') }}</el-radio-button>
+      </el-radio-group>
+    </section>
+
     <!-- 改用户名无需验证当前密码。 -->
     <section class="profile-card">
-      <h2 class="section-title">Change Username</h2>
-      <p class="section-hint">Enter a new username and save.</p>
+      <h2 class="section-title">{{ t('profile.changeUsername') }}</h2>
+      <p class="section-hint">{{ t('profile.changeUsernameHint') }}</p>
       <el-form label-position="top" @submit.prevent="handleSubmitUsername">
-        <el-form-item label="New Username">
+        <el-form-item :label="t('profile.newUsername')">
           <el-input
             v-model="newUsername"
-            placeholder="Enter new username"
+            :placeholder="t('profile.newUsernamePlaceholder')"
             autocomplete="username"
             :disabled="submittingUsername"
             required
@@ -42,16 +52,16 @@
           :loading="submittingUsername"
           :disabled="submittingUsername"
         >
-          Save Username
+          {{ t('profile.saveUsername') }}
         </el-button>
       </el-form>
     </section>
 
     <section class="profile-card">
-      <h2 class="section-title">Change Password</h2>
-      <p class="section-hint">New password must be at least 4 characters.</p>
+      <h2 class="section-title">{{ t('profile.changePassword') }}</h2>
+      <p class="section-hint">{{ t('profile.changePasswordHint') }}</p>
       <el-form label-position="top" @submit.prevent="handleSubmitPassword">
-        <el-form-item label="Current Password">
+        <el-form-item :label="t('profile.currentPassword')">
           <el-input
             v-model="oldPassword"
             type="password"
@@ -61,7 +71,7 @@
             required
           />
         </el-form-item>
-        <el-form-item label="New Password">
+        <el-form-item :label="t('profile.newPassword')">
           <el-input
             v-model="newPassword"
             type="password"
@@ -71,7 +81,7 @@
             required
           />
         </el-form-item>
-        <el-form-item label="Confirm New Password">
+        <el-form-item :label="t('profile.confirmNewPassword')">
           <el-input
             v-model="confirmPassword"
             type="password"
@@ -88,7 +98,7 @@
           :loading="submittingPassword"
           :disabled="submittingPassword"
         >
-          Save Password
+          {{ t('profile.savePassword') }}
         </el-button>
       </el-form>
     </section>
@@ -98,11 +108,22 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
+import { useI18n } from 'vue-i18n'
 import { useAdminStore } from '@/stores/adminStore'
+import { setLocale } from '@/i18n'
 
 const emit = defineEmits<{
   (e: 'username-changed', value: string): void
 }>()
+
+const { t, locale } = useI18n()
+const currentLocale = ref<string>(String(locale.value || 'en'))
+
+function handleLocaleChange(val: string | number | boolean | undefined) {
+  const next = val === 'zh' ? 'zh' : 'en'
+  currentLocale.value = next
+  setLocale(next)
+}
 
 const store = useAdminStore()
 
@@ -127,7 +148,7 @@ function providerLabel(provider: string): string {
     case 'github':
       return 'GitHub'
     default:
-      return provider || 'Unknown'
+      return provider || t('common.unknown')
   }
 }
 
@@ -135,24 +156,24 @@ async function handleSubmitUsername() {
   usernameError.value = ''
   const name = newUsername.value.trim()
   if (!name) {
-    usernameError.value = 'Username cannot be empty.'
+    usernameError.value = t('profile.usernameEmpty')
     return
   }
   if (name.length > 64) {
-    usernameError.value = 'Username must be at most 64 characters.'
+    usernameError.value = t('profile.usernameTooLong')
     return
   }
   submittingUsername.value = true
   try {
     const res = await store.changeUsername(name)
     if (res.ok) {
-      ElMessage.success('Username updated')
+      ElMessage.success(t('profile.usernameUpdated'))
       newUsername.value = ''
       emit('username-changed', res.data.username)
     } else if (res.error === 'unauthorized') {
-      usernameError.value = 'Session expired, please sign in again.'
+      usernameError.value = t('profile.sessionExpired')
     } else {
-      usernameError.value = res.error || 'Failed to update username.'
+      usernameError.value = res.error || t('profile.usernameUpdateFailed')
     }
   } finally {
     submittingUsername.value = false
@@ -162,31 +183,31 @@ async function handleSubmitUsername() {
 async function handleSubmitPassword() {
   passwordError.value = ''
   if (!oldPassword.value || !newPassword.value || !confirmPassword.value) {
-    passwordError.value = 'All fields are required.'
+    passwordError.value = t('profile.allFieldsRequired')
     return
   }
   if (newPassword.value !== confirmPassword.value) {
-    passwordError.value = 'The two new passwords do not match.'
+    passwordError.value = t('profile.passwordMismatch')
     return
   }
   if (newPassword.value.length < 4) {
-    passwordError.value = 'New password must be at least 4 characters.'
+    passwordError.value = t('profile.passwordTooShort')
     return
   }
   submittingPassword.value = true
   try {
     const res = await store.changePassword(oldPassword.value, newPassword.value)
     if (res.ok) {
-      ElMessage.success('Password updated')
+      ElMessage.success(t('profile.passwordUpdated'))
       oldPassword.value = ''
       newPassword.value = ''
       confirmPassword.value = ''
     } else if (res.error === 'unauthorized') {
-      passwordError.value = 'Session expired, please sign in again.'
+      passwordError.value = t('profile.sessionExpired')
     } else if (res.error === 'invalid current password') {
-      passwordError.value = 'Current password is incorrect.'
+      passwordError.value = t('profile.passwordIncorrect')
     } else {
-      passwordError.value = res.error || 'Failed to update password.'
+      passwordError.value = res.error || t('profile.passwordUpdateFailed')
     }
   } finally {
     submittingPassword.value = false

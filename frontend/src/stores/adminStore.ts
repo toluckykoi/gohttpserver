@@ -34,11 +34,9 @@ export const useAdminStore = defineStore('admin', () => {
   const frpLoaded = ref(false)
   const frpLoading = ref(false)
 
-  // WebDAV 明文密码只在内存中保存：服务端只在创建/重置时返回一次密码，之后只存哈希。
-  // 不再写入 localStorage——共享机器上残留全部凭据的风险远大于刷新后需重新创建的代价。
-  // 旧版本写入的 webdav_passwords 条目在加载时清除。
+  // WebDAV 明文密码只在内存中保存：服务端只在创建/重置时返回一次密码，之后只存哈希；
+  // 不写入 localStorage（共享机器上残留凭据的风险大于刷新后重建的代价）。
   const WEBDAV_PW_KEY = 'webdav_passwords'
-  // 清理旧版本残留的 localStorage 密码缓存。
   try {
     localStorage.removeItem(WEBDAV_PW_KEY)
   } catch {

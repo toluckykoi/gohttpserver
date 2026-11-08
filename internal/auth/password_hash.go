@@ -25,7 +25,7 @@ const (
 
 // PasswordHash 包装存储的哈希，负责校验与升级。
 type PasswordHash struct {
-	hash string // bcrypt 哈希，旧行为十六进制 SHA-256
+	hash string // bcrypt 哈希；兼容旧版十六进制 SHA-256
 }
 
 // NewPasswordHashFromStored 包装从数据库原样读出的哈希。
@@ -170,12 +170,10 @@ func (u *Upgrader) TryUpgrade(key string, currentHash string, password string, s
 // ErrInvalidPassword 表示密码不满足强度策略。
 var ErrInvalidPassword = errors.New("password must be 8-72 characters")
 
-// minPasswordLength 抬高到 8：4 位密码对在线爆破几乎无抵抗，锁定机制只是延缓。
-// 仅约束新设置的密码；既有短密码仍可正常登录。
+// minPasswordLength 仅约束新设置的密码（既有短密码仍可登录）；4 位密码对在线爆破几乎无抵抗，锁定只是延缓。
 const minPasswordLength = 8
 
-// maxPasswordBytes 是 bcrypt 的有效输入上限（超出部分被静默截断）。显式拒绝，
-// 避免「改密成功但登录失败」的错位体验。
+// maxPasswordBytes 是 bcrypt 的有效输入上限（超出部分被静默截断），显式拒绝以免改密成功但登录失败。
 const maxPasswordBytes = 72
 
 // ValidatePassword 校验密码强度策略。

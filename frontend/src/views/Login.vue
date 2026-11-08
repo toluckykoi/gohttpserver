@@ -13,9 +13,9 @@
           <img src="/favicon.png" alt="" width="26" height="26">
         </span>
         <h1 class="login-title">GoHTTPServer</h1>
-        <span class="login-badge">File Manager</span>
+        <span class="login-badge">{{ t('login.fileManager') }}</span>
       </div>
-      <p class="login-subtitle">Sign in to manage your files.</p>
+      <p class="login-subtitle">{{ t('login.subtitle') }}</p>
 
       <div v-if="errorMessage" class="login-error" role="alert">
         <svg viewBox="0 0 20 20" width="15" height="15" fill="currentColor" aria-hidden="true">
@@ -25,13 +25,13 @@
       </div>
 
       <div class="login-field">
-        <label for="login-username">Username</label>
+        <label for="login-username">{{ t('login.username') }}</label>
         <el-input
           id="login-username"
           ref="usernameInputRef"
           v-model="username"
           size="large"
-          placeholder="Enter username"
+          :placeholder="t('login.usernamePlaceholder')"
           autocomplete="username"
           inputmode="text"
           name="username"
@@ -44,13 +44,13 @@
       </div>
 
       <div class="login-field">
-        <label for="login-password">Password</label>
+        <label for="login-password">{{ t('login.password') }}</label>
         <el-input
           id="login-password"
           v-model="password"
           size="large"
           type="password"
-          placeholder="Enter password"
+          :placeholder="t('login.passwordPlaceholder')"
           autocomplete="current-password"
           name="password"
           show-password
@@ -70,19 +70,22 @@
         class="login-submit"
       >
         <el-icon v-if="!submitting" :size="15" class="login-submit-icon"><Right /></el-icon>
-        {{ submitting ? 'Signing in…' : 'Sign in' }}
+        {{ submitting ? t('login.signingIn') : t('login.signIn') }}
       </el-button>
     </form>
 
-    <p class="login-footnote">GoHTTPServer · Self-hosted file sharing</p>
+    <p class="login-footnote">{{ t('login.selfHosted') }}</p>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, nextTick } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useFileStore } from '@/stores/fileStore'
 import { ElMessage } from 'element-plus'
 import { User, Lock, Right } from '@element-plus/icons-vue'
+
+const { t } = useI18n()
 
 interface Props {
   /** 用户最初想访问的路径。 */
@@ -118,11 +121,11 @@ const errorMessage = computed(() => {
   if (!errorCode.value) return ''
   switch (errorCode.value) {
     case 'invalid_credentials':
-      return 'Username or password is incorrect.'
+      return t('login.wrongCredentials')
     case 'missing_credentials':
-      return 'Both username and password are required.'
+      return t('login.missingCredentials')
     case 'network':
-      return 'Could not reach the server. Check your connection and retry.'
+      return t('login.networkError')
     default:
       return errorCode.value
   }
@@ -142,9 +145,8 @@ async function handleSubmit() {
   try {
     const res = await fileStore.loginWithCredentials(username.value.trim(), password.value)
     if (res.ok) {
-      // 整页跳转，让 SPA 带上新会话 Cookie 重新挂载。
-      // dev server 下页面挂在 Vite base 前缀上，须跳回 base+path 才能留在
-      // 热更新环境；生产 base 与资产挂载点重合，保持原样跳目录路径。
+      // 整页跳转，让 SPA 带上新会话 Cookie 重新挂载。dev 下须跳回 Vite base
+      // 前缀以留在热更新环境；生产 base 与挂载点重合，直接跳 next 路径。
       const base = import.meta.env.BASE_URL
       const next = props.next || '/'
       const target =

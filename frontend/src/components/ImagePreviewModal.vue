@@ -29,7 +29,7 @@
       <button
         v-if="hasPrev"
         class="image-nav image-nav--prev"
-        aria-label="Previous image"
+        :aria-label="t('imagePreview.previous')"
         @click="navigate(-1)"
       >
         <el-icon :size="20"><ArrowLeft /></el-icon>
@@ -37,7 +37,7 @@
       <button
         v-if="hasNext"
         class="image-nav image-nav--next"
-        aria-label="Next image"
+        :aria-label="t('imagePreview.next')"
         @click="navigate(1)"
       >
         <el-icon :size="20"><ArrowRight /></el-icon>
@@ -64,38 +64,38 @@
         />
         <div v-else-if="loadError" class="image-error">
           <el-icon :size="40"><Picture /></el-icon>
-          <p>Failed to load image</p>
+          <p>{{ t('imagePreview.failedToLoad') }}</p>
         </div>
       </div>
     </div>
 
     <div class="image-toolbar">
       <div class="image-toolbar-group">
-        <el-tooltip content="Zoom out" placement="top">
+        <el-tooltip :content="t('imagePreview.zoomOut')" placement="top">
           <el-button :icon="ZoomOut" circle size="small" @click="zoom(-0.2)" />
         </el-tooltip>
         <span class="image-zoom-label">{{ Math.round(scale * 100) }}%</span>
-        <el-tooltip content="Zoom in" placement="top">
+        <el-tooltip :content="t('imagePreview.zoomIn')" placement="top">
           <el-button :icon="ZoomIn" circle size="small" @click="zoom(0.2)" />
         </el-tooltip>
-        <el-tooltip content="Reset" placement="top">
+        <el-tooltip :content="t('imagePreview.reset')" placement="top">
           <el-button :icon="Refresh" circle size="small" @click="resetTransform" />
         </el-tooltip>
       </div>
 
       <div class="image-toolbar-group">
-        <el-tooltip content="Rotate left" placement="top">
+        <el-tooltip :content="t('imagePreview.rotateLeft')" placement="top">
           <el-button :icon="RefreshLeft" circle size="small" @click="rotate(-90)" />
         </el-tooltip>
-        <el-tooltip content="Rotate right" placement="top">
+        <el-tooltip :content="t('imagePreview.rotateRight')" placement="top">
           <el-button :icon="RefreshRight" circle size="small" @click="rotate(90)" />
         </el-tooltip>
       </div>
 
       <div class="image-toolbar-group image-toolbar-group--right">
-        <el-tooltip content="Download" placement="top">
+        <el-tooltip :content="t('imagePreview.download')" placement="top">
           <el-button :icon="Download" size="small" @click="handleDownload">
-            Download
+            {{ t('imagePreview.download') }}
           </el-button>
         </el-tooltip>
       </div>
@@ -105,6 +105,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { FileItem } from '@/types'
 import { getEncodePath } from '@/utils/path'
 import { isPreviewableImage } from '@/utils/fileIcon'
@@ -136,6 +137,8 @@ const emit = defineEmits<{
   navigate: [file: FileItem]
 }>()
 
+const { t } = useI18n()
+
 const fileApi = useFileApi()
 const viewportRef = ref<HTMLElement>()
 const stageRef = ref<HTMLElement>()
@@ -155,8 +158,8 @@ const visible = computed({
 })
 
 const title = computed(() => {
-  if (!props.file) return 'Image Preview'
-  return `Image: ${props.file.name}`
+  if (!props.file) return t('imagePreview.title')
+  return t('imagePreview.imageInfo', { name: props.file.name })
 })
 
 const src = computed(() => {

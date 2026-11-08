@@ -1,7 +1,7 @@
 <template>
   <el-dialog
     v-model="visible"
-    title="File Upload"
+    :title="t('upload.title')"
     width="500px"
     :close-on-click-modal="!uploading"
     :close-on-press-escape="!uploading"
@@ -21,29 +21,29 @@
     >
       <el-icon class="el-icon--upload"><upload-filled /></el-icon>
       <div class="el-upload__text">
-        Drop file here or <em>click to upload</em>
+        {{ t('upload.dropHintBefore') }}<em>{{ t('upload.click') }}</em>{{ t('upload.dropHintAfter') }}
       </div>
       <template #tip>
         <div class="el-upload__tip">
-          File size should not exceed 10GB
+          {{ t('upload.sizeLimit') }}
         </div>
         <div class="el-upload__tip">
           <template v-if="supportsFolderPick">
-            Or
+            {{ t('upload.or') }}
             <el-link
               class="folder-link"
               type="primary"
               :underline="false"
               @click.stop="triggerFolderPicker"
-            >choose a folder</el-link>
-            <span class="folder-hint">(preserves folder structure)</span>
+            >{{ t('upload.chooseFolder') }}</el-link>
+            <span class="folder-hint">{{ t('upload.folderHint') }}</span>
           </template>
           <template v-else>
             <el-tooltip
-              content="Your browser doesn't support folder selection. Use Chrome / Edge / Firefox."
+              :content="t('upload.folderNotSupported')"
               placement="top"
             >
-              <el-link class="folder-link" type="primary" :underline="false" disabled>choose a folder</el-link>
+              <el-link class="folder-link" type="primary" :underline="false" disabled>{{ t('upload.chooseFolder') }}</el-link>
             </el-tooltip>
           </template>
         </div>
@@ -75,14 +75,14 @@
 
     <div class="options" v-if="fileList.length > 0 && !uploading">
       <el-checkbox v-model="unzipAfterUpload">
-        Unzip after upload (for .zip files)
+        {{ t('upload.unzip') }}
       </el-checkbox>
     </div>
 
     <template #footer>
       <div class="dialog-footer">
         <el-button @click="handleCancel" :disabled="uploading">
-          {{ uploading ? 'Uploading...' : 'Cancel' }}
+          {{ uploading ? t('upload.uploading') : t('common.cancel') }}
         </el-button>
         <el-button
           type="primary"
@@ -90,7 +90,7 @@
           :loading="uploading"
           :disabled="fileList.length === 0"
         >
-          Upload
+          {{ t('upload.uploadBtn') }}
         </el-button>
       </div>
     </template>
@@ -102,8 +102,11 @@ import { ref, computed } from 'vue'
 import type { UploadUserFile } from 'element-plus'
 import { UploadFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import { useI18n } from 'vue-i18n'
 import { useFileApi } from '@/composables/useFileApi'
 import { useFileStore } from '@/stores/fileStore'
+
+const { t } = useI18n()
 
 interface Props {
   visible: boolean
@@ -170,9 +173,14 @@ const displayFileName = computed(() => {
 const uploadTotalCount = ref(0)
 const displayStatsLine = computed(() => {
   if (unzipPhase.value === 'unzipping' || unzipPhase.value === 'done') {
-    return `Extracting ${unzipCurrent.value} / ${unzipTotal.value}`
+    return t('upload.extracting', { current: unzipCurrent.value, total: unzipTotal.value })
   }
-  return `${currentFileIndex.value} / ${uploadTotalCount.value} files · ${formatSize(uploadedBytes.value)} / ${formatSize(totalBytes.value)}`
+  return t('upload.uploadProgress', {
+    current: currentFileIndex.value,
+    total: uploadTotalCount.value,
+    uploaded: formatSize(uploadedBytes.value),
+    totalSize: formatSize(totalBytes.value)
+  })
 })
 
 // 每个被选中的顶层文件夹一个条目，携带其原始 File[]。
@@ -234,7 +242,7 @@ function handleFolderChange(event: Event) {
       uid: -Date.now() - Math.floor(Math.random() * 1_000_000),
       name:
         `${folderName}  ` +
-        `(${group.length} ${group.length === 1 ? 'file' : 'files'} · ${formatSize(totalBytes)})`,
+        `(${group.length} ${t(group.length === 1 ? 'upload.file' : 'upload.files')} · ${formatSize(totalBytes)})`,
       status: 'ready'
     } as UploadUserFile & FolderEntryData
     entry.isFolder = true
@@ -257,7 +265,7 @@ function formatSize(bytes: number): string {
 
 async function handleUpload() {
   if (fileList.value.length === 0) {
-    ElMessage.warning('Please select files to upload')
+    ElMessage.warning(t('upload.noFilesSelected'))
     return
   }
 
@@ -275,7 +283,7 @@ async function handleUpload() {
   }
 
   if (uploadList.length === 0) {
-    ElMessage.warning('Please select files to upload')
+    ElMessage.warning(t('upload.noFilesSelected'))
     return
   }
 
@@ -349,13 +357,13 @@ async function handleUpload() {
     }
 
     uploadedBytes.value = totalBytes.value
-    ElMessage.success('All files uploaded successfully')
+    ElMessage.success(t('upload.allUploaded'))
     visible.value = false
     await fileStore.loadFiles()
   } catch (error: any) {
     unzipPhase.value = 'error'
     if (error.message !== 'Upload cancelled') {
-      ElMessage.error(`Upload failed: ${error.message}`)
+      ElMessage.error(t('upload.uploadFailedDetail', { msg: error.message }))
     }
     console.error(error)
   } finally {

@@ -18,9 +18,8 @@ func compressiblePath(p string) bool {
 	return false
 }
 
-// StaticAssets 为内嵌前端文件服务加上 gzip（仅 GET、无 Range、且客户端声明接受）与
-// Cache-Control：/assets/ 下带内容哈希的文件缓存一年，SPA 外壳与 favicon 需重新验证，
-// 因为它们的名字不变而内容可能变。底层文件服务本身不设这两个头。
+// StaticAssets 为内嵌前端加 gzip（仅 GET、无 Range 且客户端接受）与 Cache-Control：
+// 带内容哈希的 /assets/ 缓存一年，SPA 外壳与 favicon 名字不变而内容可能变，需重新验证。
 func StaticAssets(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isHashedAsset(r.URL.Path) {

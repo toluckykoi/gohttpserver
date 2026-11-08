@@ -4,9 +4,9 @@
     <section class="settings-card">
       <div class="card-header">
         <div>
-          <h2 class="section-title">WebDAV Service</h2>
+          <h2 class="section-title">{{ t('webdav.service') }}</h2>
           <p class="section-hint">
-            Once enabled, files can be accessed via WebDAV clients (Cyberduck, rclone, Windows Explorer, etc.).
+            {{ t('webdav.serviceHint') }}
           </p>
         </div>
         <el-switch
@@ -16,21 +16,21 @@
         />
       </div>
       <div class="webdav-url-row" v-if="store.webdavEnabled">
-        <span class="webdav-url-label">URL:</span>
+        <span class="webdav-url-label">{{ t('webdav.url') }}:</span>
         <code class="webdav-url-value">{{ webdavFullUrl }}</code>
         <el-button text size="small" @click="copyUrl">
           <el-icon><CopyDocument /></el-icon>
-          Copy
+          {{ t('common.copy') }}
         </el-button>
       </div>
     </section>
 
     <section class="settings-card" v-if="store.webdavEnabled">
       <div class="card-header">
-        <h2 class="section-title">WebDAV Accounts</h2>
+        <h2 class="section-title">{{ t('webdav.accounts') }}</h2>
         <el-button class="new-account-btn" @click="showCreate = true">
           <el-icon class="new-account-icon"><Plus /></el-icon>
-          <span>New Account</span>
+          <span>{{ t('webdav.newAccount') }}</span>
         </el-button>
       </div>
       <WebdavAccountList v-if="store.webdavLoaded" />
@@ -49,11 +49,13 @@
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { CopyDocument, Plus } from '@element-plus/icons-vue'
+import { useI18n } from 'vue-i18n'
 import { useAdminStore } from '@/stores/adminStore'
 import { copyText } from '@/utils/clipboard'
 import WebdavAccountList from './WebdavAccountList.vue'
 import WebdavAccountCreate from './WebdavAccountCreate.vue'
 
+const { t } = useI18n()
 const store = useAdminStore()
 const togglingEnabled = ref(false)
 const showCreate = ref(false)
@@ -68,9 +70,9 @@ async function handleToggleEnabled(target: boolean) {
   try {
     const res = await store.setWebdavEnabled(target)
     if (res.ok) {
-      ElMessage.success(target ? 'WebDAV enabled' : 'WebDAV disabled')
+      ElMessage.success(target ? t('webdav.enabled') : t('webdav.disabled'))
     } else {
-      ElMessage.error(res.error || 'Failed to toggle')
+      ElMessage.error(res.error || t('webdav.toggleFailed'))
     }
   } finally {
     togglingEnabled.value = false
@@ -79,9 +81,9 @@ async function handleToggleEnabled(target: boolean) {
 
 async function copyUrl() {
   if (await copyText(webdavFullUrl.value)) {
-    ElMessage.success('已复制到剪贴板')
+    ElMessage.success(t('webdav.copied'))
   } else {
-    ElMessage.error('复制失败，请手动选择复制')
+    ElMessage.error(t('webdav.copyFailed'))
   }
 }
 

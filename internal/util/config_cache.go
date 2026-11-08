@@ -23,7 +23,7 @@ type cachedEntry[T any] struct {
 	modTime time.Time
 }
 
-// NewFileCache 创建缓存；parse 为 nil 时 Get 每次重新读取且不缓存。
+// NewFileCache 创建缓存。
 func NewFileCache[T any](parse ParseFunc[T]) *FileCache[T] {
 	return &FileCache[T]{
 		cache: make(map[string]*cachedEntry[T]),

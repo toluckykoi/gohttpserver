@@ -6,30 +6,26 @@
         <img src="/favicon.png" alt="GoHTTPServer" class="about-logo">
         <div class="about-hero-text">
           <h2 class="about-name">GoHTTPServer</h2>
-          <p class="about-desc">
-            A self-hosted file sharing and management service: uploads &amp;
-            downloads, online preview, WebDAV, FRP tunneling, and in-app
-            self-update powered by update_core.
-          </p>
+          <p class="about-desc">{{ t('about.desc') }}</p>
         </div>
       </div>
       <dl class="info-grid">
         <div class="info-item">
-          <dt>Current Version</dt>
-          <dd><code>{{ version || 'unknown' }}</code></dd>
+          <dt>{{ t('about.currentVersion') }}</dt>
+          <dd><code>{{ version || t('common.unknown') }}</code></dd>
         </div>
         <div class="info-item">
-          <dt>Author</dt>
+          <dt>{{ t('about.author') }}</dt>
           <dd>
             <a href="https://github.com/toluckykoi" target="_blank" rel="noopener">luckykoi</a>
           </dd>
         </div>
         <div class="info-item">
-          <dt>Open Source</dt>
+          <dt>{{ t('about.openSource') }}</dt>
           <dd class="about-links">
-            <a href="https://github.com/toluckykoi/gohttpserver" target="_blank" rel="noopener">GitHub</a>
+            <a href="https://github.com/toluckykoi/gohttpserver" target="_blank" rel="noopener">{{ t('about.github') }}</a>
             <span aria-hidden="true">·</span>
-            <a href="https://gitee.com/toluckykoi/gohttpserver" target="_blank" rel="noopener">Gitee</a>
+            <a href="https://gitee.com/toluckykoi/gohttpserver" target="_blank" rel="noopener">{{ t('about.gitee') }}</a>
           </dd>
         </div>
       </dl>
@@ -37,32 +33,23 @@
 
     <!-- Software updates -->
     <section class="about-card">
-      <h2 class="section-title">Software Updates</h2>
-      <p class="section-hint">
-        Check the update server for newer releases. When an update is found you
-        will be asked to confirm before anything is downloaded; installation
-        and restart always require your explicit confirmation.
-      </p>
+      <h2 class="section-title">{{ t('about.softwareUpdates') }}</h2>
+      <p class="section-hint">{{ t('about.updateHint') }}</p>
       <div class="update-row">
         <div class="update-state">
           <template v-if="!updateEnabled">
-            <el-tag type="info" effect="plain" size="small">Disabled</el-tag>
-            <span class="update-state-text">
-              Self-update is not enabled on the server: start it with --login
-              (the update server is built into the binary) and restart to turn it on.
-            </span>
+            <el-tag type="info" effect="plain" size="small">{{ t('common.disabled') }}</el-tag>
+            <span class="update-state-text">{{ t('about.selfUpdateDisabled') }}</span>
           </template>
           <template v-else-if="pendingUpdate">
             <el-tag type="warning" effect="light" size="small">
-              Update available {{ updateStore.status?.release_version }}
+              {{ t('about.updateAvailable', { version: updateStore.status?.release_version }) }}
             </el-tag>
-            <span class="update-state-text">
-              Click the button to continue, or open the update dialog from the footer.
-            </span>
+            <span class="update-state-text">{{ t('about.updateContinueHint') }}</span>
           </template>
           <template v-else>
             <span class="update-state-text">
-              {{ updateStore.status?.state === 'downloading' ? 'Downloading update…' : 'Click the button to check for the latest version.' }}
+              {{ updateStore.status?.state === 'downloading' ? t('about.checking') : t('about.checkHint') }}
             </span>
           </template>
         </div>
@@ -72,11 +59,11 @@
           :disabled="checking || !updateEnabled"
           @click="handleCheckUpdate"
         >
-          {{ checking ? 'Checking…' : 'Check for Updates' }}
+          {{ checking ? t('about.checking') : t('update.checkForUpdates') }}
         </el-button>
       </div>
       <div v-if="lastCheckText" class="update-meta">
-        Last checked: {{ lastCheckText }}
+        {{ t('about.lastChecked', { date: lastCheckText }) }}
       </div>
     </section>
   </div>
@@ -86,11 +73,13 @@
 import { ref, computed } from 'vue'
 import dayjs from 'dayjs'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useI18n } from 'vue-i18n'
 import { useFileStore } from '@/stores/fileStore'
 import { useUpdateStore } from '@/stores/updateStore'
 import { UpdateUnavailableError } from '@/composables/useUpdateApi'
 import { formatBytes } from '@/utils/formatBytes'
 
+const { t } = useI18n()
 const fileStore = useFileStore()
 const updateStore = useUpdateStore()
 
@@ -99,10 +88,10 @@ const version = computed(() => fileStore.version)
 const updateEnabled = computed(() => fileStore.updateEnabled)
 
 const lastCheckText = computed(() => {
-  const t = updateStore.status?.last_check
-  if (!t) return ''
-  const d = dayjs(t)
-  return d.isValid() ? d.format('YYYY-MM-DD HH:mm:ss') : t
+  const checkTime = updateStore.status?.last_check
+  if (!checkTime) return ''
+  const d = dayjs(checkTime)
+  return d.isValid() ? d.format('YYYY-MM-DD HH:mm:ss') : checkTime
 })
 
 // An update is waiting to be handled (available/ready/applied); show an entry hint.
@@ -115,12 +104,12 @@ function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-/** reason 到英文文案的映射（管理面板为英文界面，与页脚的中文更新对话框独立）。 */
-const REASON_TEXTS: Record<string, string> = {
-  up_to_date: 'You are already on the latest version',
-  client_ahead: 'Current version is newer than the server (pre-release)',
-  no_matching_artifact: 'No update package available for this system',
-  no_published_release: 'No published release in this channel yet'
+/** reason 到词典 key 的映射。 */
+const REASON_KEYS: Record<string, string> = {
+  up_to_date: 'update.runningLatest',
+  client_ahead: 'update.latestIsNewer',
+  no_matching_artifact: 'update.noArtifact',
+  no_published_release: 'update.noRelease'
 }
 
 /** Check for updates: the download only starts after the user confirms. */
@@ -128,7 +117,7 @@ async function handleCheckUpdate() {
   // Never send the request when the server has no update API registered
   // (it would fall into the file-upload handler and return a cryptic 400).
   if (!updateEnabled.value) {
-    ElMessage.info('Self-update is not enabled (start the server with --login).')
+    ElMessage.info(t('about.selfUpdateDisabled'))
     return
   }
   checking.value = true
@@ -136,19 +125,19 @@ async function handleCheckUpdate() {
     await updateStore.check()
     const st = updateStore.status
     if (!st) {
-      ElMessage.info('Self-update is not enabled (start the server with --login).')
+      ElMessage.info(t('about.selfUpdateDisabled'))
       return
     }
     switch (st.state) {
       case 'available': {
         const size = st.artifact_size ? ` (${formatBytes(st.artifact_size)})` : ''
-        const required = st.required ? '\n\nThis update is marked as required by the publisher.' : ''
+        const required = st.required ? '\n\n' + t('update.requiredByPublisher') : ''
         let confirmed = false
         try {
           await ElMessageBox.confirm(
-            `New version ${st.release_version}${size} is available. Download it now?${required}`,
-            'Update Available',
-            { type: 'info', confirmButtonText: 'Update Now', cancelButtonText: 'Not Now' }
+            t('update.availableConfirm', { version: st.release_version, size, required }),
+            t('update.availableTitle'),
+            { type: 'info', confirmButtonText: t('update.installUpdate'), cancelButtonText: t('common.cancel') }
           )
           confirmed = true
         } catch {
@@ -158,7 +147,7 @@ async function handleCheckUpdate() {
         try {
           await updateStore.startDownload()
         } catch (err) {
-          ElMessage.error(`Failed to start download: ${errText(err)}`)
+          ElMessage.error(t('update.downloadFailed', { msg: errText(err) }))
         }
         // Open the update dialog to show progress and the install/restart steps.
         updateStore.dialogVisible = true
@@ -171,16 +160,18 @@ async function handleCheckUpdate() {
         updateStore.dialogVisible = true
         break
       case 'error':
-        ElMessage.error(st.error || 'Check failed, please try again later')
+        ElMessage.error(st.error || t('update.checkFailed', { msg: errText(new Error('try again later')) }))
         break
-      default:
-        ElMessage.success(REASON_TEXTS[st.reason ?? ''] ?? 'You are already on the latest version')
+      default: {
+        const reasonKey = REASON_KEYS[st.reason ?? '']
+        ElMessage.success(reasonKey ? t(reasonKey) : t('update.runningLatest'))
+      }
     }
   } catch (err) {
     if (err instanceof UpdateUnavailableError) {
-      ElMessage.info('Self-update is not enabled (start the server with --login).')
+      ElMessage.info(t('about.selfUpdateDisabled'))
     } else {
-      ElMessage.error(`Check failed: ${errText(err)}`)
+      ElMessage.error(t('update.checkFailed', { msg: errText(err) }))
     }
   } finally {
     checking.value = false

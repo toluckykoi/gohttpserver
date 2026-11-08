@@ -2,24 +2,24 @@
   <el-dialog
     :model-value="visible"
     @update:model-value="(v: boolean) => $emit('update:visible', v)"
-    title="新建 WebDAV 账号"
+    :title="t('webdav.newAccountTitle')"
     width="min(520px, 92vw)"
     :close-on-click-modal="false"
     :close-on-press-escape="!submitting"
     append-to-body
   >
     <el-form label-position="top" @submit.prevent="handleSubmit">
-      <el-form-item label="备注名" required>
+      <el-form-item :label="t('webdav.remark')" required>
         <el-input
           v-model="form.remark"
-          placeholder="如：备份用 / 手机同步"
+          :placeholder="t('webdav.remarkPlaceholder')"
           :disabled="submitting"
           required
         />
       </el-form-item>
 
       <!-- 根目录：服务端会校验并拒绝 ".." 等逃逸路径。 -->
-      <el-form-item label="相对根目录" required>
+      <el-form-item :label="t('webdav.relativeRoot')" required>
         <el-input
           v-model="form.rootPath"
           placeholder="/"
@@ -29,20 +29,20 @@
           <template #append>
             <el-button @click="showPicker = true" :disabled="submitting">
               <el-icon><FolderOpened /></el-icon>
-              浏览
+              {{ t('webdav.browse') }}
             </el-button>
           </template>
         </el-input>
-        <div class="field-hint">选择共享的目录。账号只能访问此目录及其子目录，留空或 "/" 表示根目录。</div>
+        <div class="field-hint">{{ t('webdav.relativeRootHint') }}</div>
       </el-form-item>
 
       <el-collapse v-model="advancedOpen" class="advanced">
-        <el-collapse-item title="高级选项" name="adv">
+        <el-collapse-item :title="t('common.advanced')" name="adv">
           <el-form-item>
             <div class="switch-row">
               <div>
-                <div class="switch-label">只读模式</div>
-                <div class="switch-hint">用户只能通过此账号读取文件；</div>
+                <div class="switch-label">{{ t('about.readOnlyMode') }}</div>
+                <div class="switch-hint">{{ t('webdav.readonlyDesc') }}</div>
               </div>
               <el-switch v-model="form.readonly" :disabled="submitting" />
             </div>
@@ -50,9 +50,9 @@
           <el-form-item>
             <div class="switch-row">
               <div>
-                <div class="switch-label">阻止删除/上传系统文件</div>
+                <div class="switch-label">{{ t('webdav.systemProtection') }}</div>
                 <div class="switch-hint">
-                  开启后，以 <code>.</code> 开头的文件会被阻止上传；
+                  {{ t('webdav.systemProtectDesc') }}
                 </div>
               </div>
               <el-switch v-model="form.protectSystemFiles" :disabled="submitting" />
@@ -61,18 +61,15 @@
           <el-form-item>
             <div class="switch-row">
               <div class="switch-text">
-                <div class="switch-label">配额 (Quota)</div>
-                <div class="switch-hint">
-                  限制该账号可写入的总字节数。挂载客户端（Windows 资源管理器 / Finder /
-                  RaiDrive / Cyberduck）会显示「已用 / 可用」空间。留空或 0 表示不限。
-                </div>
+                <div class="switch-label">{{ t('webdav.quota') }}</div>
+                <div class="switch-hint">{{ t('webdav.quotaHintLong') }}</div>
               </div>
               <div class="quota-controls">
                 <el-input-number
                   v-model="form.quotaValue"
                   :min="0"
                   :disabled="submitting"
-                  placeholder="不限"
+                  :placeholder="t('common.unlimited')"
                   controls-position="right"
                   class="quota-input"
                 />
@@ -98,10 +95,10 @@
 
     <template #footer>
       <el-button :disabled="submitting" @click="$emit('update:visible', false)">
-        取消
+        {{ t('common.cancel') }}
       </el-button>
       <el-button type="primary" :loading="submitting" @click="handleSubmit">
-        创建账号
+        {{ t('webdav.createAccount') }}
       </el-button>
     </template>
   </el-dialog>
@@ -117,7 +114,10 @@ import { ref, reactive, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { FolderOpened } from '@element-plus/icons-vue'
 import { useAdminStore } from '@/stores/adminStore'
+import { useI18n } from 'vue-i18n'
 import DirectoryPicker from './DirectoryPicker.vue'
+
+const { t } = useI18n()
 
 interface Props {
   visible: boolean
@@ -147,7 +147,7 @@ const quotaUnit = ref<number>(1024 ** 3)
 async function handleSubmit() {
   errorMessage.value = ''
   if (!form.remark.trim()) {
-    errorMessage.value = '请填写备注名。'
+    errorMessage.value = t('webdav.remarkRequired')
     return
   }
   submitting.value = true
@@ -161,13 +161,13 @@ async function handleSubmit() {
       quota_bytes: Math.round(form.quotaValue * quotaUnit.value),
     })
     if (res.ok) {
-      ElMessage.success('账号已创建')
+      ElMessage.success(t('webdav.accountCreated'))
       adminStore.recalculateWebdavUsage()
       emit('update:visible', false)
     } else if (res.error === 'unauthorized') {
-      errorMessage.value = '会话已过期，请重新登录。'
+      errorMessage.value = t('login.sessionExpired')
     } else {
-      errorMessage.value = res.error || '创建失败。'
+      errorMessage.value = res.error || t('webdav.createFailed')
     }
   } finally {
     submitting.value = false

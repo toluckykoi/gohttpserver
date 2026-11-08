@@ -39,17 +39,17 @@
       >
         <el-radio-button value="rendered">
           <el-icon><Reading /></el-icon>
-          Rendered
+          {{ t('preview.rendered') }}
         </el-radio-button>
         <el-radio-button value="source">
           <el-icon><Document /></el-icon>
-          Source
+          {{ t('preview.source') }}
         </el-radio-button>
       </el-radio-group>
 
       <div class="preview-toolbar-actions">
         <template v-if="!editMode">
-          <el-tooltip content="Copy content" placement="top">
+          <el-tooltip :content="t('preview.copyContent')" placement="top">
             <el-button
               size="small"
               :icon="copied ? CircleCheck : CopyDocument"
@@ -57,31 +57,31 @@
               class="copy-btn"
               @click="handleCopy"
             >
-              {{ copied ? 'Copied' : 'Copy' }}
+              {{ copied ? t('common.copied') : t('common.copy') }}
             </el-button>
           </el-tooltip>
-          <el-tooltip v-if="canEdit" content="Edit file as text" placement="top">
+          <el-tooltip v-if="canEdit" :content="t('preview.editFile')" placement="top">
             <el-button
               size="small"
               :icon="Edit"
               @click="enterEditMode"
             >
-              Edit
+              {{ t('common.edit') }}
             </el-button>
           </el-tooltip>
-          <el-tooltip content="Download file" placement="top">
+          <el-tooltip :content="t('preview.downloadFile')" placement="top">
             <el-button
               size="small"
               :icon="Download"
               @click="handleDownload"
             >
-              Download
+              {{ t('common.download') }}
             </el-button>
           </el-tooltip>
         </template>
         <template v-else>
           <el-button size="small" :disabled="saving" @click="cancelEditMode">
-            Cancel
+            {{ t('preview.cancelEdit') }}
           </el-button>
           <el-button
             size="small"
@@ -90,7 +90,7 @@
             :disabled="saving"
             @click="saveEdit"
           >
-            Save
+            {{ t('preview.save') }}
           </el-button>
         </template>
       </div>
@@ -98,7 +98,7 @@
 
     <div v-if="loading" class="preview-loading">
       <el-icon class="is-loading" :size="32"><Loading /></el-icon>
-      <p>Loading preview…</p>
+      <p>{{ t('preview.loading') }}</p>
     </div>
 
     <el-empty
@@ -106,24 +106,23 @@
       :description="errorMessage"
       class="preview-error"
     >
-      <el-button type="primary" @click="loadContent">Retry</el-button>
+      <el-button type="primary" @click="loadContent">{{ t('preview.retry') }}</el-button>
     </el-empty>
 
     <el-empty
       v-else-if="!meta.previewable"
-      description="This file format cannot be previewed"
+      :description="t('preview.notPreviewable')"
       class="preview-error"
     >
-      <el-button type="primary" @click="handleDownload">Download instead</el-button>
+      <el-button type="primary" @click="handleDownload">{{ t('preview.downloadInstead') }}</el-button>
     </el-empty>
 
     <div v-else-if="truncated" class="preview-warn">
       <el-icon><Warning /></el-icon>
       <span>
-        File is large — showing the first
-        <strong>{{ formatBytes(MAX_BYTES) }}</strong> only.
+        {{ t('preview.truncated', { size: formatBytes(MAX_BYTES) }) }}
         <el-link type="primary" :underline="false" @click="handleDownload">
-          Download full file
+          {{ t('preview.downloadFile') }}
         </el-link>
       </span>
     </div>
@@ -186,6 +185,7 @@ import { formatBytes } from '@/utils/formatBytes'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useI18n } from 'vue-i18n'
 import {
   Reading,
   Document,
@@ -210,6 +210,7 @@ const emit = defineEmits<{
 }>()
 
 const fileApi = useFileApi()
+const { t } = useI18n()
 const sourceRef = ref<HTMLElement>()
 
 const loading = ref(false)
@@ -316,7 +317,7 @@ async function loadContent() {
       content.value = await response.text()
     }
   } catch (err: any) {
-    errorMessage.value = `Failed to load preview: ${err?.message ?? 'unknown error'}`
+    errorMessage.value = t('messages.loadPreviewFailed', { msg: err?.message ?? t('common.unknownError') })
     console.error(err)
   } finally {
     loading.value = false
@@ -328,12 +329,12 @@ async function handleCopy() {
   const ok = await copyText(content.value)
   if (ok) {
     copied.value = true
-    ElMessage.success('Content copied to clipboard')
+    ElMessage.success(t('messages.copiedToClipboard', { label: t('preview.copyContent') }))
     setTimeout(() => {
       copied.value = false
     }, 1800)
   } else {
-    ElMessage.error('Failed to copy content — please copy manually')
+    ElMessage.error(t('messages.copyFailed', { label: t('preview.copyContent') }))
   }
 }
 
@@ -392,15 +393,15 @@ async function saveEdit() {
       editContent.value
     )
     if (result.success) {
-      ElMessage.success('Saved')
+      ElMessage.success(t('preview.saved'))
       editMode.value = false
       dirty.value = false
       await loadContent()
     } else {
-      ElMessage.error('Save failed')
+      ElMessage.error(t('preview.saveFailed'))
     }
   } catch (err: any) {
-    ElMessage.error(`Save failed: ${err?.message ?? 'unknown error'}`)
+    ElMessage.error(t('preview.saveFailedDetail', { msg: err?.message ?? t('common.unknownError') }))
   } finally {
     saving.value = false
   }

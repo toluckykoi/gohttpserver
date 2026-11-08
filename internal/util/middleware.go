@@ -26,9 +26,8 @@ func CSPNonceFromContext(ctx context.Context) string {
 	return ""
 }
 
-// SecurityHeaders 给每个响应加上安全响应头。csp 中的 nonce 占位符（'nonce-…'）
-// 会在每请求替换为随机值，并同时写入 context 供内嵌页面（renderHTML）使用。
-// csp 为空表示不下发 CSP。
+// SecurityHeaders 给每个响应加安全头，csp 中的 nonce 占位符按请求替换为随机值
+// 并写入 context 供内嵌页面使用；csp 为空则不下发 CSP。
 func SecurityHeaders(csp string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -51,7 +50,7 @@ func SecurityHeaders(csp string) func(http.Handler) http.Handler {
 	}
 }
 
-// cspNonce 生成 128 位随机 nonce（base64 标准编码可安全用于 CSP 指令）。
+// cspNonce 生成 128 位随机 nonce。
 func cspNonce() string {
 	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {
@@ -61,8 +60,7 @@ func cspNonce() string {
 	return hex.EncodeToString(buf[:])
 }
 
-// unsafeMethods 是浏览器可跨站发起、需要 CSRF 防护的方法。WebDAV 专有动词
-// （MKCOL/MOVE 等）无法由普通 HTML 表单发出，且原生客户端不带 Origin，不列。
+// unsafeMethods 是需要 CSRF 防护的方法；WebDAV 动词无法由 HTML 表单发起，不列。
 var unsafeMethods = map[string]bool{
 	http.MethodPost:   true,
 	http.MethodPut:    true,
@@ -70,10 +68,8 @@ var unsafeMethods = map[string]bool{
 	http.MethodPatch:  true,
 }
 
-// OriginCheckMiddleware 对带 Origin 头的不安全方法请求做同源校验：浏览器发起的
-// 跨站 POST/PUT/DELETE 必带 Origin，其 host 与请求 Host 不一致即拒绝。作为
-// SameSite=Lax 之外的 CSRF 纵深防御，覆盖同站子域与不支持 SameSite 的老客户端。
-// 非浏览器客户端（curl、WebDAV 挂载、rclone）不带 Origin，直接放行。
+// OriginCheckMiddleware 对带 Origin 的不安全方法请求做同源校验，host 不一致即拒绝，
+// 是 SameSite=Lax 之外的 CSRF 纵深防御；非浏览器客户端不带 Origin，直接放行。
 func OriginCheckMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if unsafeMethods[r.Method] {
@@ -158,16 +154,14 @@ func (rw *responseWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// Flush 转发到底层 writer（若支持）；缺少它会让流式 handler（上传进度 NDJSON）
-// 看不到 http.Flusher，进度输出被静默缓冲到 handler 返回才发出。
+// Flush 必须转发 http.Flusher，否则流式 handler 的进度输出被静默缓冲到返回才发出。
 func (rw *responseWriter) Flush() {
 	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
 }
 
-// ReadFrom 保留 net/http writer 为大文件下载提供的 sendfile/零拷贝路径，
-// 退回 io.Copy 会让每个文件多一次用户态拷贝。
+// ReadFrom 保留 sendfile/零拷贝路径，退回 io.Copy 会让大文件下载多一次用户态拷贝。
 func (rw *responseWriter) ReadFrom(src io.Reader) (int64, error) {
 	if rf, ok := rw.ResponseWriter.(io.ReaderFrom); ok {
 		n, err := rf.ReadFrom(src)
@@ -179,8 +173,7 @@ func (rw *responseWriter) ReadFrom(src io.Reader) (int64, error) {
 	return n, err
 }
 
-// generateRequestID 生成 <时间戳>-<64 位随机数>：时间戳让 ID 大致可排序，
-// 随机位让碰撞概率可忽略。
+// generateRequestID 生成 <时间戳>-<64 位随机数>，时间戳使 ID 大致可排序。
 func generateRequestID() string {
 	var buf [8]byte
 	if _, err := rand.Read(buf[:]); err != nil {
