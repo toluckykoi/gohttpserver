@@ -30,6 +30,8 @@ export const useFileStore = defineStore('file', () => {
   const auth = ref<AuthInfo>({ upload: false, delete: false, edit: false })
   const user = ref<UserInfo | null>(null)
   const version = ref('')
+  // 服务端是否注册了更新 API（来自 /-/sysinfo 的 update_enabled）。
+  const updateEnabled = ref(false)
   const loading = ref(false)
   const showHidden = ref(false)
   const searchQuery = ref('')
@@ -133,6 +135,7 @@ export const useFileStore = defineStore('file', () => {
     try {
       const info = await fileApi.fetchSystemInfo()
       version.value = info.version
+      updateEnabled.value = info.update_enabled === true
     } catch (error) {
       console.error('Failed to load system info:', error)
     }
@@ -295,6 +298,7 @@ export const useFileStore = defineStore('file', () => {
     auth,
     user,
     version,
+    updateEnabled,
     loading,
     showHidden,
     searchQuery,

@@ -48,6 +48,16 @@
             </template>
             <FrpSection v-if="activeTab === 'frp'" />
           </el-tab-pane>
+
+          <el-tab-pane name="about">
+            <template #label>
+              <span class="admin-tab-label">
+                <el-icon><InfoFilled /></el-icon>
+                <span class="admin-tab-text">About</span>
+              </span>
+            </template>
+            <AboutSection v-if="activeTab === 'about'" />
+          </el-tab-pane>
         </el-tabs>
       </div>
     </div>
@@ -56,17 +66,18 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount } from 'vue'
-import { Close, UserFilled, Setting, Connection } from '@element-plus/icons-vue'
+import { Close, UserFilled, Setting, Connection, InfoFilled } from '@element-plus/icons-vue'
 import ProfileSection from '@/components/admin/ProfileSection.vue'
 import SettingsSection from '@/components/admin/SettingsSection.vue'
 import FrpSection from '@/components/admin/FrpSection.vue'
+import AboutSection from '@/components/admin/AboutSection.vue'
 
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'username-changed', value: string): void
 }>()
 
-const activeTab = ref<'profile' | 'settings' | 'frp'>('profile')
+const activeTab = ref<'profile' | 'settings' | 'frp' | 'about'>('profile')
 
 // 与 App.vue 的 isPhone 保持同一断点。
 const isPhone = ref(window.innerWidth < 640)

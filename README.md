@@ -41,6 +41,7 @@
 - [x] Hold Alt to skip delete confirmation
 - [x] Unzip zip files during upload (with extraction progress)
 - [x] Built-in username/password login gate (`--login`, independent of `--auth-type`)
+- [x] In-app self-update against an [update_core](https://github.com/toluckykoi/update_core) server: check, download with resume, SHA-256 verification, binary replacement and graceful restart
 - [x] Admin panel (profile + settings) with username/password management
 - [x] Built-in WebDAV server (`/dav/`) with per-account root confinement, readonly mode, system-file protection, quota limits, and RFC 4331 disk capacity display
 - [x] WebDAV account management: click to view basic info (link/username/password), edit online, reset password, delete; compatible with Windows / macOS / Linux clients
@@ -163,6 +164,56 @@ Two operational endpoints are served on the root path, registered before the
   ```
 
 `--prefix` does not affect these paths: they stay at `/healthz` and `/metrics`.
+
+## Self-Update (update_core integration)
+
+When `--login` is enabled, gohttpserver can check an update_core
+distribution server for newer releases, download and verify the package
+(size + SHA-256), replace its own binary, and restart. The update UI lives
+in the footer: click the version number to open the update dialog; a colored
+badge appears when a new version is available.
+
+```bash
+gohttpserver --login
+```
+
+Behavior and requirements:
+
+- The update server settings (base URL, app slug, channel, per-OS package
+  types, check interval) are compiled into the binary — see
+  `updateServerConfig` in [main.go](main.go). No config file or CLI flag is
+  needed; set `BaseURL` to empty in the source and rebuild to disable the
+  feature entirely.
+- Requires `--login`: the update API is protected by the login session, so
+  anonymous visitors can never trigger a binary replacement.
+- The `package_type` reported to the update server must match what is
+  registered there **exactly** (the server never falls back to another
+  package). The built-in map is `exe` on Windows and `bin` on Linux/macOS.
+- Private software tokens: set the `GHS_UPDATE_TOKEN` environment variable.
+  The token is never written to logs or URLs, and downloads never follow
+  redirects.
+- The update server accepts both `http://` and `https://`. Plain HTTP cannot
+  protect against man-in-the-middle tampering (the SHA-256 itself travels the
+  same unencrypted channel), so prefer HTTPS when possible; a warning is
+  logged at startup for HTTP sources.
+- Install re-verifies size and SHA-256, keeps the old binary as
+  `<binary>.bak`, and rolls back automatically if the replacement fails.
+  The new version takes effect on the next start.
+- The "Restart now" button performs a graceful shutdown — under systemd
+  (`Restart=always`) or a similar supervisor the service comes back with the
+  new version automatically; otherwise start it manually.
+- Interrupted downloads resume via HTTP `Range` with an `If-Range` guard
+  bound to the published SHA-256.
+
+Update API (all require a logged-in session; 401 otherwise):
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/-/api/update/status` | Current update state |
+| POST | `/-/api/update/check` | Force an update check |
+| POST | `/-/api/update/download` | Start the background download |
+| POST | `/-/api/update/apply` | Replace the binary on disk |
+| POST | `/-/api/update/restart` | Graceful shutdown (supervisor restarts) |
 
 ## Docker (under development)
 
@@ -323,7 +374,7 @@ root -
        `-- hello.txt
 ```
 
-Use `--conf` to specify the config file name, see [the example config file](testdata/config.yml).
+Use `--conf` to specify the config file name (YAML format; CLI flags take priority over the file).
 
 To mark which files are hidden / visible, add the following to `.ghs.yml`:
 

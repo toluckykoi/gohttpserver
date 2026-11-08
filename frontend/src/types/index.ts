@@ -51,6 +51,8 @@ export interface ApkInfo {
 
 export interface SystemInfo {
     version: string
+    /** 服务端是否注册了更新 API（--login 且内置更新服务器已启用）。 */
+    update_enabled?: boolean
 }
 
 /** WebDAV 账号（绝不包含密码哈希）。 */
@@ -86,4 +88,22 @@ export interface AdminProfile {
     username: string
     provider: string
     version: string
+}
+/** GET /-/api/update/status 的响应；由 internal/update.Service.Status() 序列化而来。 */
+export interface UpdateStatus {
+    enabled: boolean
+    /** disabled | idle | checking | available | downloading | ready | applied | error */
+    state: string
+    current_version: string
+    reason?: string
+    required?: boolean
+    release_version?: string
+    notes?: string
+    published_at?: string
+    artifact_name?: string
+    artifact_size?: number
+    sha256?: string
+    downloaded?: number
+    last_check?: string
+    error?: string
 }

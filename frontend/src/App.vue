@@ -146,10 +146,22 @@
             >
               gohttpserver
             </a>
-            <span
+            <button
               v-if="version && version !== 'unknown'"
-              class="footer-version"
-            >{{ version }}</span>
+              class="footer-version footer-version--link"
+              type="button"
+              title="检查更新"
+              @click="updateStore.openDialog()"
+            >{{ version }}</button>
+            <button
+              v-if="updateStore.badgeText"
+              class="footer-update-badge"
+              type="button"
+              @click="updateStore.openDialog()"
+            >
+              <el-icon :size="11"><RefreshRight /></el-icon>
+              {{ updateStore.badgeText }}
+            </button>
             <span class="footer-divider" aria-hidden="true">·</span>
             <span class="footer-byline">
               built with <span class="footer-heart" aria-hidden="true">♥</span> by
@@ -212,6 +224,15 @@
           <div class="modal-loading" aria-hidden="true">Loading…</div>
         </template>
       </Suspense>
+
+      <Suspense>
+        <template #default>
+          <UpdateDialog />
+        </template>
+        <template #fallback>
+          <div class="modal-loading" aria-hidden="true">Loading…</div>
+        </template>
+      </Suspense>
     </div>
   </el-config-provider>
 </template>
@@ -219,6 +240,7 @@
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, computed, ref, defineAsyncComponent } from 'vue'
 import { useFileStore } from './stores/fileStore'
+import { useUpdateStore } from './stores/updateStore'
 import { useTheme } from './composables/useTheme'
 import FileList from './components/FileList.vue'
 import Login from './views/Login.vue'
@@ -226,13 +248,15 @@ import { currentListingPath } from './utils/path'
 import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
 const AdminPanel = defineAsyncComponent(() => import('./views/AdminPanel.vue'))
 const QRCodeModal = defineAsyncComponent(() => import('./components/QrCodeModal.vue'))
+const UpdateDialog = defineAsyncComponent(() => import('./components/UpdateDialog.vue'))
 import type { FileItem } from './types'
 import {
-  Camera, Search, Check, Setting, SwitchButton
+  Camera, Search, Check, Setting, SwitchButton, RefreshRight
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 
 const fileStore = useFileStore()
+const updateStore = useUpdateStore()
 const { currentTheme, availableThemes, setTheme } = useTheme()
 
 const locale = zhCn
@@ -338,6 +362,8 @@ onMounted(async () => {
       fileStore.loadUser(),
       fileStore.loadSystemInfo()
     ])
+    // 更新状态独立拉取：后端未启用时静默为 null，不阻塞首屏。
+    void updateStore.refresh()
   }
 
   window.addEventListener('popstate', handlePopState)
@@ -805,6 +831,46 @@ onBeforeUnmount(() => {
   background: var(--el-fill-color);
   border-radius: var(--radius-pill);
   line-height: 1.4;
+}
+
+/* 版本号同时是更新入口：点击打开"软件更新"对话框。 */
+.footer-version--link {
+  border: 0;
+  font: inherit;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  transition: color var(--transition-base), background-color var(--transition-base);
+}
+
+.footer-version--link:hover {
+  color: var(--el-color-primary);
+  background: color-mix(in srgb, var(--el-color-primary) 10%, transparent);
+}
+
+.footer-update-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2.5px 9px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--el-color-primary);
+  border: 0;
+  border-radius: var(--radius-pill);
+  line-height: 1.4;
+  cursor: pointer;
+  user-select: none;
+  transition: filter var(--transition-base), transform var(--transition-base);
+}
+
+.footer-update-badge:hover {
+  filter: brightness(1.1);
+}
+
+.footer-update-badge:active {
+  transform: scale(0.96);
 }
 
 .footer-divider {

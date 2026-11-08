@@ -36,6 +36,7 @@ import (
 	"github.com/codeskyblue/gohttpserver/internal/frp"
 	"github.com/codeskyblue/gohttpserver/internal/server"
 	"github.com/codeskyblue/gohttpserver/internal/store"
+	"github.com/codeskyblue/gohttpserver/internal/update"
 	"github.com/codeskyblue/gohttpserver/internal/util"
 	"github.com/codeskyblue/gohttpserver/internal/webdav"
 	"github.com/codeskyblue/gohttpserver/internal/zipx"
@@ -99,6 +100,22 @@ var (
 	GITCOMMIT = "unknown git commit"
 	SITE      = "https://github.com/codeskyblue/gohttpserver"
 )
+
+// updateServerConfig 是内置的自我更新配置：更新服务器信息直接写入代码，
+// 不再通过配置文件或命令行参数设置。私有软件的 Bearer 令牌仍可通过
+// GHS_UPDATE_TOKEN 环境变量注入。BaseURL 置空可整体禁用更新功能。
+var updateServerConfig = update.Options{
+	BaseURL: "http://update.toluckykoi.com:50003/",
+	App:     "gohttpserver",
+	Channel: "stable",
+	// package_type 上报值必须与 update_core 后台登记的完全一致，否则拿不到任何包。
+	PackageTypes: map[string]string{
+		"windows": "exe",
+		"linux":   "bin",
+		"macos":   "bin",
+	},
+	Interval: 12 * time.Hour, // 后台复查间隔；0 = 仅启动时检查
+}
 
 func versionMessage() string {
 	t := template.Must(template.New("version").Parse(`GoHTTPServer
@@ -465,6 +482,10 @@ func main() {
 
 	// 登录闸门优先于其它 auth-type：在 HTTP Basic / OpenID / oauth2-proxy 之前
 	// 安装，使其同样覆盖这些被包装的 handler。
+	// 自我更新的"立即重启"经 restartCh 通知主 select 循环优雅停机退出；
+	// updSvc 的后台检查循环在 shutdownMgr 就绪后才启动（见下方 RegisterCleanup）。
+	restartCh := make(chan struct{}, 1)
+	var updSvc *update.Service
 	var loginStateObj *auth.LoginState
 	if gcfg.Login {
 		auth.FrontendFS = frontendDistFS
@@ -504,6 +525,32 @@ func main() {
 			FRP:       frpClient,
 			Version:   VERSION,
 		})
+
+		// 自我更新与 admin API 同级保护：仅 --login 模式注册（下载并替换
+		// 二进制是特权操作，不能暴露给匿名访客）。更新服务器信息内置在
+		// 代码中（updateServerConfig）；私有软件令牌支持 GHS_UPDATE_TOKEN
+		// 环境变量注入。
+		if updateServerConfig.BaseURL != "" {
+			opts := updateServerConfig // 拷贝一份，避免共享可变的 map/字段
+			opts.CurrentVersion = VERSION
+			opts.Restart = func() {
+				select {
+				case restartCh <- struct{}{}:
+				default:
+				}
+			}
+			if envToken := os.Getenv("GHS_UPDATE_TOKEN"); envToken != "" {
+				opts.Token = envToken
+			}
+			svc, err := update.NewService(opts)
+			if err != nil {
+				// 配置非法只禁用更新功能，不影响文件服务正常启动。
+				slog.Error("update service disabled", util.ErrorAttr(err))
+			} else {
+				update.RegisterRoutes(router, svc)
+				updSvc = svc
+			}
+		}
 	} else {
 		// SECURITY: --login 关闭时不注册管理 API。它不在 loginWhitelist 中，
 		// 用 nil Login 注册后，OpenID / oauth2-proxy 会话能满足
@@ -552,6 +599,9 @@ func main() {
 	router.HandleFunc("/-/sysinfo", func(w http.ResponseWriter, r *http.Request) {
 		data, _ := json.Marshal(map[string]any{
 			"version": VERSION,
+			// 前端据此提前禁用更新入口，避免向未注册的更新 API 发请求
+			// （未注册时 POST 会落到文件上传 handler，返回难懂的 400）。
+			"update_enabled": updSvc != nil,
 		})
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
@@ -675,6 +725,14 @@ func main() {
 		slog.Info("closing database")
 		return db.Close()
 	})
+	if updSvc != nil {
+		// cleanup 按 LIFO 执行：更新循环先于 DB 关闭被取消。
+		shutdownMgr.RegisterCleanup(func() error {
+			updSvc.Close()
+			return nil
+		})
+		go updSvc.Run()
+	}
 
 	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
@@ -690,6 +748,17 @@ func main() {
 			}
 			os.Exit(1)
 		}
+	case <-restartCh:
+		// 更新服务的"立即重启"：与信号退出同一套优雅停机流程，
+		// 退出后由 systemd(Restart=always) 等守护进程以新版本拉起。
+		slog.Info("restart requested (update applied); shutting down")
+		if err := shutdownMgr.Shutdown(); err != nil {
+			slog.Error("graceful shutdown did not complete cleanly", util.ErrorAttr(err))
+		}
+		if err := <-serveErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("server stopped unexpectedly during shutdown", util.ErrorAttr(err))
+		}
+		os.Exit(0)
 	case <-signalCtx.Done():
 		slog.Info("shutdown signal received")
 		if err := shutdownMgr.Shutdown(); err != nil {
