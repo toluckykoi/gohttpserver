@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -190,4 +191,28 @@ func HealthCheckHandler(version string) http.HandlerFunc {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok","version":"` + version + `"}`))
 	}
+}
+
+// RestrictToLocalhost 用 loopback 白名单保护敏感端点（/metrics、/-/sysinfo）。
+// allowPublic=true 时直接透传（对应 --public-metrics）。
+// 来源判断用 GetClientIP：未开 --xheaders 时取 RemoteAddr；开启后取 XFF 最右元素，
+// 因此挂在反代之后时，反代必须正确透传 X-Forwarded-For，否则远端抓取端会被误拒。
+// SECURITY: 版本号与运行指标可被用于指纹识别与侦察，默认不对公网开放。
+func RestrictToLocalhost(allowPublic bool, next http.Handler) http.Handler {
+	if allowPublic {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isLoopbackRequest(r) {
+			http.Error(w, "Forbidden: this endpoint is restricted to localhost; use --public-metrics to expose it", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isLoopbackRequest 判断请求是否来自 loopback 地址。
+func isLoopbackRequest(r *http.Request) bool {
+	ip := net.ParseIP(GetClientIP(r))
+	return ip != nil && ip.IsLoopback()
 }

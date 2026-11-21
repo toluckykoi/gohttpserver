@@ -223,7 +223,9 @@ const ESCAPE_MAP: Record<string, string> = {
 }
 
 function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) => ESCAPE_MAP[c])
+  // \x00 一并剥离：它既不能出现在 HTML 序列化结果里，也是下方 token 占位符的定界符，
+  // 若源码含 NUL 会被误当成占位符边界。
+  return s.replace(/[\x00&<>"']/g, (c) => (c === '\x00' ? '' : ESCAPE_MAP[c]))
 }
 
 /** 按语言高亮 `code`，返回安全 HTML。 */
@@ -260,7 +262,7 @@ export function highlight(code: string, language: PreviewLanguage): string {
   }
 
   // 还原暂存的 token。
-  return parts.join('').replace(/ (\d+) /g, (_, n) => stash[Number(n)] ?? escapeHtml(' ' + n + ' '))
+  return parts.join('').replace(/ (\d+) /g, (_, n) => stash[Number(n)] ?? '')
 }
 
 /** 按行高亮，避免跨行 token 的颜色串到其它行。 */

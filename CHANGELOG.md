@@ -2,6 +2,43 @@
 
 本文件记录 gohttpserver 各版本的发布说明。GitHub Actions 在打 tag 发版时会自动读取对应版本段落作为 Release 说明。
 
+## [v1.5.0] - 2026-11-22
+
+# gohttpserver v1.5.0 🔒
+
+全项目代码审计修复版本：指标接口默认仅本机、WebDAV 配额绕过修复、前端依赖全量升级（0 漏洞）、语法高亮与资源元数据修复。
+
+## 🔒 安全
+
+### P0 严重
+- **指标接口默认仅本机**：`/metrics`、`/-/metrics` 与 `/-/sysinfo`（版本号）默认仅允许本机（loopback）访问，防止公网部署时的版本指纹与指标侦察；远端抓取需显式添加 `--public-metrics` 或在反向代理层认证
+- **WebDAV chunked PUT 配额绕过修复**：无 Content-Length 的分块上传不再能绕过每账号磁盘配额——配额写入限制下沉到文件写入层，超额写入在边界中断并丢弃，目标文件与用量不变
+- **前端依赖漏洞清零**：`npm audit` 从 19 个漏洞（8 高危）降至 0；Vite 5→7、vue-i18n 9→11、UnoCSS 0.59→66，并显式固定 esbuild/minimatch 覆盖传递依赖漏洞
+
+### P1 高危
+- **语法高亮占位符冲突修复**：文本预览高亮器的占位符与源码数字字面量冲突，导致数字被误替换成无关 token 的 HTML；转义函数同步剥离 NUL 字符
+- **登录限流键加固**：登录限流在 `--xheaders` 开启时使用「最右跳」X-Forwarded-For 解析客户端 IP，与访问日志口径一致，反代需正确透传该头
+
+### P2 一般
+- **Windows 资源元数据乱码修复**：resource.syso 由 UTF-8 源码被按 ANSI 误读所致，重新以正确代码页编译资源，资源管理器/任务栏中 FileDescription 恢复为「GoHTTPServer - HTTP静态文件服务器」
+- `/healthz` 不受限，探活不受影响
+
+## 🛠 工程改进
+
+### 📦 前端依赖升级
+- Vite 5.2 → 7.3、@vitejs/plugin-vue 5 → 6、vue-tsc 2 → 3、UnoCSS 0.59 → 66、vue-i18n 9 → 11
+- `npm audit fix` 后 0 已知漏洞
+
+### 🧹 代码清理
+- 移除 4 处未使用的模板 `ref` 死代码（ImagePreviewModal / TextPreviewModal / UploadModal）
+- 语法高亮器扩展各语言关键字集，并新增 12 类 token 着色
+
+## ✅ 测试
+
+- `go vet ./...` 无问题；`go test ./...` 194 个测试全部通过
+- 新增 `internal/util/guard_test.go`、`internal/webdav/webdav_quota_round12_test.go`
+- `vue-tsc --noEmit` 通过；`vite build` 生产构建成功
+
 ## [v1.4.0] - 2026-11-08
 
 # gohttpserver v1.4.0 🚀

@@ -71,6 +71,7 @@ gohttpserver -r ./ --port 8000 --login            # 登录（推荐，管理面�
 | `--no-index` | 关闭 | 禁用目录索引 |
 | `--cors-origins` | | 允许的 CORS 来源（可重复；`*` 允许所有，不安全） |
 | `--allow-public-oauth2` | 关闭 | 非回环地址启用 oauth2-proxy（不安全） |
+| `--public-metrics` | 关闭 | 允许非回环客户端访问 `/metrics` 与 `/-/sysinfo`（默认仅本机） |
 | `--login` | 关闭 | 用户名密码登录，自动开启上传/删除/编辑，默认 `admin`/`admin` |
 | `--db` | `./gohttpserver.db` | SQLite 路径（需 `--login`） |
 | `--session-ttl` | `12h` | 会话有效期；`0` = 浏览器会话 cookie |
@@ -83,6 +84,8 @@ gohttpserver -r ./ --port 8000 --login            # 登录（推荐，管理面�
 - `GET /metrics`（或 `/-/metrics`）：Prometheus 文本格式
 
 两个接口不受 `--prefix` 影响，始终在 `/healthz` 和 `/metrics`。
+
+默认情况下 `/metrics` 与 `/-/sysinfo`（返回版本号）仅允许本机（loopback）访问，远端抓取返回 `403`。如需放开请加 `--public-metrics`，或在反向代理层加认证。开启 `--xheaders` 时客户端 IP 取自 `X-Forwarded-For` 最右元素，反代需正确透传该头。
 
 ## 登录与认证
 
@@ -232,7 +235,7 @@ server {
 
 ```bash
 ./build.sh   # 构建，产物：gohttpserver-<版本>-<系统>-<架构>[.exe]
-./dist/gohttpserver-1.4.0-windows-x64.exe -r ./testdata --addr 0.0.0.0:8000 --login
+./dist/gohttpserver-1.5.0-windows-x64.exe -r ./testdata --addr 0.0.0.0:8000 --login
 ```
 
 ## 支持与许可

@@ -288,13 +288,24 @@ func (q *quotaFileSystem) OpenFile(ctx context.Context, name string, flag int, p
 	acct := q.accountID
 	stateRef := q.state
 
+	// SECURITY: chunked PUT 没有可信的 Content-Length，preflightPut 会跳过预检；
+	// 这里按当前用量给出本次写入的净增量上限，在写入边界硬性中断，堵住配额绕过。
+	allowedDelta := int64(-1) // -1 表示不限量
+	if preflight > 0 {
+		allowedDelta = preflight - stateRef.Get(acct) - oldSize
+		if allowedDelta < 0 {
+			allowedDelta = 0
+		}
+	}
+
 	transfer, _ := ctx.Value(bodyTransferKey{}).(*bodyTransferState)
 	qf := &quotaFile{
-		File:     inner,
-		absPath:  absPath,
-		oldSize:  oldSize,
-		tmpPath:  tmpPath,
-		transfer: transfer,
+		File:         inner,
+		absPath:      absPath,
+		oldSize:      oldSize,
+		tmpPath:      tmpPath,
+		allowedDelta: allowedDelta,
+		transfer:     transfer,
 		onClose: func() error {
 			info, statErr := os.Stat(absPath)
 			if statErr != nil {
@@ -368,20 +379,51 @@ func (q *quotaFileSystem) Stat(ctx context.Context, name string) (os.FileInfo, e
 
 // quotaFile 包装 webdav.File，Close 时对账字节差；tmpPath 非空表示走临时文件，Close 负责改名替换目标。
 // writeErr 或 transfer（请求体传输失败标记）任一命中，都丢弃临时文件而非把残缺内容提交到目标路径。
+// allowedDelta 是本次写入允许的最大净增量（配额-已用-旧文件大小），-1 表示不限量：
+// chunked PUT 等无法预检的写入在此处被硬性截断，超出部分不落盘。
 type quotaFile struct {
 	gdav.File
-	absPath  string
-	oldSize  int64
-	tmpPath  string
-	transfer *bodyTransferState
-	onClose  func() error
-	closed   bool
-	writeErr error
+	absPath      string
+	oldSize      int64
+	tmpPath      string
+	allowedDelta int64
+	written      int64
+	transfer     *bodyTransferState
+	onClose      func() error
+	closed       bool
+	writeErr     error
 }
 
 // Write 转发底层写入并记录首个错误，供 Close 决定是否提交。
+// 达到 allowedDelta 边界后返回 ErrInsufficientCapacity，Close 据此丢弃临时文件，
+// 已写入的部分不会提交到目标路径，也不会计入用量。
 func (f *quotaFile) Write(p []byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	remaining := int64(len(p))
+	if f.allowedDelta >= 0 {
+		remaining = f.allowedDelta - f.written
+		if remaining <= 0 {
+			return 0, ErrInsufficientCapacity
+		}
+		if remaining < int64(len(p)) {
+			n, err := f.File.Write(p[:remaining])
+			f.written += int64(n)
+			if err != nil && f.writeErr == nil {
+				f.writeErr = err
+			}
+			if err == nil {
+				err = ErrInsufficientCapacity
+				if f.writeErr == nil {
+					f.writeErr = err
+				}
+			}
+			return n, err
+		}
+	}
 	n, err := f.File.Write(p)
+	f.written += int64(n)
 	if err != nil && f.writeErr == nil {
 		f.writeErr = err
 	}

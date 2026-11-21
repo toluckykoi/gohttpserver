@@ -120,7 +120,6 @@ const emit = defineEmits<{
 const fileApi = useFileApi()
 const fileStore = useFileStore()
 
-const uploadRef = ref()
 const fileList = ref<UploadUserFile[]>([])
 const uploading = ref(false)
 

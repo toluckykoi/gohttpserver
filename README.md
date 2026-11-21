@@ -71,6 +71,7 @@ Command line flags take precedence over `--conf` YAML config; repeatable flags c
 | `--no-index` | off | Disable directory indexing |
 | `--cors-origins` | | Allowed CORS origins (repeatable; `*` allows all, insecure) |
 | `--allow-public-oauth2` | off | Enable oauth2-proxy on non-loopback address (insecure) |
+| `--public-metrics` | off | Expose `/metrics` and `/-/sysinfo` to non-loopback clients (default: localhost only) |
 | `--login` | off | Username/password login, auto-enables upload/delete/edit, default `admin`/`admin` |
 | `--db` | `./gohttpserver.db` | SQLite path (requires `--login`) |
 | `--session-ttl` | `12h` | Session TTL; `0` = browser-session cookie |
@@ -83,6 +84,8 @@ Command line flags take precedence over `--conf` YAML config; repeatable flags c
 - `GET /metrics` (or `/-/metrics`): Prometheus text format
 
 Both endpoints are unaffected by `--prefix` and always live at `/healthz` and `/metrics`.
+
+By default `/metrics` and `/-/sysinfo` (which reports the version) are restricted to loopback clients; remote scrapers get `403`. Pass `--public-metrics` to expose them, or configure your reverse proxy to add authentication. When running behind a proxy with `--xheaders`, the client IP is taken from the rightmost `X-Forwarded-For` entry, so the proxy must forward it correctly.
 
 ## Login & Authentication
 
@@ -232,7 +235,7 @@ If the root path is taken by another service, run with `--prefix /foo --addr :82
 
 ```bash
 ./build.sh   # builds; artifacts: gohttpserver-<version>-<os>-<arch>[.exe]
-./dist/gohttpserver-1.4.0-windows-x64.exe -r ./testdata --addr 0.0.0.0:8000 --login
+./dist/gohttpserver-1.5.0-windows-x64.exe -r ./testdata --addr 0.0.0.0:8000 --login
 ```
 
 ## Support & License

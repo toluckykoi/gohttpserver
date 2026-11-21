@@ -72,6 +72,7 @@ type Configure struct {
 	NoIndex           bool          `yaml:"no-index"`
 	CORSOrigins       []string      `yaml:"cors-origins"`
 	AllowPublicOauth2 bool          `yaml:"allow-public-oauth2"`
+	PublicMetrics     bool          `yaml:"public-metrics"`
 	Login             bool          `yaml:"login"`
 	DB                string        `yaml:"db"`
 	SessionTTL        time.Duration `yaml:"session-ttl"`
@@ -174,6 +175,7 @@ func parseFlags() error {
 	kingpin.Flag("no-index", "disable indexing").BoolVar(&gcfg.NoIndex)
 	kingpin.Flag("cors-origins", "allowed CORS origins (repeatable; empty = no CORS, '*' = allow all [insecure])").StringsVar(&gcfg.CORSOrigins)
 	kingpin.Flag("allow-public-oauth2", "allow oauth2-proxy mode on a non-loopback bind (insecure: only use behind a proxy that strips X-Auth-Request-*)").BoolVar(&gcfg.AllowPublicOauth2)
+	kingpin.Flag("public-metrics", "expose /metrics and /-/sysinfo to non-loopback clients (default: localhost only). Required when Prometheus scrapes from another host.").BoolVar(&gcfg.PublicMetrics)
 	kingpin.Flag("login", "enable username/password login gate (independent of --auth-type). When enabled, upload/delete/edit are automatically enabled too. Default credentials: admin/admin.").BoolVar(&gcfg.Login)
 	kingpin.Flag("db", "path to the SQLite database file (default: ./gohttpserver.db in the working directory). Only used when --login is enabled.").StringVar(&gcfg.DB)
 	kingpin.Flag("session-ttl", "how long a logged-in session stays valid before requiring re-login (default 12h). Set to 0 for browser-session cookies (expire when the browser closes).").Default("12h").DurationVar(&gcfg.SessionTTL)
@@ -354,9 +356,11 @@ func main() {
 	mainRouter.HandleFunc("/healthz", util.HealthCheckHandler(VERSION)).Methods("GET")
 	mainRouter.HandleFunc("/-/healthz", util.HealthCheckHandler(VERSION)).Methods("GET")
 
-	// 指标路径注册在 prefix 之前，抓取端不受 --prefix 影响
-	mainRouter.HandleFunc("/metrics", util.MetricsHandler(VERSION)).Methods("GET", "HEAD")
-	mainRouter.HandleFunc("/-/metrics", util.MetricsHandler(VERSION)).Methods("GET", "HEAD")
+	// 指标路径注册在 prefix 之前，抓取端不受 --prefix 影响。
+	// SECURITY: 版本/指标默认仅 loopback 可见；远端抓取需显式 --public-metrics。
+	metricsHandler := util.RestrictToLocalhost(gcfg.PublicMetrics, util.MetricsHandler(VERSION))
+	mainRouter.Handle("/metrics", metricsHandler).Methods("GET", "HEAD")
+	mainRouter.Handle("/-/metrics", metricsHandler).Methods("GET", "HEAD")
 
 	router := mainRouter
 	if gcfg.Prefix != "" {
@@ -591,7 +595,8 @@ func main() {
 	router.PathPrefix("/-/frontend/").Handler(util.StaticAssets(
 		http.StripPrefix(gcfg.Prefix+"/-/frontend/", http.FileServer(FrontendAssets))))
 
-	router.HandleFunc("/-/sysinfo", func(w http.ResponseWriter, r *http.Request) {
+	// SECURITY: sysinfo 暴露版本号，默认仅 loopback 可见，与 /metrics 同策略。
+	router.Handle("/-/sysinfo", util.RestrictToLocalhost(gcfg.PublicMetrics, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		data, _ := json.Marshal(map[string]any{
 			"version": VERSION,
 			// 前端据此禁用更新入口：未注册时 POST 会落到文件上传 handler 返回难懂的 400
@@ -600,7 +605,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
 		w.Write(data)
-	})
+	})))
 	// SECURITY(H1): 精确 prefix 路径用包装完认证的最终 hdlr 注册（此时 hdlr 已含
 	// LoginAuthMiddleware / BasicAuth 等），杜绝无闸门的裸 handler 被抢先匹配。
 	if gcfg.Prefix != "" {

@@ -211,7 +211,6 @@ const emit = defineEmits<{
 
 const fileApi = useFileApi()
 const { t } = useI18n()
-const sourceRef = ref<HTMLElement>()
 
 const loading = ref(false)
 const errorMessage = ref('')

@@ -140,8 +140,6 @@ const emit = defineEmits<{
 const { t } = useI18n()
 
 const fileApi = useFileApi()
-const viewportRef = ref<HTMLElement>()
-const stageRef = ref<HTMLElement>()
 
 const scale = ref(1)
 const rotation = ref(0)
