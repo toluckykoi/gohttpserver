@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"testing"
 )
@@ -83,7 +84,12 @@ func TestRound8AliasFunctions(t *testing.T) {
 			t.Errorf("accessConfAliases(%q) = false, want true", v)
 		}
 	}
-	stateVariants := []string{"gohttpserver.db", "GOHTTP~1.DB", "gohttpserver.db.", "gohttpserver.db ", "gohttpserver.db::$DATA", "frp-encryption.key::$DATA", "FRP-EN~1.KEY"}
+	// 短名变体仅 Windows 拦截（util.MatchesSensitiveShortName 平台门禁；非 Windows
+	// 上 GOHTTP~1.DB/FRP-EN~1.KEY 是合法文件名），长名/归一化变体全平台拦截。
+	stateVariants := []string{"gohttpserver.db", "gohttpserver.db.", "gohttpserver.db ", "gohttpserver.db::$DATA", "frp-encryption.key::$DATA"}
+	if runtime.GOOS == "windows" {
+		stateVariants = append(stateVariants, "GOHTTP~1.DB", "FRP-EN~1.KEY")
+	}
 	for _, v := range stateVariants {
 		if !isServerStateAlias(v) {
 			t.Errorf("isServerStateAlias(%q) = false, want true", v)

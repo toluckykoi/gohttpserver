@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -122,8 +123,10 @@ func TestInfoBlocksAccessConfAndStateFiles(t *testing.T) {
 }
 
 // H3: GET 不得下载服务器私有文件（含大小写与 8.3 短名形式）。
+// 短名判定（util.MatchesSensitiveShortName）仅 Windows 启用（非 Windows 上
+// "FRP-EN~1.KEY" 是合法文件名），故长名条目全平台断言，短名条目仅 Windows。
 func TestRawBlocksServerStateFiles(t *testing.T) {
-	if !isServerStateName("GOHTTP~1.DB") {
+	if runtime.GOOS == "windows" && !isServerStateName("GOHTTP~1.DB") {
 		t.Fatalf("precondition: isServerStateName must recognize 8.3 short name GOHTTP~1.DB")
 	}
 	root := t.TempDir()
@@ -131,7 +134,11 @@ func TestRawBlocksServerStateFiles(t *testing.T) {
 	os.WriteFile(filepath.Join(root, "frp-encryption.key"), []byte("0123456789abcdef0123456789abcdef"), 0o600)
 	s := NewHTTPStaticServer(root, true)
 
-	for _, url := range []string{"/gohttpserver.db", "/GOHTTPSERVER.DB", "/frp-encryption.key", "/FRP-EN~1.KEY"} {
+	urls := []string{"/gohttpserver.db", "/GOHTTPSERVER.DB", "/frp-encryption.key"}
+	if runtime.GOOS == "windows" {
+		urls = append(urls, "/FRP-EN~1.KEY")
+	}
+	for _, url := range urls {
 		req := httptest.NewRequest("GET", url, nil)
 		rec := httptest.NewRecorder()
 		s.ServeHTTP(rec, req)

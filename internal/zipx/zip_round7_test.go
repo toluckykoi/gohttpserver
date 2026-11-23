@@ -10,17 +10,23 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
 // H1e: 解压不得落盘服务器私有文件（含 Windows 大小写/尾点/8.3 变体）——曾可借
 // 上传 + 解压用伪造 SQLite 文件覆盖真实凭据库，重启后回退默认 admin/admin。
+// 短名条目（FRP-EN~1.KEY）仅 Windows 拦截（util.MatchesSensitiveShortName 平台门禁，
+// 非 Windows 上是合法文件名），故按平台拆分条目表。
 func TestUnzipFileRejectsServerStateVariants(t *testing.T) {
 	entries := []string{
 		"gohttpserver.db", "GOHTTPSERVER.DB", "gohttpserver.db-wal",
-		"gohttpserver.db-shm", "frp-encryption.key", "FRP-EN~1.KEY",
+		"gohttpserver.db-shm", "frp-encryption.key",
 		"gohttpserver.db.", "auth-state.json", "webdav-accounts.json",
+	}
+	if runtime.GOOS == "windows" {
+		entries = append(entries, "FRP-EN~1.KEY")
 	}
 	for _, name := range entries {
 		root := t.TempDir()

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -172,7 +173,14 @@ func TestReproMoveCaseChangeOverwriteTDestroysFile(t *testing.T) {
 
 // 场景 F：目录 MOVE（Overwrite:T）到已存在目录，目标目录里有文件被其他进程占用
 // （编辑器/杀软/正在上传），RemoveAll 部分删除后失败 → 目录被掏空一部分。
+// Windows 专属场景：占用依赖 Windows 句柄共享模型（Go 的 os.Open 不带
+// FILE_SHARE_DELETE，目标目录含打开句柄时 rename/RemoveAll 失败）。Linux 上
+// rename 与 RemoveAll 不受打开句柄影响，Overwrite:T 整体替换成功（204）是正确
+// 语义，keep1/keep2 随 src 内容替换而消失并非数据损坏。
 func TestReproMoveDirOverwritePartialDeletion(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows 专属：文件占用导致目录 rename/删除失败的语义仅存在于 Windows")
+	}
 	srv, root, basic := newReproServer(t)
 	doDAV(t, srv, "MKCOL", "/dav/src", basic, nil, nil)
 	doDAV(t, srv, "MKCOL", "/dav/dst", basic, nil, nil)
