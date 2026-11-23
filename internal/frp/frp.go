@@ -25,9 +25,11 @@ type FRPClient struct {
 	enabled    bool
 	cfg        *FRPConfig
 	running    bool
+	ctx        context.Context       // 当前运行轮次的 ctx，用于重启循环判断是否已被取代
 	cancel     context.CancelFunc
 	service    *client.Service
 	stopCh     chan struct{}
+	gen        uint64 // 运行代数，用于旧 goroutine defer 判断是否仍为当前轮次
 	db         *sql.DB
 	nameSuffix string // 进程级后缀，用于保证代理名唯一
 }
@@ -290,9 +292,12 @@ func (c *FRPClient) Start() error {
 		return fmt.Errorf("FRP config not set")
 	}
 
+	// LoginFailExit=false：首次连接失败也持续重试，避免 frps 暂时不可达时隧道永久失效。
+	loginFailExit := false
 	clientCfg := &v1.ClientCommonConfig{
-		ServerAddr: c.cfg.ServerAddr,
-		ServerPort: c.cfg.ServerPort,
+		ServerAddr:    c.cfg.ServerAddr,
+		ServerPort:    c.cfg.ServerPort,
+		LoginFailExit: &loginFailExit,
 		Auth: v1.AuthClientConfig{
 			Method: "token",
 			Token:  c.cfg.AuthToken,
@@ -314,8 +319,11 @@ func (c *FRPClient) Start() error {
 	proxyCfg.LocalPort = c.cfg.LocalPort
 
 	ctx, cancel := context.WithCancel(context.Background())
+	c.ctx = ctx
 	c.cancel = cancel
 	c.stopCh = make(chan struct{})
+	// 运行代数：每次 Start 递增，用于让旧 goroutine 的 defer 不误清新一轮的运行状态。
+	c.gen++
 
 	configSource := source.NewConfigSource()
 	if err := configSource.ReplaceAll([]v1.ProxyConfigurer{proxyCfg}, nil); err != nil {
@@ -338,11 +346,19 @@ func (c *FRPClient) Start() error {
 	c.service = svc
 
 	// stopCh 先存局部变量再进 goroutine，避免与 Stop() 竞争（直接关 c.stopCh 不安全）。
+	// myCtx/gen 用于检测本次运行是否已被 Stop 或新一轮 Start 取代。
+	myCtx := ctx
+	myGen := c.gen
 	stopCh := c.stopCh
 	go func() {
 		defer func() {
 			c.mu.Lock()
-			c.running = false
+			// 仅当仍是本轮运行时才清理状态；若已被 Stop 或新一轮 Start 取代，
+			// 不得覆盖新状态的 running/stopCh，否则会泄漏新 service 且状态错乱。
+			if c.gen == myGen {
+				c.running = false
+				c.stopCh = nil
+			}
 			c.mu.Unlock()
 			if stopCh != nil {
 				close(stopCh)
@@ -359,11 +375,61 @@ func (c *FRPClient) Start() error {
 		if err := svc.Run(ctx); err != nil {
 			log.Printf("FRP client error: %v", err)
 		}
+
+		// Run 退出后（含登录失败退出）自动重启，失败则退避重试，直到 Stop 被调用。
+		for {
+			select {
+			case <-myCtx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
+
+			c.mu.Lock()
+			// 已被 Stop、禁用，或本轮运行已被新一轮 Start 取代，则本 goroutine 直接退出。
+			if !c.enabled || c.ctx != myCtx || c.gen != myGen {
+				c.mu.Unlock()
+				return
+			}
+			c.mu.Unlock()
+
+			log.Printf("FRP client exited unexpectedly, restarting in 5s...")
+			if err := c.restart(); err != nil {
+				log.Printf("FRP client restart failed: %v", err)
+				continue
+			}
+			return // restart 成功后由新的 goroutine 接管，本 goroutine 退出
+		}
 	}()
 
 	c.running = true
 	log.Println("FRP client started")
 	return nil
+}
+
+// restart 在 Run 退出后重新启动客户端；成功返回 nil。
+// 调用方 goroutine 不持有锁。
+func (c *FRPClient) restart() error {
+	c.mu.Lock()
+	if !c.running {
+		c.mu.Unlock()
+		return nil // 已被 Stop，无需重启
+	}
+
+	// 清理旧资源并置 running=false，让随后的 Start 能真正重建 service。
+	if c.cancel != nil {
+		c.cancel()
+		c.cancel = nil
+	}
+	c.ctx = nil
+	if c.service != nil {
+		c.service.Close()
+		c.service = nil
+	}
+	c.running = false
+	c.mu.Unlock()
+
+	// Start 内部会重新加锁，必须在锁外调用以避免死锁。
+	return c.Start()
 }
 
 // stopLocked 停止 FRP 客户端；调用方必须持有锁。
@@ -407,7 +473,7 @@ func (c *FRPClient) Stop() {
 
 	c.running = false
 
-	// 释放锁前先取出 stopCh。
+	// 释放锁前先取出 stopCh，并关闭，唤醒重启等待循环。
 	stopCh := c.stopCh
 	c.stopCh = nil
 	c.mu.Unlock()
